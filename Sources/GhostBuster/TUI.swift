@@ -3,9 +3,14 @@ import Foundation
 
 // MARK: - ncurses helpers (macros that don't bridge to Swift)
 
-private func COLOR_PAIR(_ n: Int32) -> Int32 { n << 8 }
-private let ATTR_BOLD  = Int32(1 << 21)  // ATTR_BOLD
-private let ATTR_DIM   = Int32(1 << 20)  // A_DIM
+private let NCURSES_ATTR_SHIFT: Int32 = 8
+private func NCURSES_BITS(_ mask: Int32, _ shift: Int32) -> Int32 {
+    mask << (shift + NCURSES_ATTR_SHIFT)
+}
+private func COLOR_PAIR(_ n: Int32) -> Int32 { NCURSES_BITS(n, 0) }
+private let ATTR_REVERSE = NCURSES_BITS(1, 10)  // A_REVERSE
+private let ATTR_DIM     = NCURSES_BITS(1, 12)  // A_DIM
+private let ATTR_BOLD    = NCURSES_BITS(1, 13)  // A_BOLD
 
 // MARK: - Color scheme
 
@@ -117,6 +122,7 @@ final class TUI: EventSink {
     private var headerText: String = ""
     private var timer: DispatchSourceTimer?
     private var stopped = false
+    private var paused = false
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -210,6 +216,12 @@ final class TUI: EventSink {
         netStats?.stop()
         sniSniffer?.stop()
         endwin()
+    }
+
+    func togglePause() {
+        paused = !paused
+        drawFooter(maxY: getmaxy(stdscr), maxX: getmaxx(stdscr))
+        refresh()
     }
 
     // MARK: - Data updates (called from ES callback thread)
@@ -322,6 +334,22 @@ final class TUI: EventSink {
                     conn.alive = nc.alive
                     row.connections[key] = conn
                 }
+                // Prune: keep alive connections + up to 3 most recent dead ones
+                let dead = row.connections.filter { !$0.value.alive }
+                if dead.count > 3 {
+                    let toRemove = dead.sorted { $0.value.txBytes < $1.value.txBytes }
+                        .prefix(dead.count - 3)
+                    for (key, _) in toRemove {
+                        row.connections.removeValue(forKey: key)
+                    }
+                }
+                // Prune: keep only the 20 most recently written files
+                if row.files.count > 20 {
+                    let sorted = row.files.sorted { $0.value.lastWrite < $1.value.lastWrite }
+                    for (path, _) in sorted.prefix(row.files.count - 20) {
+                        row.files.removeValue(forKey: path)
+                    }
+                }
             }
             lock.unlock()
         }
@@ -418,6 +446,7 @@ final class TUI: EventSink {
     // MARK: - Rendering
 
     private func render() {
+        guard !paused else { return }
         pollRunningProcesses()
 
         lock.lock()
@@ -484,12 +513,34 @@ final class TUI: EventSink {
             y += 1
         }
 
-        // Footer
-        attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
-        mvaddstr(maxY - 1, 0, truncate("q: quit", to: Int(maxX)))
-        attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+        drawFooter(maxY: maxY, maxX: maxX)
 
         refresh()
+    }
+
+    private func drawFooter(maxY: Int32, maxX: Int32) {
+        let width = Int(maxX)
+        let label: String
+        if paused {
+            label = "PAUSED"
+        } else {
+            label = "q: quit  space: pause"
+        }
+
+        let text: String
+        if paused {
+            let leftPadding = max(0, (width - label.count) / 2)
+            text = String(repeating: " ", count: leftPadding) + label
+        } else {
+            text = label
+        }
+        let padded = String(text.prefix(width))
+            + String(repeating: " ", count: max(0, width - text.count))
+
+        let attr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_REVERSE | ATTR_BOLD
+        attron(attr)
+        mvaddstr(maxY - 1, 0, padded)
+        attroff(attr)
     }
 
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool) -> Int32 {

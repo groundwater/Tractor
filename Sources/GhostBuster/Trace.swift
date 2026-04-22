@@ -5,6 +5,7 @@ import Foundation
 /// Globals for signal-safe cleanup
 private var activeTUI: TUI?
 private var activeESClient: ESClient?
+private var activeInputSource: DispatchSourceTimer?
 
 struct Trace: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -89,6 +90,7 @@ struct Trace: ParsableCommand {
         activeESClient = esClient
 
         signal(SIGINT) { _ in
+            activeInputSource?.cancel()
             activeTUI?.stop()
             activeESClient?.stop()
             Foundation.exit(0)
@@ -110,13 +112,21 @@ struct Trace: ParsableCommand {
             let quitSource = DispatchSource.makeTimerSource(queue: .main)
             quitSource.schedule(deadline: .now(), repeating: .milliseconds(100))
             quitSource.setEventHandler {
-                let ch = wgetch(stdscr)
-                if ch == Int32(Character("q").asciiValue!) {
-                    t.stop()
-                    esClient.stop()
-                    Foundation.exit(0)
+                while true {
+                    let ch = wgetch(stdscr)
+                    guard ch != -1 else { break }
+
+                    if ch == 32 {
+                        t.togglePause()
+                    } else if ch == 113 {
+                        activeInputSource?.cancel()
+                        t.stop()
+                        esClient.stop()
+                        Foundation.exit(0)
+                    }
                 }
             }
+            activeInputSource = quitSource
             quitSource.resume()
         }
 

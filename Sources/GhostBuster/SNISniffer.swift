@@ -36,14 +36,28 @@ final class SNISniffer {
     private func captureLoop() {
         var errbuf = [CChar](repeating: 0, count: Int(PCAP_ERRBUF_SIZE))
 
-        // Find default interface
+        // Find first non-loopback interface
         var devs: UnsafeMutablePointer<pcap_if_t>?
-        guard pcap_findalldevs(&devs, &errbuf) == 0, let firstDev = devs else { return }
-        let device = String(cString: firstDev.pointee.name)
-        pcap_freealldevs(devs)
+        guard pcap_findalldevs(&devs, &errbuf) == 0, devs != nil else { return }
+        defer { pcap_freealldevs(devs) }
+        var device = "en0"  // fallback
+        var dev = devs
+        while let d = dev {
+            let name = String(cString: d.pointee.name)
+            let flags = d.pointee.flags
+            // Skip loopback, pick first UP interface
+            if flags & UInt32(PCAP_IF_LOOPBACK) == 0 && flags & UInt32(PCAP_IF_UP) != 0 {
+                device = name
+                break
+            }
+            dev = d.pointee.next
+        }
 
-        // Open for capture — snap enough bytes for TLS ClientHello (usually within first 600 bytes)
-        guard let handle = pcap_open_live(device, 1500, 0, 100, &errbuf) else { return }
+        // Open for capture
+        guard let handle = pcap_open_live(device, 1500, 0, 100, &errbuf) else {
+            fputs("SNISniffer: failed to open \(device): \(String(cString: errbuf))\n", stderr)
+            return
+        }
         pcapHandle = handle
 
         // BPF filter: TCP to port 443, capture only SYN and first data packets
