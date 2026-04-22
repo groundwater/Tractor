@@ -96,13 +96,13 @@ final class ProcessRow {
     var isStopped: Bool = false
     var disclosed: Bool = false
 
-    /// Which inline panel is open (only one at a time)
-    enum PanelMode { case none, info, sample, wait }
-    var panelMode: PanelMode = .none
-    var infoDisclosed: Bool { panelMode == .info }
+    /// Independent panel disclosures — all can be open simultaneously
+    var infoDisclosed: Bool = false
+    var sampleDisclosed: Bool = false
+    var waitDisclosed: Bool = false
 
     /// Sample/wait results stored per-process
-    var sampleTree: [SampleNode] = []  // top-level threads
+    var sampleTree: [SampleNode] = []
     var waitResults: [String] = []
     var isSampling: Bool = false
     var processDisclosed: Bool = false
@@ -193,7 +193,9 @@ private enum DisplayRow: Equatable {
     case separator(pid_t)               // horizontal rule between info and children
     case infoBorderTop(pid_t, Int)      // pid, depth — top of info box
     case infoBorderBottom(pid_t, Int)   // pid, depth — bottom of info box
+    case sampleHeader(pid_t)            // "Sample" box header
     case sampleNode(pid_t, [Int])       // pid, path (indices into tree)
+    case waitHeader(pid_t)              // "Wait" box header
     case waitLine(pid_t, Int)           // pid, result index
 }
 
@@ -386,65 +388,25 @@ final class TUI: EventSink {
         forceRender()
     }
 
-    /// Toggle a panel for the current process. If inside a panel, jump to process first.
-    private func togglePanel(_ mode: ProcessRow.PanelMode) {
+    func toggleInfo() {
         guard let pid = pidForRow(selectedIndex) else { return }
-
-        // If not on a process row, jump to the process row
-        if let dr = displayRows[safe: selectedIndex], case .process = dr {
-            // already on process row
-        } else {
-            jumpToProcessRow(pid)
-        }
-
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        if row.panelMode == mode {
-            row.panelMode = .none
-        } else {
-            row.panelMode = mode
-            // Load info lazily
-            if mode == .info && !row.infoLoaded {
-                lock.unlock()
-                let (path, _, _) = getProcessInfo(pid)
-                let args = getProcessArgs(pid)
-                let envVars = getProcessEnv(pid)
-                lock.lock()
-                row.fullPath = path
-                row.argvArray = args
-                row.envVars = envVars
-                row.infoLoaded = true
-            }
+        row.infoDisclosed = !row.infoDisclosed
+        if row.infoDisclosed && !row.infoLoaded {
+            lock.unlock()
+            let (path, _, _) = getProcessInfo(pid)
+            let args = getProcessArgs(pid)
+            let envVars = getProcessEnv(pid)
+            lock.lock()
+            row.fullPath = path
+            row.argvArray = args
+            row.envVars = envVars
+            row.infoLoaded = true
         }
         lock.unlock()
-
-        // For sample/wait, kick off background work if opening
-        if mode == .sample {
-            lock.lock()
-            let isOpen = rows[pid]?.panelMode == .sample
-            lock.unlock()
-            if isOpen { runSampleAsync(pid) }
-        } else if mode == .wait {
-            lock.lock()
-            let isOpen = rows[pid]?.panelMode == .wait
-            lock.unlock()
-            if isOpen { runWaitAsync(pid) }
-        }
-
         forceRender()
     }
-
-    private func jumpToProcessRow(_ pid: pid_t) {
-        for (i, r) in displayRows.enumerated() {
-            if case .process(let p, _) = r, p == pid {
-                selectedIndex = i
-                selectedIndices.removeAll()
-                break
-            }
-        }
-    }
-
-    func toggleInfo() { togglePanel(.info) }
 
     private func runSampleAsync(_ pid: pid_t) {
         lock.lock()
@@ -506,7 +468,17 @@ final class TUI: EventSink {
         forceRender()
     }
 
-    func sampleProcess() { togglePanel(.sample) }
+    func sampleProcess() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        row.sampleDisclosed = !row.sampleDisclosed
+        lock.unlock()
+        if row.sampleDisclosed && row.sampleTree.isEmpty {
+            runSampleAsync(pid)
+        }
+        forceRender()
+    }
 
     private func runSample(_ pid: pid_t) -> [SampleNode] {
         let pipe = Pipe()
@@ -675,11 +647,17 @@ final class TUI: EventSink {
         return roots
     }
 
-    var isSampleModalOpen: Bool { false }
-    var isWaitModalOpen: Bool { false }
-    func closeSampleModal() {}
-    func closeWaitModal() {}
-    func diagnoseWait() { togglePanel(.wait) }
+    func diagnoseWait() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        row.waitDisclosed = !row.waitDisclosed
+        lock.unlock()
+        if row.waitDisclosed && row.waitResults.isEmpty {
+            runWaitAsync(pid)
+        }
+        forceRender()
+    }
 
     private func runWaitDiagnosis(_ pid: pid_t) -> [String] {
         let pipe = Pipe()
@@ -894,14 +872,16 @@ final class TUI: EventSink {
     private func setDisclosure(_ row: DisplayRow, open: Bool) {
         switch row {
         case .process(let pid, _):       rows[pid]?.disclosed = open
-        case .processHeader(let pid): rows[pid]?.processDisclosed = open
+        case .processHeader(let pid): rows[pid]?.infoDisclosed = open
         case .argsHeader(let pid):    rows[pid]?.argsDisclosed = open
         case .envHeader(let pid):     rows[pid]?.envDisclosed = open
         case .resourcesHeader(let pid): rows[pid]?.resourcesDisclosed = open
         case .filesHeader(let pid):   rows[pid]?.filesDisclosed = open
         case .netHeader(let pid):     rows[pid]?.netDisclosed = open
+        case .sampleHeader(let pid): rows[pid]?.sampleDisclosed = open
         case .sampleNode(let pid, let path):
             sampleNodeAt(pid, path: path)?.disclosed = open
+        case .waitHeader(let pid): rows[pid]?.waitDisclosed = open
         default: break
         }
     }
@@ -910,14 +890,16 @@ final class TUI: EventSink {
     private func isDisclosed(_ row: DisplayRow) -> Bool {
         switch row {
         case .process(let pid, _):       return rows[pid]?.disclosed ?? false
-        case .processHeader(let pid): return rows[pid]?.processDisclosed ?? false
+        case .processHeader(let pid): return rows[pid]?.infoDisclosed ?? false
         case .argsHeader(let pid):    return rows[pid]?.argsDisclosed ?? false
         case .envHeader(let pid):     return rows[pid]?.envDisclosed ?? false
         case .resourcesHeader(let pid): return rows[pid]?.resourcesDisclosed ?? false
         case .filesHeader(let pid):   return rows[pid]?.filesDisclosed ?? false
         case .netHeader(let pid):     return rows[pid]?.netDisclosed ?? false
+        case .sampleHeader(let pid): return rows[pid]?.sampleDisclosed ?? false
         case .sampleNode(let pid, let path):
             return sampleNodeAt(pid, path: path)?.disclosed ?? false
+        case .waitHeader(let pid): return rows[pid]?.waitDisclosed ?? false
         default: return false
         }
     }
@@ -970,11 +952,15 @@ final class TUI: EventSink {
             return .process(pid, 0)
         case .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _):
             return .process(pid, 0)
-        case .sampleNode(let pid, let path):
-            if path.count <= 1 { return .process(pid, 0) }
-            return .sampleNode(pid, Array(path.dropLast()))
-        case .waitLine(let pid, _):
+        case .sampleHeader(let pid):
             return .process(pid, 0)
+        case .sampleNode(let pid, let path):
+            if path.count <= 1 { return .sampleHeader(pid) }
+            return .sampleNode(pid, Array(path.dropLast()))
+        case .waitHeader(let pid):
+            return .process(pid, 0)
+        case .waitLine(let pid, _):
+            return .waitHeader(pid)
         }
     }
 
@@ -989,7 +975,8 @@ final class TUI: EventSink {
              .netHeader(let pid), .netDetail(let pid, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
-             .sampleNode(let pid, _), .waitLine(let pid, _):
+             .sampleHeader(let pid), .sampleNode(let pid, _),
+             .waitHeader(let pid), .waitLine(let pid, _):
             return pid
         }
     }
@@ -1442,9 +1429,9 @@ final class TUI: EventSink {
                 y += 1
 
             case .processHeader(let pid):
-                let disc = rows[pid]?.processDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let disc = rows[pid]?.infoDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Process", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Process Info", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -1562,6 +1549,13 @@ final class TUI: EventSink {
                     y += 1
                 } else { lock.unlock() }
 
+            case .sampleHeader(let pid):
+                let disc = rows[pid]?.sampleDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let status = rows[pid]?.isSampling == true ? "Sampling..." : "Sample (3s)"
+                lock.unlock()
+                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) \(status)", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                y += 1
+
             case .sampleNode(let pid, let path):
                 if let node = sampleNodeAt(pid, path: path) {
                     let nodeDepth = path.count - 1
@@ -1574,6 +1568,12 @@ final class TUI: EventSink {
                     drawLine(y: y, indent: indent, content: content, color: color | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
+
+            case .waitHeader(let pid):
+                let disc = rows[pid]?.waitDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                lock.unlock()
+                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Wait Diagnosis", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                y += 1
 
             case .waitLine(let pid, let idx):
                 let line = rows[pid]?.waitResults[safe: idx] ?? ""
@@ -1650,18 +1650,22 @@ final class TUI: EventSink {
     }
 
     private func appendPanelRows(_ row: ProcessRow, depth: Int) {
-        switch row.panelMode {
-        case .none: break
-        case .info:
-            displayRows.append(.infoBorderTop(row.pid, depth))
+        // Info box
+        displayRows.append(.infoBorderTop(row.pid, depth))
+        displayRows.append(.processHeader(row.pid))
+        if row.infoDisclosed {
             appendProcessDisclosures(row)
-            displayRows.append(.infoBorderBottom(row.pid, depth))
-        case .sample:
-            displayRows.append(.infoBorderTop(row.pid, depth))
+        }
+        displayRows.append(.infoBorderBottom(row.pid, depth))
+
+        // Sample box
+        displayRows.append(.infoBorderTop(row.pid, depth))
+        displayRows.append(.sampleHeader(row.pid))
+        if row.sampleDisclosed {
             if row.isSampling {
                 displayRows.append(.processDetail(row.pid, "Sampling..."))
             } else if row.sampleTree.isEmpty {
-                displayRows.append(.processDetail(row.pid, "No samples"))
+                displayRows.append(.processDetail(row.pid, "Press s to sample"))
             } else {
                 func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
                     for (i, node) in nodes.enumerated() {
@@ -1674,22 +1678,25 @@ final class TUI: EventSink {
                 }
                 appendSampleNodes(row.sampleTree, path: [])
             }
-            displayRows.append(.infoBorderBottom(row.pid, depth))
-        case .wait:
-            displayRows.append(.infoBorderTop(row.pid, depth))
+        }
+        displayRows.append(.infoBorderBottom(row.pid, depth))
+
+        // Wait box
+        displayRows.append(.infoBorderTop(row.pid, depth))
+        displayRows.append(.waitHeader(row.pid))
+        if row.waitDisclosed {
             if row.waitResults.isEmpty {
-                displayRows.append(.processDetail(row.pid, "Diagnosing..."))
+                displayRows.append(.processDetail(row.pid, "Press w to diagnose"))
             } else {
                 for i in 0..<row.waitResults.count {
                     displayRows.append(.waitLine(row.pid, i))
                 }
             }
-            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
+        displayRows.append(.infoBorderBottom(row.pid, depth))
     }
 
     private func appendProcessDisclosures(_ row: ProcessRow) {
-        displayRows.append(.processHeader(row.pid))
         if row.processDisclosed {
             displayRows.append(.processDetail(row.pid, "Path"))
             displayRows.append(.processDetail(row.pid, "CWD"))
