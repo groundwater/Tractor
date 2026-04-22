@@ -544,6 +544,10 @@ final class TUI: EventSink {
         guard let menu = activeMenu else { return }
         let items = currentMenuItems()
         guard let item = items[safe: menuItemIndex], item.enabled, !item.isSeparator else { return }
+
+        // Flash the selected item first
+        flashMenuItem()
+
         activeMenu = nil
 
         if menu == .view {
@@ -554,9 +558,9 @@ final class TUI: EventSink {
             return
         }
 
-        // Process menu — execute via shortcut key
-        if let key = item.key {
-            executeShortcut(key)
+        // Process menu — execute action
+        if let key = item.key, let action = shortcutAction(key) {
+            action()
         }
         forceRender()
     }
@@ -621,12 +625,49 @@ final class TUI: EventSink {
 
     func executeShortcut(_ key: Int32) {
         guard let action = shortcutAction(key) else { return }
-        // Flash the parent menu header, then execute
-        if let menu = menuForShortcut(key) {
-            flashMenu(menu)
+
+        if activeMenu != nil {
+            // Menu is open — find the item, jump to it, flash, close, execute
+            let items = currentMenuItems()
+            if let idx = items.firstIndex(where: { $0.key == key }) {
+                menuItemIndex = idx
+                flashMenuItem()
+            } else {
+                // Item not in current menu — find the right menu, open it, flash
+                if let menu = menuForShortcut(key) {
+                    activeMenu = menu
+                    let newItems = currentMenuItems()
+                    if let idx = newItems.firstIndex(where: { $0.key == key }) {
+                        menuItemIndex = idx
+                        flashMenuItem()
+                    }
+                }
+            }
+            activeMenu = nil
+            action()
+        } else {
+            // Menu closed — flash the parent menu header, then execute
+            if let menu = menuForShortcut(key) {
+                flashMenu(menu)
+            }
+            action()
         }
-        activeMenu = nil
-        action()
+    }
+
+    /// Flash the currently highlighted menu item (macOS style blink)
+    private func flashMenuItem() {
+        let savedIndex = menuItemIndex
+        for _ in 0..<2 {
+            menuItemIndex = savedIndex
+            doRender()
+            refresh()
+            usleep(60_000)
+            menuItemIndex = -1  // unhighlight
+            doRender()
+            refresh()
+            usleep(60_000)
+        }
+        menuItemIndex = savedIndex
     }
 
     private let menuOrder: [MenuID] = [.file, .edit, .process, .view]
