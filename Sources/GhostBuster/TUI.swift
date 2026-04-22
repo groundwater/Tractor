@@ -2001,7 +2001,7 @@ final class TUI: EventSink {
         switch ctx {
         case .sample:  ctxEntry = ("", "S", "ample", .sample)
         case .network: ctxEntry = ("", "N", "etwork", .network)
-        case .files:   ctxEntry = ("Fi", "l", "es", .files)
+        case .files:   ctxEntry = ("File", "S", "ystem", .files)
         default:       ctxEntry = ("", "P", "rocess", .process)
         }
         let menus = [
@@ -2041,7 +2041,7 @@ final class TUI: EventSink {
         switch ctx {
         case .sample: ctxWidth = 8     // " Sample "
         case .network: ctxWidth = 10   // " Network "
-        case .files: ctxWidth = 7      // " Files "
+        case .files: ctxWidth = 12   // " FileSystem "
         default: ctxWidth = 10         // " Process "
         }
         let menuWidths: [(id: MenuID, width: Int)] = [
@@ -2283,25 +2283,22 @@ final class TUI: EventSink {
         let indentStr = String(repeating: " ", count: discIndent)
         mvaddstr(y, 0, indentStr)
 
-        // Disclosure + PID (floating, not aligned)
+        // Fill from disclosure to end of line with attr (so highlight is continuous)
         attron(attr)
-        addstr(disc)
+        let fillLen = max(0, width - discIndent)
+        addstr(String(repeating: " ", count: fillLen))
+
+        // Now overwrite with actual content at absolute positions
+        mvaddstr(y, Int32(discIndent), disc)
         addstr(String(row.pid))
 
-        // TIME at absolute column 10
-        mvaddstr(y, Int32(colTime), String(format: "%-7s", (row.runtimeString as NSString).utf8String!))
+        mvaddstr(y, Int32(colTime), row.runtimeString)
+        mvaddstr(y, Int32(colOps), String(row.fileOps))
+        mvaddstr(y, Int32(colStatus), status)
 
-        // OPS at absolute column 17
-        mvaddstr(y, Int32(colOps), String(format: "%-6s", (String(row.fileOps) as NSString).utf8String!))
-
-        // STATUS at absolute column 23
-        mvaddstr(y, Int32(colStatus), String(format: "%-6s", (status as NSString).utf8String!))
-
-        // PROCESS at absolute column 29
         let processWidth = max(5, width - colProcess)
         let truncatedProcess = truncateProcess(processLabel, to: processWidth)
-        let processPad = String(repeating: " ", count: max(0, width - colProcess - truncatedProcess.count))
-        mvaddstr(y, Int32(colProcess), truncatedProcess + processPad)
+        mvaddstr(y, Int32(colProcess), truncatedProcess)
         attroff(attr)
         return y + 1
     }
