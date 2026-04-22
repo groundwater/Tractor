@@ -1712,26 +1712,24 @@ final class TUI: EventSink {
     }
 
     private func appendProcessDisclosures(_ row: ProcessRow) {
-        if row.processDisclosed {
-            displayRows.append(.processDetail(row.pid, "Path"))
-            displayRows.append(.processDetail(row.pid, "CWD"))
-            displayRows.append(.processDetail(row.pid, "IDs"))
-            displayRows.append(.processDetail(row.pid, "Started"))
-            displayRows.append(.argsHeader(row.pid))
-            if row.argsDisclosed {
-                for i in 0..<row.argvArray.count { displayRows.append(.argDetail(row.pid, i)) }
-            }
-            displayRows.append(.envHeader(row.pid))
-            if row.envDisclosed {
-                for i in 0..<row.envVars.count { displayRows.append(.envDetail(row.pid, i)) }
-            }
-            displayRows.append(.resourcesHeader(row.pid))
-            if row.resourcesDisclosed {
-                displayRows.append(.resourceDetail(row.pid, "CPU"))
-                displayRows.append(.resourceDetail(row.pid, "Memory"))
-                displayRows.append(.resourceDetail(row.pid, "FDs"))
-                displayRows.append(.resourceDetail(row.pid, "Disk"))
-            }
+        displayRows.append(.processDetail(row.pid, "Path"))
+        displayRows.append(.processDetail(row.pid, "CWD"))
+        displayRows.append(.processDetail(row.pid, "IDs"))
+        displayRows.append(.processDetail(row.pid, "Started"))
+        displayRows.append(.argsHeader(row.pid))
+        if row.argsDisclosed {
+            for i in 0..<row.argvArray.count { displayRows.append(.argDetail(row.pid, i)) }
+        }
+        displayRows.append(.envHeader(row.pid))
+        if row.envDisclosed {
+            for i in 0..<row.envVars.count { displayRows.append(.envDetail(row.pid, i)) }
+        }
+        displayRows.append(.resourcesHeader(row.pid))
+        if row.resourcesDisclosed {
+            displayRows.append(.resourceDetail(row.pid, "CPU"))
+            displayRows.append(.resourceDetail(row.pid, "Memory"))
+            displayRows.append(.resourceDetail(row.pid, "FDs"))
+            displayRows.append(.resourceDetail(row.pid, "Disk"))
         }
         let files = row.recentWrittenFiles
         if !files.isEmpty {
@@ -1784,8 +1782,9 @@ final class TUI: EventSink {
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
         if highlight { attr |= ATTR_REVERSE }
 
+        mvaddstr(y, 0, indent)
         attron(attr)
-        mvaddstr(y, 0, indent + disc + line)
+        addstr(disc + line)
         attroff(attr)
         return y + 1
     }
