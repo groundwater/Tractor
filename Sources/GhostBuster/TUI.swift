@@ -1031,7 +1031,16 @@ final class TUI: EventSink {
     }
 
     private func jumpToParent(_ target: DisplayRow) {
-        if let idx = displayRows.firstIndex(of: target) {
+        // For process rows, match by PID regardless of depth
+        if case .process(let pid, _) = target {
+            for (i, dr) in displayRows.enumerated() {
+                if case .process(let p, _) = dr, p == pid {
+                    selectedIndex = i
+                    selectedIndices.removeAll()
+                    break
+                }
+            }
+        } else if let idx = displayRows.firstIndex(of: target) {
             selectedIndex = idx
             selectedIndices.removeAll()
         }
@@ -1181,7 +1190,18 @@ final class TUI: EventSink {
     /// Get parent display row for navigation
     private func parentRow(_ row: DisplayRow) -> DisplayRow? {
         switch row {
-        case .process: return nil
+        case .process(let pid, let depth):
+            // In tree mode, find the parent process by ppid
+            if depth > 0 {
+                lock.lock()
+                let ppid = rows[pid]?.ppid ?? 0
+                lock.unlock()
+                // Find the parent process row in displayRows
+                for dr in displayRows {
+                    if case .process(let p, _) = dr, p == ppid { return dr }
+                }
+            }
+            return nil
         case .processHeader(let pid), .filesHeader(let pid), .netHeader(let pid):
             return .process(pid, 0)
         case .argsHeader(let pid), .envHeader(let pid), .resourcesHeader(let pid):
