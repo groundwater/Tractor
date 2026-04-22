@@ -1,6 +1,16 @@
 import Darwin.ncurses
 import Foundation
 
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+private extension Array where Element: Hashable {
+    func asSet() -> Set<Element> { Set(self) }
+}
+
 // MARK: - ncurses helpers (macros that don't bridge to Swift)
 
 private let NCURSES_ATTR_SHIFT: Int32 = 8
@@ -126,6 +136,7 @@ final class TUI: EventSink {
     private var stopped = false
     private var paused = false
     private var selectedIndex = 0
+    private var selectedPids: Set<pid_t> = []
     /// Snapshot of visible process list for cursor navigation
     private var visiblePids: [pid_t] = []
 
@@ -225,30 +236,72 @@ final class TUI: EventSink {
 
     func moveUp() {
         if selectedIndex > 0 { selectedIndex -= 1 }
+        selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
         render()
     }
 
     func moveDown() {
         if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
+        selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
+        render()
+    }
+
+    func shiftMoveUp() {
+        if selectedIndex > 0 {
+            // Add current to selection before moving
+            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+            selectedIndex -= 1
+            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+        }
+        render()
+    }
+
+    func shiftMoveDown() {
+        if selectedIndex < visiblePids.count - 1 {
+            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+            selectedIndex += 1
+            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+        }
+        render()
+    }
+
+    func clearSelection() {
+        selectedPids.removeAll()
         render()
     }
 
     func disclose() {
-        guard selectedIndex < visiblePids.count else { return }
-        let pid = visiblePids[selectedIndex]
+        let pids = effectiveSelection()
         lock.lock()
-        rows[pid]?.disclosed = true
+        for pid in pids { rows[pid]?.disclosed = true }
         lock.unlock()
         render()
     }
 
     func collapse() {
-        guard selectedIndex < visiblePids.count else { return }
-        let pid = visiblePids[selectedIndex]
+        let pids = effectiveSelection()
         lock.lock()
-        rows[pid]?.disclosed = false
+        for pid in pids { rows[pid]?.disclosed = false }
         lock.unlock()
         render()
+    }
+
+    func toggleDisclose() {
+        let pids = effectiveSelection()
+        lock.lock()
+        for pid in pids {
+            if let row = rows[pid] { row.disclosed = !row.disclosed }
+        }
+        lock.unlock()
+        render()
+    }
+
+    /// Returns selected PIDs, or just the cursor PID if no multi-selection
+    private func effectiveSelection() -> Set<pid_t> {
+        if selectedPids.isEmpty, let pid = visiblePids[safe: selectedIndex] {
+            return [pid]
+        }
+        return selectedPids
     }
 
     func togglePause() {
@@ -534,30 +587,30 @@ final class TUI: EventSink {
         visiblePids = allVisible.map { $0.pid }
         // Clamp selection
         if selectedIndex >= allVisible.count { selectedIndex = max(0, allVisible.count - 1) }
-        let selectedPid = allVisible.isEmpty ? pid_t(-1) : allVisible[selectedIndex].pid
+        let cursorPid = allVisible.isEmpty ? pid_t(-1) : allVisible[selectedIndex].pid
 
         // Render running processes
         for row in running {
             guard y <= lastRow else { break }
-            let isSelected = row.pid == selectedPid
+            let isHighlighted = row.pid == cursorPid || selectedPids.contains(row.pid)
             let showSub = row.disclosed
             let subRows = showSub ? Int(lastRow - y) : 0
-            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: showSub, highlight: isSelected)
+            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: showSub, highlight: isHighlighted)
         }
 
         // Fill remaining space with exited processes + summary line
         var exitedShown = 0
         for row in exited {
             guard y <= lastRow else { break }
-            let isSelected = row.pid == selectedPid
+            let isHighlighted = row.pid == cursorPid || selectedPids.contains(row.pid)
             let showSub = row.disclosed
             if showSub {
                 // Disclosed exited process: show full sub-rows
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isSelected)
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isHighlighted)
             } else {
                 // Collapsed exited: process line + summary
                 guard y + 1 <= lastRow else { break }
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isSelected)
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
                 if y <= lastRow {
                     let summary = buildExitedSummary(row)
                     if !summary.isEmpty {

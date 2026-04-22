@@ -123,10 +123,18 @@ struct Trace: ParsableCommand {
                         t.moveUp()
                     case 258: // KEY_DOWN
                         t.moveDown()
+                    case 337: // KEY_SR (Shift+Up)
+                        t.shiftMoveUp()
+                    case 336: // KEY_SF (Shift+Down)
+                        t.shiftMoveDown()
                     case 261: // KEY_RIGHT
                         t.disclose()
                     case 260: // KEY_LEFT
                         t.collapse()
+                    case 10, 13: // Enter/Return
+                        t.toggleDisclose()
+                    case 27: // ESC
+                        t.clearSelection()
                     case 113: // 'q'
                         activeInputSource?.cancel()
                         t.stop()
