@@ -255,6 +255,15 @@ final class TUI: EventSink {
     private enum ViewMode { case flat, tree }
     private var viewMode: ViewMode = .tree
 
+    private struct ColumnLayout {
+        let pid: Int
+        let time: Int
+        let ops: Int
+        let status: Int
+        let process: Int
+    }
+
+    private static let baseColumnLayout = ColumnLayout(pid: 2, time: 10, ops: 17, status: 23, process: 29)
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -1687,18 +1696,6 @@ final class TUI: EventSink {
         // Menu bar on line 1
         renderMenuBar(y: 1, width: Int(maxX))
 
-        // Column header on line 3 (line 2 is blank spacer)
-        var headerLine = [Character](repeating: " ", count: Int(maxX))
-        let headers: [(col: Int, text: String)] = [
-            (2, "PID"), (10, "TIME"), (17, "OPS"), (23, "STATUS"), (29, "PROCESS"),
-        ]
-        for h in headers {
-            for (i, c) in h.text.enumerated() where h.col + i < Int(maxX) { headerLine[h.col + i] = c }
-        }
-        attron(ATTR_BOLD)
-        mvaddstr(3, 0, String(headerLine))
-        attroff(ATTR_BOLD)
-
         let availableLines = Int(maxY) - 5
         let width = Int(maxX)
 
@@ -1756,6 +1753,9 @@ final class TUI: EventSink {
         // Clamp
         if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
 
+        let columnLayout = columnLayout(for: displayRows)
+        renderColumnHeader(y: 3, width: width, layout: columnLayout)
+
         // Adjust scroll offset to keep selectedIndex visible
         if selectedIndex >= 0 {
             if selectedIndex < scrollOffset { scrollOffset = selectedIndex }
@@ -1768,7 +1768,6 @@ final class TUI: EventSink {
         let lastRow = maxY - 2
 
 
-        var currentDepth = 0  // tracks the depth of the current process for sub-row indentation
         var currentBoxIndent = -1  // -1 = not in a box, >= 0 = left edge column
 
         for i in scrollOffset..<displayRows.count {
@@ -1776,15 +1775,15 @@ final class TUI: EventSink {
             let isHighlighted = i == selectedIndex || selectedIndices.contains(i)
             let dr = displayRows[i]
             // Base indent for sub-rows: process depth * 2 chars
-            let depthIndent = currentDepth * 2
+            let rowDepth = depthForDisplayRow(at: i)
+            let depthIndent = rowDepth * 2
 
             lock.lock()
             switch dr {
             case .process(let pid, let depth):
-                currentDepth = depth
                 if let row = rows[pid] {
                     lock.unlock()
-                    y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted, depth: depth)
+                    y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted, depth: depth, layout: columnLayout)
                 } else { lock.unlock() }
 
             case .infoBorderTop(_, let depth):
@@ -1825,9 +1824,8 @@ final class TUI: EventSink {
             case .processHeader(let pid):
                 let disc = rows[pid]?.infoDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                // Disclosure triangle outside the box border
-                mvaddstr(y, Int32(depthIndent), disc)
                 drawLine(y: y, indent: depthIndent + 4, content: "Process Info", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -1901,8 +1899,8 @@ final class TUI: EventSink {
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    mvaddstr(y, Int32(depthIndent), disc)
                     drawLine(y: y, indent: depthIndent + 4, content: "Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1930,8 +1928,8 @@ final class TUI: EventSink {
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    mvaddstr(y, Int32(depthIndent), disc)
                     drawLine(y: y, indent: depthIndent + 4, content: "Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1951,8 +1949,8 @@ final class TUI: EventSink {
                 let disc = rows[pid]?.sampleDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 let status = rows[pid]?.isSampling == true ? "Sampling..." : "Sample (3s)"
                 lock.unlock()
-                mvaddstr(y, Int32(depthIndent), disc)
                 drawLine(y: y, indent: depthIndent + 4, content: status, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
                 y += 1
 
             case .sampleNode(let pid, let path):
@@ -1971,8 +1969,8 @@ final class TUI: EventSink {
             case .waitHeader(let pid):
                 let disc = rows[pid]?.waitDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                mvaddstr(y, Int32(depthIndent), disc)
                 drawLine(y: y, indent: depthIndent + 4, content: "Wait Diagnosis", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
                 y += 1
 
             case .waitLine(let pid, let idx):
@@ -1992,6 +1990,109 @@ final class TUI: EventSink {
         }
 
         refresh()
+    }
+
+    private func columnLayout(for displayRows: [DisplayRow]) -> ColumnLayout {
+        var maxDepth = 0
+        var maxPidWidth = 3
+
+        for row in displayRows {
+            if case .process(let pid, let depth) = row {
+                maxDepth = max(maxDepth, depth)
+                maxPidWidth = max(maxPidWidth, String(pid).count)
+            }
+        }
+
+        // Process rows render as: depth indent + disclosure + PID. Shift the
+        // fixed columns right when the deepest visible process needs more room.
+        let requiredTimeColumn = maxDepth * 2 + 2 + maxPidWidth + 1
+        let shift = max(0, requiredTimeColumn - Self.baseColumnLayout.time)
+
+        return ColumnLayout(
+            pid: Self.baseColumnLayout.pid,
+            time: Self.baseColumnLayout.time + shift,
+            ops: Self.baseColumnLayout.ops + shift,
+            status: Self.baseColumnLayout.status + shift,
+            process: Self.baseColumnLayout.process + shift
+        )
+    }
+
+    private func renderColumnHeader(y: Int32, width: Int, layout: ColumnLayout) {
+        var headerLine = [Character](repeating: " ", count: width)
+        let headers: [(col: Int, text: String)] = [
+            (layout.pid, "PID"),
+            (layout.time, "TIME"),
+            (layout.ops, "OPS"),
+            (layout.status, "STATUS"),
+            (layout.process, "PROCESS"),
+        ]
+        for h in headers {
+            for (i, c) in h.text.enumerated() where h.col + i < width {
+                headerLine[h.col + i] = c
+            }
+        }
+        attron(ATTR_BOLD)
+        mvaddstr(y, 0, String(headerLine))
+        attroff(ATTR_BOLD)
+    }
+
+    private func pid(for row: DisplayRow) -> pid_t? {
+        switch row {
+        case .process(let pid, _),
+             .processHeader(let pid),
+             .processDetail(let pid, _),
+             .argsHeader(let pid),
+             .argDetail(let pid, _),
+             .envHeader(let pid),
+             .envDetail(let pid, _),
+             .resourcesHeader(let pid),
+             .resourceDetail(let pid, _),
+             .filesHeader(let pid),
+             .fileDetail(let pid, _),
+             .netHeader(let pid),
+             .netDetail(let pid, _),
+             .separator(let pid),
+             .infoBorderTop(let pid, _),
+             .infoBorderBottom(let pid, _),
+             .sampleHeader(let pid),
+             .sampleNode(let pid, _),
+             .waitHeader(let pid),
+             .waitLine(let pid, _):
+            return pid
+        }
+    }
+
+    private func depthForDisplayRow(at index: Int) -> Int {
+        guard let row = displayRows[safe: index] else { return 0 }
+
+        switch row {
+        case .process(_, let depth),
+             .infoBorderTop(_, let depth),
+             .infoBorderBottom(_, let depth):
+            return depth
+        default:
+            break
+        }
+
+        guard let rowPid = pid(for: row), index > 0 else { return 0 }
+        for previousIndex in stride(from: index - 1, through: 0, by: -1) {
+            switch displayRows[previousIndex] {
+            case .process(let pid, let depth) where pid == rowPid:
+                return depth
+            case .infoBorderTop(let pid, let depth) where pid == rowPid:
+                return depth
+            default:
+                continue
+            }
+        }
+        return 0
+    }
+
+    private func drawDisclosureTriangle(_ triangle: String, y: Int32, indent: Int, color: Int32, highlighted: Bool) {
+        let attr = highlighted ? (color | ATTR_REVERSE) : color
+        attron(attr)
+        mvaddstr(y, Int32(indent), triangle)
+        attroff(attr)
     }
 
 
@@ -2254,7 +2355,7 @@ final class TUI: EventSink {
     }
 
 
-    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false, depth: Int = 0) -> Int32 {
+    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false, depth: Int = 0, layout: ColumnLayout = TUI.baseColumnLayout) -> Int32 {
         let status: String
         let color: TUIColor
         if row.isStopped {
@@ -2276,12 +2377,6 @@ final class TUI: EventSink {
         let processLabel = row.argv.isEmpty ? row.name : row.argv
         let width = Int(maxX)
 
-        // Fixed column positions
-        let colTime = 10
-        let colOps = 17
-        let colStatus = 23
-        let colProcess = 29
-
         var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
@@ -2300,13 +2395,13 @@ final class TUI: EventSink {
         mvaddstr(y, Int32(discIndent), disc)
         addstr(String(row.pid))
 
-        mvaddstr(y, Int32(colTime), row.runtimeString)
-        mvaddstr(y, Int32(colOps), String(row.fileOps))
-        mvaddstr(y, Int32(colStatus), status)
+        mvaddstr(y, Int32(layout.time), row.runtimeString)
+        mvaddstr(y, Int32(layout.ops), String(row.fileOps))
+        mvaddstr(y, Int32(layout.status), status)
 
-        let processWidth = max(5, width - colProcess)
+        let processWidth = max(5, width - layout.process)
         let truncatedProcess = truncateProcess(processLabel, to: processWidth)
-        mvaddstr(y, Int32(colProcess), truncatedProcess)
+        mvaddstr(y, Int32(layout.process), truncatedProcess)
         attroff(attr)
         return y + 1
     }
