@@ -2104,59 +2104,55 @@ final class TUI: EventSink {
             color = .exited
         }
 
-        let indent = String(repeating: "  ", count: depth)
-        let disc = row.disclosed ? "\u{25BC}" : "\u{25B6}"
+        let discIndent = depth * 2
+        let disc = row.disclosed ? "\u{25BC} " : "\u{25B6} "
         let processLabel = row.argv.isEmpty ? row.name : row.argv
-
-        // Fixed column positions (matching header: "  PID     TIME   OPS   STATUS PROCESS")
-        // Col 0-1: indent area / disclosure for depth 0
-        // Col 2: PID start
-        let colPid: Int32 = 2
-        let colTime: Int32 = 10
-        let colOps: Int32 = 17
-        let colStatus: Int32 = 23
-        let colProcess: Int32 = 29
         let width = Int(maxX)
+
+        // Fixed column positions
+        let colTime = 10
+        let colOps = 17
+        let colStatus = 23
+        let colProcess = 29
 
         var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
         if highlight { attr |= ATTR_REVERSE }
 
-        // Build the full line with columns at fixed positions
-        var line = [Character](repeating: " ", count: width)
+        // Render indent (no highlight)
+        let indentStr = String(repeating: " ", count: discIndent)
+        mvaddstr(y, 0, indentStr)
 
-        // Disclosure triangle in indent area
-        let discPos = max(0, depth * 2)
-        for (i, c) in disc.enumerated() where discPos + i < width { line[discPos + i] = c }
-
-        // PID at col 2
-        let pidStr = String(row.pid)
-        for (i, c) in pidStr.enumerated() where Int(colPid) + i < width { line[Int(colPid) + i] = c }
-
-        // TIME at col 10
-        for (i, c) in row.runtimeString.enumerated() where Int(colTime) + i < width { line[Int(colTime) + i] = c }
-
-        // OPS at col 17
-        let opsStr = String(row.fileOps)
-        for (i, c) in opsStr.enumerated() where Int(colOps) + i < width { line[Int(colOps) + i] = c }
-
-        // STATUS at col 23
-        for (i, c) in status.enumerated() where Int(colStatus) + i < width { line[Int(colStatus) + i] = c }
-
-        // PROCESS at col 29 + depth indent
-        let processStart = Int(colProcess) + depth * 2
-        let processWidth = max(5, width - processStart)
-        let truncatedProcess = truncateProcess(processLabel, to: processWidth)
-        for (i, c) in truncatedProcess.enumerated() where processStart + i < width { line[processStart + i] = c }
-
-        let lineStr = String(line)
-
-        // Render: indent without highlight, rest with highlight
-        let highlightStart = discPos
-        mvaddstr(y, 0, String(lineStr.prefix(highlightStart)))
+        // Render disclosure + PID + fixed columns (with highlight)
         attron(attr)
-        addstr(String(lineStr.dropFirst(highlightStart)))
+
+        // Disclosure triangle
+        addstr(disc)
+
+        // PID — fills from current position to colTime
+        let pidStr = String(row.pid)
+        let pidPad = max(0, colTime - discIndent - 2 - pidStr.count)
+        addstr(pidStr + String(repeating: " ", count: pidPad))
+
+        // TIME
+        let timePad = max(0, colOps - colTime - row.runtimeString.count)
+        addstr(row.runtimeString + String(repeating: " ", count: timePad))
+
+        // OPS
+        let opsStr = String(row.fileOps)
+        let opsPad = max(0, colStatus - colOps - opsStr.count)
+        addstr(opsStr + String(repeating: " ", count: opsPad))
+
+        // STATUS
+        let statusPad = max(0, colProcess - colStatus - status.count)
+        addstr(status + String(repeating: " ", count: statusPad))
+
+        // PROCESS
+        let processWidth = max(5, width - colProcess)
+        let truncatedProcess = truncateProcess(processLabel, to: processWidth)
+        let processPad = max(0, width - colProcess - truncatedProcess.count)
+        addstr(truncatedProcess + String(repeating: " ", count: processPad))
         attroff(attr)
         return y + 1
     }
