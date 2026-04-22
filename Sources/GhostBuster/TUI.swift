@@ -591,13 +591,19 @@ final class TUI: EventSink {
         // inverted stack: leaf first, then callers going up.
         // A "leaf" in the sample tree is the last entry before depth decreases.
 
-        // Collect: for each named function, aggregate sample counts
-        // and track which named callers lead to it
-        var leafCounts: [String: Int] = [:]
-        var callerChains: [String: [[String]]] = [:]  // leaf -> [[caller1, caller2, ...]]
+        // Build bottom-up tree from entries.
+        // Walk top-down, maintaining a named stack. At each named leaf,
+        // record the inverted stack (leaf → callers).
+        // Use max(count) per unique leaf name to avoid double-counting.
 
-        // Build stacks: walk entries maintaining a stack of named frames
+        struct LeafInfo {
+            var count: Int
+            var callerChains: [[String]]
+        }
+        var leafMap: [String: LeafInfo] = [:]
         var namedStack: [(name: String, depth: Int)] = []
+
+        let boringNames: Set<String> = ["start", "thread_start", "_pthread_start", "_pthread_wqthread", "start_wqthread"]
 
         for i in 0..<entries.count {
             let entry = entries[i]
@@ -607,61 +613,55 @@ final class TUI: EventSink {
                 namedStack.removeLast()
             }
 
-            if entry.isNamed {
+            guard entry.isNamed else { continue }
+            guard !boringNames.contains(entry.name) else {
                 namedStack.append((entry.name, entry.depth))
-
-                // Check if this is a leaf: next entry has <= depth, or is last
-                let isLeaf: Bool
-                if i + 1 >= entries.count {
-                    isLeaf = true
-                } else {
-                    isLeaf = entries[i + 1].depth <= entry.depth
-                }
-
-                if isLeaf && entry.name != "start" && entry.name != "thread_start" && entry.name != "_pthread_start" {
-                    leafCounts[entry.name, default: 0] += entry.count
-                    // Record caller chain (reversed stack minus the leaf itself)
-                    let callers = namedStack.dropLast().reversed().map { $0.name }
-                    callerChains[entry.name, default: []].append(Array(callers))
-                }
+                continue
             }
+
+            namedStack.append((entry.name, entry.depth))
+
+            // Is this a leaf? (next entry has <= depth or doesn't exist)
+            let nextDepth = (i + 1 < entries.count) ? entries[i + 1].depth : 0
+            guard nextDepth <= entry.depth else { continue }
+
+            // Record leaf with max count and caller chain
+            let callers = Array(namedStack.dropLast().reversed().map { $0.name })
+            var info = leafMap[entry.name, default: LeafInfo(count: 0, callerChains: [])]
+            info.count = max(info.count, entry.count)
+            info.callerChains.append(callers)
+            leafMap[entry.name] = info
         }
 
-        // Build bottom-up tree: leaf functions as roots, unique callers as children
+        // Build tree: leaf functions as roots, callers as children
         var roots: [SampleNode] = []
-        let sorted = leafCounts.sorted { $0.value > $1.value }
+        let sorted = leafMap.sorted { $0.value.count > $1.value.count }
 
-        for (name, count) in sorted {
-            let pct = count * 100 / totalSamples
+        for (name, info) in sorted {
+            let pct = info.count * 100 / totalSamples
             guard pct >= 5 else { continue }
 
-            let node = SampleNode(name: name, count: count, pct: pct)
+            let node = SampleNode(name: name, count: info.count, pct: pct)
 
-            // Build caller tree from chains
-            let chains = callerChains[name] ?? []
-            if !chains.isEmpty {
-                // Merge caller chains into a tree
-                func mergeChains(_ chains: [[String]], depth: Int) -> [SampleNode] {
-                    guard depth < 5 else { return [] }  // limit depth
-                    // Group by first caller
-                    var groups: [String: [[String]]] = [:]
-                    for chain in chains where !chain.isEmpty {
-                        let first = chain[0]
-                        groups[first, default: []].append(Array(chain.dropFirst()))
-                    }
-                    return groups.map { callerName, subChains in
-                        let callerNode = SampleNode(name: callerName, count: count, pct: pct)
-                        callerNode.children = mergeChains(subChains, depth: depth + 1)
-                        return callerNode
-                    }.sorted { $0.name < $1.name }
+            // Merge caller chains into a tree (callers shown as children)
+            func mergeCallers(_ chains: [[String]], depth: Int) -> [SampleNode] {
+                guard depth < 5 else { return [] }
+                var groups: [String: [[String]]] = [:]
+                for chain in chains where !chain.isEmpty {
+                    groups[chain[0], default: []].append(Array(chain.dropFirst()))
                 }
-                node.children = mergeChains(chains, depth: 0)
+                return groups.map { callerName, subChains in
+                    let n = SampleNode(name: callerName, count: info.count, pct: pct)
+                    n.children = mergeCallers(subChains, depth: depth + 1)
+                    return n
+                }.sorted { $0.name < $1.name }
             }
+            node.children = mergeCallers(info.callerChains, depth: 0)
 
             roots.append(node)
         }
 
-        // Auto-disclose top items
+        // Auto-disclose hot items
         for node in roots where node.pct >= 20 {
             node.disclosed = true
         }
@@ -1563,8 +1563,7 @@ final class TUI: EventSink {
                     let content = "\(disc)\(node.pct)% \(node.name) (\(node.count))"
                     lock.unlock()
                     let indent = depthIndent + 4 + nodeDepth * 2
-                    let color = node.pct >= 50 ? COLOR_PAIR(TUIColor.failed.rawValue) :
-                                node.pct >= 20 ? COLOR_PAIR(TUIColor.subNet.rawValue) :
+                    let color = node.pct >= 20 ? COLOR_PAIR(TUIColor.subNet.rawValue) :
                                 COLOR_PAIR(TUIColor.header.rawValue)
                     drawLine(y: y, indent: indent, content: content, color: color | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
