@@ -230,6 +230,12 @@ final class TUI: EventSink {
         nodelay(stdscr, true)
         keypad(stdscr, true)
 
+        // Ensure shifted arrow sequences are registered
+        define_key("\u{1b}[1;2D", 393)  // KEY_SLEFT
+        define_key("\u{1b}[1;2C", 402)  // KEY_SRIGHT
+        define_key("\u{1b}[1;2A", 337)  // KEY_SR (Shift+Up)
+        define_key("\u{1b}[1;2B", 336)  // KEY_SF (Shift+Down)
+
         guard has_colors() else {
             endwin()
             fputs("ERROR: Terminal does not support colors\n", stderr)

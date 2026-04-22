@@ -140,16 +140,16 @@ struct Trace: ParsableCommand {
                         t.disclose()
                     case 260: // KEY_LEFT
                         t.collapse()
-                    case 43: // '+' - disclose all descendants
+                    case 402: // KEY_SRIGHT (Shift+Right)
                         t.discloseAll()
-                    case 45: // '-' - collapse all descendants
+                    case 393: // KEY_SLEFT (Shift+Left)
                         t.collapseAll()
+                    case 337: // KEY_SR (Shift+Up) - from terminals with proper sequences
+                        t.shiftMoveUp()
+                    case 336: // KEY_SF (Shift+Down)
+                        t.shiftMoveDown()
                     case 10, 13: // Enter/Return
-                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
-                            t.discloseAll()
-                        } else {
-                            t.toggleDisclose()
-                        }
+                        t.toggleDisclose()
                     case 27: // ESC
                         t.clearSelection()
                     case 113: // 'q'
