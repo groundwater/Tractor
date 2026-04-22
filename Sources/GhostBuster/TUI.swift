@@ -34,6 +34,25 @@ enum TUIColor: Int32 {
     case subFile = 7
 }
 
+// MARK: - Sample tree node
+
+final class SampleNode {
+    let name: String          // function name or "Thread_N"
+    let count: Int            // sample count
+    let pct: Int              // percentage of total
+    var children: [SampleNode] = []
+    var disclosed: Bool = false
+
+    /// Has children worth showing (>= threshold)
+    var hasChildren: Bool { !children.isEmpty }
+
+    init(name: String, count: Int, pct: Int) {
+        self.name = name
+        self.count = count
+        self.pct = pct
+    }
+}
+
 // MARK: - Per-file tracking
 
 struct FileStats {
@@ -83,7 +102,7 @@ final class ProcessRow {
     var infoDisclosed: Bool { panelMode == .info }
 
     /// Sample/wait results stored per-process
-    var sampleResults: [String] = []
+    var sampleTree: [SampleNode] = []  // top-level threads
     var waitResults: [String] = []
     var isSampling: Bool = false
     var processDisclosed: Bool = false
@@ -174,7 +193,7 @@ private enum DisplayRow: Equatable {
     case separator(pid_t)               // horizontal rule between info and children
     case infoBorderTop(pid_t, Int)      // pid, depth — top of info box
     case infoBorderBottom(pid_t, Int)   // pid, depth — bottom of info box
-    case sampleLine(pid_t, Int)         // pid, result index
+    case sampleNode(pid_t, [Int])       // pid, path (indices into tree)
     case waitLine(pid_t, Int)           // pid, result index
 }
 
@@ -432,10 +451,10 @@ final class TUI: EventSink {
         rows[pid]?.isSampling = true
         lock.unlock()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let results = self?.runSample(pid) ?? []
+            let tree = self?.runSample(pid) ?? []
             DispatchQueue.main.async {
                 self?.lock.lock()
-                self?.rows[pid]?.sampleResults = results
+                self?.rows[pid]?.sampleTree = tree
                 self?.rows[pid]?.isSampling = false
                 self?.lock.unlock()
                 self?.forceRender()
@@ -489,7 +508,7 @@ final class TUI: EventSink {
 
     func sampleProcess() { togglePanel(.sample) }
 
-    private func runSample(_ pid: pid_t) -> [String] {
+    private func runSample(_ pid: pid_t) -> [SampleNode] {
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
@@ -497,50 +516,118 @@ final class TUI: EventSink {
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
-        do { try proc.run() } catch { return ["sample failed: \(error)"] }
+        do { try proc.run() } catch { return [SampleNode(name: "sample failed", count: 0, pct: 0)] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
 
         guard let output = String(data: data, encoding: .utf8) else { return [] }
+        return parseSampleTree(output)
+    }
 
-        // Parse call graph: find named leaf functions (deepest frames with symbols)
-        // Lines look like: "+   611 kevent64  (in libsystem_kernel.dylib) + 8  [0x...]"
-        // or: "+     685 ???  (in claude)  load address ..."
-        var funcCounts: [String: Int] = [:]
+    private func parseSampleTree(_ output: String) -> [SampleNode] {
+        // Parse the call graph into a tree
+        // Each line: indentation + count + function name
+        // Depth determined by column position of the count number
+
+        struct RawEntry {
+            let depth: Int
+            let count: Int
+            let name: String
+        }
+
+        var entries: [RawEntry] = []
+        var inCallGraph = false
         var totalSamples = 0
 
-        for line in output.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "+!|: "))
-            guard !trimmed.isEmpty else { continue }
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            let raw = String(line)
+            if raw.contains("Call graph:") { inCallGraph = true; continue }
+            if raw.contains("Total number") { inCallGraph = false; continue }
+            guard inCallGraph else { continue }
 
-            // Extract sample count and function name
-            if let spaceIdx = trimmed.firstIndex(of: " ") {
-                let numStr = String(trimmed[..<spaceIdx])
-                if let count = Int(numStr), count > 0 {
-                    let rest = String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
-                    // Skip ??? (stripped symbols)
-                    if rest.hasPrefix("???") { continue }
-                    // Extract function name before " (in "
-                    let funcName: String
-                    if let inIdx = rest.range(of: "  (in ") {
-                        funcName = String(rest[..<inIdx.lowerBound])
-                    } else {
-                        funcName = rest
-                    }
-                    if !funcName.isEmpty && funcName != "start" && funcName != "thread_start" && funcName != "_pthread_start" {
-                        if totalSamples == 0 { totalSamples = count }
-                        funcCounts[funcName, default: 0] = max(funcCounts[funcName, default: 0], count)
-                    }
+            // Find the position and value of the count number
+            // Strip tree chars (+!|:) but track position
+            let chars = Array(raw)
+            var numStart = -1
+            var numEnd = -1
+            for (i, c) in chars.enumerated() {
+                if c.isNumber {
+                    if numStart == -1 { numStart = i }
+                    numEnd = i
+                } else if numStart != -1 {
+                    break
+                }
+            }
+            guard numStart >= 0, numEnd >= numStart else { continue }
+            let countStr = String(chars[numStart...numEnd])
+            guard let count = Int(countStr), count > 0 else { continue }
+            if totalSamples == 0 { totalSamples = count }
+
+            // Extract function name after the count
+            let restStart = numEnd + 1
+            guard restStart < chars.count else { continue }
+            let rest = String(chars[restStart...]).trimmingCharacters(in: .whitespaces)
+
+            // Parse function name
+            let funcName: String
+            if rest.hasPrefix("???") {
+                continue  // Skip stripped symbols
+            } else if let inIdx = rest.range(of: "  (in ") {
+                funcName = String(rest[..<inIdx.lowerBound])
+            } else if rest.hasPrefix("Thread_") {
+                // Thread header — extract thread name
+                funcName = String(rest.prefix(while: { !$0.isWhitespace }))
+            } else {
+                funcName = rest
+            }
+
+            guard !funcName.isEmpty else { continue }
+
+            // Depth = column position of the number (roughly)
+            let depth = numStart / 2
+
+            entries.append(RawEntry(depth: depth, count: count, name: funcName))
+        }
+
+        guard totalSamples > 0 else { return [] }
+
+        // Build tree from flat depth-sorted entries
+        // Use a stack to track parent chain
+        var root: [SampleNode] = []
+        var stack: [(node: SampleNode, depth: Int)] = []
+
+        for entry in entries {
+            let pct = entry.count * 100 / totalSamples
+            // Only include nodes >= 5% to keep tree manageable
+            guard pct >= 5 else { continue }
+
+            let node = SampleNode(name: entry.name, count: entry.count, pct: pct)
+
+            // Pop stack to find parent at lower depth
+            while !stack.isEmpty && stack.last!.depth >= entry.depth {
+                stack.removeLast()
+            }
+
+            if let parent = stack.last {
+                parent.node.children.append(node)
+            } else {
+                root.append(node)
+            }
+            stack.append((node, entry.depth))
+        }
+
+        // Auto-disclose nodes with high percentage
+        func autoDisclose(_ nodes: [SampleNode], depth: Int) {
+            for node in nodes where depth < 3 {
+                if node.hasChildren && node.pct >= 20 {
+                    node.disclosed = true
+                    autoDisclose(node.children, depth: depth + 1)
                 }
             }
         }
+        autoDisclose(root, depth: 0)
 
-        guard totalSamples > 0 else { return ["No samples collected"] }
-        let sorted = funcCounts.sorted { $0.value > $1.value }
-        return sorted.prefix(10).map { name, count in
-            let pct = count * 100 / totalSamples
-            return "\(pct)% \(name)"
-        }
+        return root
     }
 
     var isSampleModalOpen: Bool { false }
@@ -745,6 +832,19 @@ final class TUI: EventSink {
         return selectedIndices.sorted().compactMap { displayRows[safe: $0] }
     }
 
+    /// Navigate sample tree by path
+    private func sampleNodeAt(_ pid: pid_t, path: [Int]) -> SampleNode? {
+        guard let row = rows[pid] else { return nil }
+        var nodes = row.sampleTree
+        var node: SampleNode? = nil
+        for idx in path {
+            guard idx < nodes.count else { return nil }
+            node = nodes[idx]
+            nodes = node!.children
+        }
+        return node
+    }
+
     /// Set a single disclosure flag for a row
     private func setDisclosure(_ row: DisplayRow, open: Bool) {
         switch row {
@@ -755,6 +855,8 @@ final class TUI: EventSink {
         case .resourcesHeader(let pid): rows[pid]?.resourcesDisclosed = open
         case .filesHeader(let pid):   rows[pid]?.filesDisclosed = open
         case .netHeader(let pid):     rows[pid]?.netDisclosed = open
+        case .sampleNode(let pid, let path):
+            sampleNodeAt(pid, path: path)?.disclosed = open
         default: break
         }
     }
@@ -769,6 +871,8 @@ final class TUI: EventSink {
         case .resourcesHeader(let pid): return rows[pid]?.resourcesDisclosed ?? false
         case .filesHeader(let pid):   return rows[pid]?.filesDisclosed ?? false
         case .netHeader(let pid):     return rows[pid]?.netDisclosed ?? false
+        case .sampleNode(let pid, let path):
+            return sampleNodeAt(pid, path: path)?.disclosed ?? false
         default: return false
         }
     }
@@ -821,7 +925,10 @@ final class TUI: EventSink {
             return .process(pid, 0)
         case .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _):
             return .process(pid, 0)
-        case .sampleLine(let pid, _), .waitLine(let pid, _):
+        case .sampleNode(let pid, let path):
+            if path.count <= 1 { return .process(pid, 0) }
+            return .sampleNode(pid, Array(path.dropLast()))
+        case .waitLine(let pid, _):
             return .process(pid, 0)
         }
     }
@@ -837,7 +944,7 @@ final class TUI: EventSink {
              .netHeader(let pid), .netDetail(let pid, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
-             .sampleLine(let pid, _), .waitLine(let pid, _):
+             .sampleNode(let pid, _), .waitLine(let pid, _):
             return pid
         }
     }
@@ -1410,11 +1517,19 @@ final class TUI: EventSink {
                     y += 1
                 } else { lock.unlock() }
 
-            case .sampleLine(let pid, let idx):
-                let line = rows[pid]?.sampleResults[safe: idx] ?? ""
-                lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                y += 1
+            case .sampleNode(let pid, let path):
+                if let node = sampleNodeAt(pid, path: path) {
+                    let nodeDepth = path.count - 1
+                    let disc = node.hasChildren ? (node.disclosed ? "\u{25BC} " : "\u{25B6} ") : "  "
+                    let content = "\(disc)\(node.pct)% \(node.name) (\(node.count))"
+                    lock.unlock()
+                    let indent = depthIndent + 4 + nodeDepth * 2
+                    let color = node.pct >= 50 ? COLOR_PAIR(TUIColor.failed.rawValue) :
+                                node.pct >= 20 ? COLOR_PAIR(TUIColor.subNet.rawValue) :
+                                COLOR_PAIR(TUIColor.header.rawValue)
+                    drawLine(y: y, indent: indent, content: content, color: color | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
 
             case .waitLine(let pid, let idx):
                 let line = rows[pid]?.waitResults[safe: idx] ?? ""
@@ -1501,12 +1616,19 @@ final class TUI: EventSink {
             displayRows.append(.infoBorderTop(row.pid, depth))
             if row.isSampling {
                 displayRows.append(.processDetail(row.pid, "Sampling..."))
-            } else if row.sampleResults.isEmpty {
+            } else if row.sampleTree.isEmpty {
                 displayRows.append(.processDetail(row.pid, "No samples"))
             } else {
-                for i in 0..<row.sampleResults.count {
-                    displayRows.append(.sampleLine(row.pid, i))
+                func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
+                    for (i, node) in nodes.enumerated() {
+                        let nodePath = path + [i]
+                        displayRows.append(.sampleNode(row.pid, nodePath))
+                        if node.disclosed {
+                            appendSampleNodes(node.children, path: nodePath)
+                        }
+                    }
                 }
+                appendSampleNodes(row.sampleTree, path: [])
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
         case .wait:
