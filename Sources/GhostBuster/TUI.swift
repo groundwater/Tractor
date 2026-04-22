@@ -581,18 +581,42 @@ final class TUI: EventSink {
         ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
     }
 
-    func executeShortcut(_ key: Int32) {
-        activeMenu = nil  // close menu on shortcut
+    /// Map of shortcut key → (menu, action)
+    private func shortcutAction(_ key: Int32) -> (() -> Void)? {
         switch key {
-        case 105: flashMenu(.process); toggleInfo()          // i
-        case 100: flashMenu(.process); toggleFiles()         // d
-        case 110: flashMenu(.process); toggleNetwork()       // n
-        case 115: flashMenu(.process); sampleProcess()       // s
-        case 119: flashMenu(.process); diagnoseWait()        // w
-        case 107: flashMenu(.process); enterKillMode()       // k
-        case 122: flashMenu(.process); togglePauseProcess()  // z
-        default: break
+        case 105: return toggleInfo          // i
+        case 100: return toggleFiles         // d
+        case 110: return toggleNetwork       // n
+        case 115: return sampleProcess       // s
+        case 119: return diagnoseWait        // w
+        case 107: return enterKillMode       // k
+        case 122: return togglePauseProcess  // z
+        default: return nil
         }
+    }
+
+    /// Find which menu owns a shortcut key
+    private func menuForShortcut(_ key: Int32) -> MenuID? {
+        for menuId in menuOrder {
+            let items: [MenuItem]
+            switch menuId {
+            case .file: items = fileMenuItems()
+            case .edit: items = editMenuItems()
+            case .process: items = processMenuItems()
+            case .view: items = viewMenuItems()
+            }
+            if items.contains(where: { $0.key == key }) { return menuId }
+        }
+        return nil
+    }
+
+    func executeShortcut(_ key: Int32) {
+        activeMenu = nil
+        guard let action = shortcutAction(key) else { return }
+        if let menu = menuForShortcut(key) {
+            flashMenu(menu)
+        }
+        action()
     }
 
     private let menuOrder: [MenuID] = [.file, .edit, .process, .view]
