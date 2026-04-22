@@ -172,7 +172,8 @@ final class TUI: EventSink {
     private var stopped = false
     private var paused = false
     private var selectedIndex = -1
-    private var selectedPids: Set<pid_t> = []
+    /// Selected display row indices for multi-select
+    private var selectedIndices: Set<Int> = []
     /// Flat list of all displayable rows for cursor navigation
     private var displayRows: [DisplayRow] = []
     /// Scroll offset — index of first visible row
@@ -275,37 +276,39 @@ final class TUI: EventSink {
     func moveUp() {
         if selectedIndex < 0 { selectedIndex = displayRows.count - 1 }
         else if selectedIndex > 0 { selectedIndex -= 1 }
-        selectedPids.removeAll()
+        selectedIndices.removeAll()
         render()
     }
 
     func moveDown() {
         if selectedIndex < 0 { selectedIndex = 0 }
         else if selectedIndex < displayRows.count - 1 { selectedIndex += 1 }
-        selectedPids.removeAll()
+        selectedIndices.removeAll()
         render()
     }
 
     func shiftMoveUp() {
+        if selectedIndex < 0 { selectedIndex = displayRows.count - 1 }
+        selectedIndices.insert(selectedIndex)
         if selectedIndex > 0 {
-            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
             selectedIndex -= 1
-            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
+            selectedIndices.insert(selectedIndex)
         }
         render()
     }
 
     func shiftMoveDown() {
+        if selectedIndex < 0 { selectedIndex = 0 }
+        selectedIndices.insert(selectedIndex)
         if selectedIndex < displayRows.count - 1 {
-            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
             selectedIndex += 1
-            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
+            selectedIndices.insert(selectedIndex)
         }
         render()
     }
 
     func clearSelection() {
-        selectedPids.removeAll()
+        selectedIndices.removeAll()
         selectedIndex = -1
         let wasPaused = paused
         paused = false
@@ -324,7 +327,7 @@ final class TUI: EventSink {
 
     func collapse() {
         // For collapse with multi-select, collapse all. For single, use Finder behavior.
-        if !selectedPids.isEmpty {
+        if !selectedIndices.isEmpty {
             lock.lock()
             for dr in effectiveDisplayRows() {
                 setDisclosure(dr, open: false)
@@ -350,7 +353,7 @@ final class TUI: EventSink {
     private func jumpToParent(_ target: DisplayRow) {
         if let idx = displayRows.firstIndex(of: target) {
             selectedIndex = idx
-            selectedPids.removeAll()
+            selectedIndices.removeAll()
         }
         render()
     }
@@ -415,16 +418,11 @@ final class TUI: EventSink {
 
     /// Returns display rows for all highlighted items, or just the cursor if no multi-selection
     private func effectiveDisplayRows() -> [DisplayRow] {
-        if selectedPids.isEmpty {
+        if selectedIndices.isEmpty {
             if let dr = displayRows[safe: selectedIndex] { return [dr] }
             return []
         }
-        // Find all process-level display rows for selected PIDs
-        return displayRows.enumerated().compactMap { (i, dr) in
-            guard let pid = pidForRow(i), selectedPids.contains(pid) else { return nil }
-            if case .process = dr { return dr }
-            return nil
-        }
+        return selectedIndices.sorted().compactMap { displayRows[safe: $0] }
     }
 
     /// Set a single disclosure flag for a row
@@ -830,8 +828,9 @@ final class TUI: EventSink {
         let availableLines = Int(maxY) - 5
         let width = Int(maxX)
 
-        // Save current selection identity before rebuilding
+        // Save current selection identities before rebuilding
         let savedRow = displayRows[safe: selectedIndex]
+        let savedSelected = selectedIndices.compactMap { displayRows[safe: $0] }
 
         // Build flat display row list
         let allVisible = running + exited
@@ -888,6 +887,8 @@ final class TUI: EventSink {
         if let saved = savedRow, let idx = displayRows.firstIndex(of: saved) {
             selectedIndex = idx
         }
+        // Restore multi-selection by identity
+        selectedIndices = Set(savedSelected.compactMap { displayRows.firstIndex(of: $0) })
         // Clamp
         if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
 
@@ -904,14 +905,13 @@ final class TUI: EventSink {
 
         for i in scrollOffset..<displayRows.count {
             guard y <= lastRow else { break }
-            let isCursor = i == selectedIndex
+            let isHighlighted = i == selectedIndex || selectedIndices.contains(i)
             let dr = displayRows[i]
 
             lock.lock()
             switch dr {
             case .process(let pid):
                 if let row = rows[pid] {
-                    let isHighlighted = isCursor || selectedPids.contains(pid)
                     lock.unlock()
                     y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
                 } else { lock.unlock() }
@@ -919,7 +919,7 @@ final class TUI: EventSink {
             case .processHeader(let pid):
                 let disc = rows[pid]?.processDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: 2, content: "\(disc) Process", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 2, content: "\(disc) Process", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -933,7 +933,7 @@ final class TUI: EventSink {
                     default:        value = key
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: 6, content: value, color: ATTR_DIM, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 6, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -941,32 +941,32 @@ final class TUI: EventSink {
                 let count = rows[pid]?.argvArray.count ?? 0
                 let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: 4, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 4, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .argDetail(let pid, let idx):
                 let arg = rows[pid]?.argvArray[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: 8, content: arg, color: ATTR_DIM, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 8, content: arg, color: ATTR_DIM, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .envHeader(let pid):
                 let count = rows[pid]?.envVars.count ?? 0
                 let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: 4, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 4, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: 8, content: env, color: ATTR_DIM, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 8, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .resourcesHeader(let pid):
                 let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: 4, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                drawLine(y: y, indent: 4, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                 y += 1
 
             case .resourceDetail(let pid, let key):
@@ -983,7 +983,7 @@ final class TUI: EventSink {
                     default: value = key
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: 8, content: value, color: ATTR_DIM, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 8, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -993,7 +993,7 @@ final class TUI: EventSink {
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: 2, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 2, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1010,7 +1010,7 @@ final class TUI: EventSink {
                     let statsStr = parts.joined(separator: " ")
                     let relPath = relativePath(path, cwd: row.cwd)
                     let shortPath = shortenPath(relPath, maxLen: width - 8 - statsStr.count)
-                    drawLine(y: y, indent: 6, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 6, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1021,7 +1021,7 @@ final class TUI: EventSink {
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: 2, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 2, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1033,7 +1033,7 @@ final class TUI: EventSink {
                         line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
                     }
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
-                    drawLine(y: y, indent: 6, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isCursor, width: width)
+                    drawLine(y: y, indent: 6, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width)
                     y += 1
                 } else { lock.unlock() }
             }
@@ -1067,7 +1067,7 @@ final class TUI: EventSink {
         if paused {
             attr = ATTR_REVERSE | ATTR_BOLD
         } else {
-            attr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD
+            attr = COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
         }
         attron(attr)
         mvaddstr(maxY - 1, 0, padded)
