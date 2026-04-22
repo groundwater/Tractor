@@ -769,7 +769,7 @@ final class TUI: EventSink {
                 setDisclosure(dr, open: false)
             }
             lock.unlock()
-            render()
+            forceRender()
             return
         }
         guard let row = displayRows[safe: selectedIndex] else { return }
@@ -777,12 +777,13 @@ final class TUI: EventSink {
         if isDisclosed(row) {
             setDisclosure(row, open: false)
             lock.unlock()
-            render()
+            forceRender()
         } else if let parent = parentRow(row) {
             lock.unlock()
             jumpToParent(parent)
         } else {
             lock.unlock()
+            forceRender()
         }
     }
 
@@ -831,14 +832,14 @@ final class TUI: EventSink {
                 setDisclosure(row, open: false)
             }
             lock.unlock()
-            render()
+            forceRender()
         } else if let parent = parentRow(row) {
-            // Close parent and jump to it
             setDisclosure(parent, open: false)
             lock.unlock()
             jumpToParent(parent)
         } else {
             lock.unlock()
+            forceRender()
         }
     }
 

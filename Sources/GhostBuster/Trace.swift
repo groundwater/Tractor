@@ -139,29 +139,13 @@ struct Trace: ParsableCommand {
                     case 32:  // space
                         t.togglePause()
                     case 259: // KEY_UP
-                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
-                            t.shiftMoveUp()
-                        } else {
-                            t.moveUp()
-                        }
+                        t.moveUp()
                     case 258: // KEY_DOWN
-                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
-                            t.shiftMoveDown()
-                        } else {
-                            t.moveDown()
-                        }
+                        t.moveDown()
                     case 261: // KEY_RIGHT
                         t.disclose()
                     case 260: // KEY_LEFT
                         t.collapse()
-                    case 402: // KEY_SRIGHT (Shift+Right)
-                        t.discloseAll()
-                    case 393: // KEY_SLEFT (Shift+Left)
-                        t.collapseAll()
-                    case 337: // KEY_SR (Shift+Up)
-                        t.shiftMoveUp()
-                    case 336: // KEY_SF (Shift+Down)
-                        t.shiftMoveDown()
                     case 10, 13: // Enter - toggle disclosure
                         t.toggleDisclose()
                     case 105: // 'i' - toggle inline info
