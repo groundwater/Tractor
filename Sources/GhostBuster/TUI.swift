@@ -391,18 +391,25 @@ final class TUI: EventSink {
         forceRender()
     }
 
-    /// Ensure process is disclosed and jump cursor to it
-    private func ensureDisclosedAndJump(_ pid: pid_t) {
+    /// Ensure process is disclosed, render, and jump cursor to a target row
+    private func ensureDisclosedAndJump(_ pid: pid_t, to target: DisplayRow? = nil) {
         lock.lock()
         rows[pid]?.disclosed = true
         lock.unlock()
-        // Rebuild display rows to find the process
         forceRender()
+        // Jump to specific target, or fall back to process row
+        let searchTarget = target ?? .process(pid, 0)
         for (i, r) in displayRows.enumerated() {
-            if case .process(let p, _) = r, p == pid {
+            if r == searchTarget {
                 selectedIndex = i
                 selectedIndices.removeAll()
-                break
+                return
+            }
+            // For .process, match any depth
+            if target == nil, case .process(let p, _) = r, p == pid {
+                selectedIndex = i
+                selectedIndices.removeAll()
+                return
             }
         }
     }
@@ -414,6 +421,7 @@ final class TUI: EventSink {
         row.infoVisible = !row.infoVisible
         row.infoDisclosed = row.infoVisible
         row.disclosed = true
+        let visible = row.infoVisible
         if row.infoDisclosed && !row.infoLoaded {
             lock.unlock()
             let (path, _, _) = getProcessInfo(pid)
@@ -426,7 +434,7 @@ final class TUI: EventSink {
             row.infoLoaded = true
         }
         lock.unlock()
-        ensureDisclosedAndJump(pid)
+        ensureDisclosedAndJump(pid, to: visible ? .processHeader(pid) : nil)
     }
 
     private func runSampleAsync(_ pid: pid_t) {
@@ -500,7 +508,7 @@ final class TUI: EventSink {
         if row.sampleVisible && row.sampleTree.isEmpty {
             runSampleAsync(pid)
         }
-        ensureDisclosedAndJump(pid)
+        ensureDisclosedAndJump(pid, to: row.sampleVisible ? .sampleHeader(pid) : nil)
     }
 
     private func runSample(_ pid: pid_t) -> [SampleNode] {
@@ -681,7 +689,7 @@ final class TUI: EventSink {
         if row.waitVisible && row.waitResults.isEmpty {
             runWaitAsync(pid)
         }
-        ensureDisclosedAndJump(pid)
+        ensureDisclosedAndJump(pid, to: row.waitVisible ? .waitHeader(pid) : nil)
     }
 
     private func runWaitDiagnosis(_ pid: pid_t) -> [String] {
