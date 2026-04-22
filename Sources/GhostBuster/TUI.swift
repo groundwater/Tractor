@@ -135,10 +135,12 @@ final class TUI: EventSink {
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var paused = false
-    private var selectedIndex = 0
+    private var selectedIndex = -1
     private var selectedPids: Set<pid_t> = []
     /// Snapshot of visible process list for cursor navigation
     private var visiblePids: [pid_t] = []
+    /// Scroll offset — index of first visible process in the list
+    private var scrollOffset = 0
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -235,13 +237,15 @@ final class TUI: EventSink {
     }
 
     func moveUp() {
-        if selectedIndex > 0 { selectedIndex -= 1 }
+        if selectedIndex < 0 { selectedIndex = visiblePids.count - 1 }
+        else if selectedIndex > 0 { selectedIndex -= 1 }
         selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
         render()
     }
 
     func moveDown() {
-        if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
+        if selectedIndex < 0 { selectedIndex = 0 }
+        else if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
         selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
         render()
     }
@@ -267,6 +271,7 @@ final class TUI: EventSink {
 
     func clearSelection() {
         selectedPids.removeAll()
+        selectedIndex = -1
         render()
     }
 
@@ -578,43 +583,68 @@ final class TUI: EventSink {
         mvaddstr(3, 0, colHeader)
         attroff(ATTR_BOLD)
 
-        var y: Int32 = 4
-        let lastRow = maxY - 2  // leave room for footer
+        let availableLines = Int(maxY) - 5  // header(1) + stats(1) + blank(1) + colheader(1) + footer(1)
 
-        // Render running processes with sub-rows — fill as much screen as possible
-        // Build visible process list for cursor navigation
+        // Build visible process list
         let allVisible = running + exited
         visiblePids = allVisible.map { $0.pid }
-        // Clamp selection
-        if selectedIndex >= allVisible.count { selectedIndex = max(0, allVisible.count - 1) }
-        let cursorPid = allVisible.isEmpty ? pid_t(-1) : allVisible[selectedIndex].pid
+        // Clamp selection (-1 = no cursor)
+        if selectedIndex >= allVisible.count { selectedIndex = max(-1, allVisible.count - 1) }
+        let cursorPid: pid_t = (selectedIndex >= 0 && selectedIndex < allVisible.count)
+            ? allVisible[selectedIndex].pid : pid_t(-1)
 
-        // Render running processes
-        for row in running {
-            guard y <= lastRow else { break }
-            let isHighlighted = row.pid == cursorPid || selectedPids.contains(row.pid)
-            let showSub = row.disclosed
-            let subRows = showSub ? Int(lastRow - y) : 0
-            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: showSub, highlight: isHighlighted)
+        // Calculate line count per process
+        func linesFor(_ row: ProcessRow) -> Int {
+            if row.disclosed {
+                // 1 (main) + connections + files + overflow indicators
+                let conns = row.sortedConnections.count
+                let files = row.recentWrittenFiles.count
+                return 1 + min(conns, 20) + (conns > 20 ? 1 : 0) + min(files, 20) + (files > 20 ? 1 : 0)
+            } else if !row.isRunning {
+                // Exited collapsed: 1 (main) + 1 (summary) if has data
+                let hasSummary = !row.connections.isEmpty || !row.files.isEmpty
+                return hasSummary ? 2 : 1
+            }
+            return 1
         }
 
-        // Fill remaining space with exited processes + summary line
-        var exitedShown = 0
-        for row in exited {
+        // Adjust scroll offset to keep selectedIndex visible
+        if selectedIndex >= 0 {
+            // Scroll up if cursor is above viewport
+            if selectedIndex < scrollOffset {
+                scrollOffset = selectedIndex
+            }
+            // Scroll down if cursor would be below viewport
+            var linesUsed = 0
+            for i in scrollOffset...selectedIndex {
+                linesUsed += linesFor(allVisible[i])
+            }
+            while linesUsed > availableLines && scrollOffset < selectedIndex {
+                linesUsed -= linesFor(allVisible[scrollOffset])
+                scrollOffset += 1
+            }
+        }
+        // Clamp scroll offset
+        scrollOffset = max(0, min(scrollOffset, allVisible.count - 1))
+
+        // Render from scrollOffset
+        var y: Int32 = 4
+        let lastRow = maxY - 2
+
+        for i in scrollOffset..<allVisible.count {
             guard y <= lastRow else { break }
+            let row = allVisible[i]
             let isHighlighted = row.pid == cursorPid || selectedPids.contains(row.pid)
             let showSub = row.disclosed
+
             if showSub {
-                // Disclosed exited process: show full sub-rows
                 y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isHighlighted)
-            } else {
-                // Collapsed exited: process line + summary
-                guard y + 1 <= lastRow else { break }
+            } else if !row.isRunning {
+                // Exited collapsed: process line + summary
                 y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
                 if y <= lastRow {
                     let summary = buildExitedSummary(row)
                     if !summary.isEmpty {
-                        // Align with PROCESS column: 2(marker) + 7+1+6+1+5+1+5+1 = 29
                         let indent = String(repeating: " ", count: 29)
                         let subLine = truncate("\(indent)\(summary)", to: Int(maxX))
                         attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
@@ -623,18 +653,15 @@ final class TUI: EventSink {
                         y += 1
                     }
                 }
+            } else {
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
             }
-            exitedShown += 1
         }
 
-        // Show "+N more exited" on the last available line if needed
-        let hiddenExited = exited.count - exitedShown
-        if hiddenExited > 0, y <= lastRow {
-            let moreStr = "  +\(hiddenExited) more exited processes"
-            attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
-            mvaddstr(y, 0, truncate(moreStr, to: Int(maxX)))
-            attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
-            y += 1
+        // Show scroll indicator if content is clipped
+        let totalProcesses = allVisible.count
+        if scrollOffset > 0 || y > lastRow {
+            // Show on the stats line
         }
 
         drawFooter(maxY: maxY, maxX: maxX)
