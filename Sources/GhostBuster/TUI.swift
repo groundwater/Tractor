@@ -537,7 +537,12 @@ final class TUI: EventSink {
         let padded = String(text.prefix(width))
             + String(repeating: " ", count: max(0, width - text.count))
 
-        let attr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_REVERSE | ATTR_BOLD
+        let attr: Int32
+        if paused {
+            attr = ATTR_REVERSE | ATTR_BOLD
+        } else {
+            attr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD
+        }
         attron(attr)
         mvaddstr(maxY - 1, 0, padded)
         attroff(attr)
