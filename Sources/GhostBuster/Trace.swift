@@ -123,9 +123,9 @@ struct Trace: ParsableCommand {
                         t.moveUp()
                     case 258: // KEY_DOWN
                         t.moveDown()
-                    case 337: // KEY_SR (Shift+Up)
+                    case 400: // Shift+Up (custom define_key)
                         t.shiftMoveUp()
-                    case 336: // KEY_SF (Shift+Down)
+                    case 401: // Shift+Down (custom define_key)
                         t.shiftMoveDown()
                     case 261: // KEY_RIGHT
                         t.disclose()

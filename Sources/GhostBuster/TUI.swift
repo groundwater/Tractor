@@ -191,6 +191,10 @@ final class TUI: EventSink {
         nodelay(stdscr, true)
         keypad(stdscr, true)
 
+        // Register Shift+Up/Down escape sequences as custom key codes
+        define_key("\u{1b}[1;2A", 400)  // Shift+Up
+        define_key("\u{1b}[1;2B", 401)  // Shift+Down
+
         guard has_colors() else {
             endwin()
             fputs("ERROR: Terminal does not support colors\n", stderr)
