@@ -314,14 +314,25 @@ final class TUI: EventSink {
     }
 
     func disclose() {
-        guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        setDisclosure(row, open: true)
+        for dr in effectiveDisplayRows() {
+            setDisclosure(dr, open: true)
+        }
         lock.unlock()
         render()
     }
 
     func collapse() {
+        // For collapse with multi-select, collapse all. For single, use Finder behavior.
+        if !selectedPids.isEmpty {
+            lock.lock()
+            for dr in effectiveDisplayRows() {
+                setDisclosure(dr, open: false)
+            }
+            lock.unlock()
+            render()
+            return
+        }
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
         if isDisclosed(row) {
@@ -393,12 +404,27 @@ final class TUI: EventSink {
     }
 
     func toggleDisclose() {
-        guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        let open = !isDisclosed(row)
-        setDisclosure(row, open: open)
+        for dr in effectiveDisplayRows() {
+            let open = !isDisclosed(dr)
+            setDisclosure(dr, open: open)
+        }
         lock.unlock()
         render()
+    }
+
+    /// Returns display rows for all highlighted items, or just the cursor if no multi-selection
+    private func effectiveDisplayRows() -> [DisplayRow] {
+        if selectedPids.isEmpty {
+            if let dr = displayRows[safe: selectedIndex] { return [dr] }
+            return []
+        }
+        // Find all process-level display rows for selected PIDs
+        return displayRows.enumerated().compactMap { (i, dr) in
+            guard let pid = pidForRow(i), selectedPids.contains(pid) else { return nil }
+            if case .process = dr { return dr }
+            return nil
+        }
     }
 
     /// Set a single disclosure flag for a row

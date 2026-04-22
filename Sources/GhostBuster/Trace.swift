@@ -137,13 +137,17 @@ struct Trace: ParsableCommand {
                             t.moveDown()
                         }
                     case 261: // KEY_RIGHT
-                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                        let shiftOrAlt = CGEventSource.flagsState(.combinedSessionState)
+                            .intersection([.maskShift, .maskAlternate])
+                        if !shiftOrAlt.isEmpty {
                             t.discloseAll()
                         } else {
                             t.disclose()
                         }
                     case 260: // KEY_LEFT
-                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                        let shiftOrAlt = CGEventSource.flagsState(.combinedSessionState)
+                            .intersection([.maskShift, .maskAlternate])
+                        if !shiftOrAlt.isEmpty {
                             t.collapseAll()
                         } else {
                             t.collapse()
