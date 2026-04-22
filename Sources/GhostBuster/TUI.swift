@@ -300,8 +300,55 @@ final class TUI: EventSink {
     func collapse() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        toggleRow(row, open: false)
+        switch row {
+        case .process(let pid):
+            // If disclosed, collapse. If already collapsed, no-op.
+            if let r = rows[pid] {
+                r.disclosed = false
+                r.filesDisclosed = false
+                r.netDisclosed = false
+            }
+        case .filesHeader(let pid):
+            // If disclosed, collapse. If already collapsed, jump to process.
+            if let r = rows[pid] {
+                if r.filesDisclosed {
+                    r.filesDisclosed = false
+                } else {
+                    lock.unlock()
+                    jumpToParent(.process(pid))
+                    return
+                }
+            }
+        case .netHeader(let pid):
+            if let r = rows[pid] {
+                if r.netDisclosed {
+                    r.netDisclosed = false
+                } else {
+                    lock.unlock()
+                    jumpToParent(.process(pid))
+                    return
+                }
+            }
+        case .fileDetail(let pid, _):
+            // Jump to files header
+            lock.unlock()
+            jumpToParent(.filesHeader(pid))
+            return
+        case .netDetail(let pid, _):
+            // Jump to network header
+            lock.unlock()
+            jumpToParent(.netHeader(pid))
+            return
+        }
         lock.unlock()
+        render()
+    }
+
+    private func jumpToParent(_ target: DisplayRow) {
+        if let idx = displayRows.firstIndex(of: target) {
+            selectedIndex = idx
+            selectedPids.removeAll()
+        }
         render()
     }
 
