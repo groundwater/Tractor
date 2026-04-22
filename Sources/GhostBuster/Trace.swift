@@ -121,6 +121,16 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
+                    // Wait modal intercepts keys
+                    if t.isWaitModalOpen {
+                        switch ch {
+                        case 27, 113: t.closeWaitModal()  // esc or q
+                        case 119: t.closeWaitModal(); t.diagnoseWait() // w = refresh
+                        default: break
+                        }
+                        continue
+                    }
+
                     // Sample modal intercepts keys
                     if t.isSampleModalOpen {
                         switch ch {
@@ -182,6 +192,8 @@ struct Trace: ParsableCommand {
                         t.enterKillMode()
                     case 115: // 's' - sample process
                         t.sampleProcess()
+                    case 119: // 'w' - diagnose wait
+                        t.diagnoseWait()
                     case 63: // '?' - toggle hints
                         t.toggleHints()
                     case 27: // ESC
