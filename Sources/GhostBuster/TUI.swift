@@ -289,7 +289,8 @@ final class TUI: EventSink {
     }
 
     func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
-        let path = details["path"] ?? details["from"] ?? "?"
+        // For renames, use the destination path (that's the file that matters)
+        let path = details["to"] ?? details["path"] ?? details["from"] ?? "?"
         recordFileOp(type: type, pid: pid, path: path)
     }
 
@@ -654,13 +655,13 @@ final class TUI: EventSink {
     // MARK: - Formatting helpers
 
     private func formatLine(pid: String, runtime: String, ops: String, status: String, process: String, maxWidth: Int) -> String {
-        let line = String(format: "%-7s %-6s %-5s %-5s %s",
-                          (pid as NSString).utf8String!,
-                          (runtime as NSString).utf8String!,
-                          (ops as NSString).utf8String!,
-                          (status as NSString).utf8String!,
-                          (process as NSString).utf8String!)
-        return truncate(line, to: maxWidth)
+        let prefix = String(format: "%-7s %-6s %-5s %-5s ",
+                            (pid as NSString).utf8String!,
+                            (runtime as NSString).utf8String!,
+                            (ops as NSString).utf8String!,
+                            (status as NSString).utf8String!)
+        let processWidth = max(10, maxWidth - prefix.count)
+        return prefix + truncateProcess(process, to: processWidth)
     }
 
     private func formatBytes(_ bytes: UInt64) -> String {
@@ -675,6 +676,56 @@ final class TUI: EventSink {
         guard s.count > maxLen, maxLen > 5 else { return s }
         let half = (maxLen - 3) / 2
         return String(s.prefix(half)) + "..." + String(s.suffix(half))
+    }
+
+    /// Smart truncation for process command lines:
+    /// 1. Always show the binary name (last path component)
+    /// 2. Truncate the middle of the directory path
+    /// 3. Truncate the middle of arguments
+    private func truncateProcess(_ s: String, to maxLen: Int) -> String {
+        guard s.count > maxLen, maxLen > 10 else { return s }
+
+        // Split into argv[0] (path) and the rest (arguments)
+        let firstSpace = s.firstIndex(of: " ")
+        let path = firstSpace != nil ? String(s[s.startIndex..<firstSpace!]) : s
+        let args = firstSpace != nil ? String(s[s.index(after: firstSpace!)...]) : ""
+
+        // Get binary name from path
+        let binaryName = (path as NSString).lastPathComponent
+        let dirPath = (path as NSString).deletingLastPathComponent
+
+        // Budget: binary name is sacred, allocate remaining to dir + args
+        let binaryLen = binaryName.count
+        let separator = args.isEmpty ? "" : " "
+        let overhead = 3 + separator.count  // "..." + space
+        let available = maxLen - binaryLen - overhead
+
+        if available <= 0 {
+            // Not even room for the binary name
+            return truncate(binaryName + separator + args, to: maxLen)
+        }
+
+        if args.isEmpty {
+            // Path only — truncate directory middle, keep binary
+            if dirPath.isEmpty { return binaryName }
+            let dirBudget = maxLen - binaryLen - 4  // ".../binary"
+            if dirBudget <= 0 { return binaryName }
+            let truncDir = truncate(dirPath, to: dirBudget)
+            return truncDir + "/" + binaryName
+        }
+
+        // Have both path and args — give 1/3 to dir, 2/3 to args
+        let dirBudget = max(0, available / 3)
+        let argsBudget = available - dirBudget
+
+        var result = ""
+        if dirBudget > 3 && !dirPath.isEmpty {
+            result = truncate(dirPath, to: dirBudget) + "/"
+        }
+        result += binaryName + separator
+        result += truncate(args, to: argsBudget)
+
+        return result
     }
 
     private func shortenPath(_ path: String, maxLen: Int) -> String {

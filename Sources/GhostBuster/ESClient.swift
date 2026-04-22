@@ -110,6 +110,17 @@ final class ESClient {
                     details: ["from": src, "to": dst]
                 )
 
+            case ES_EVENT_TYPE_NOTIFY_CLOSE:
+                guard tree.contains(info.pid) else { return }
+                if message.pointee.event.close.modified {
+                    let filePath = esString(message.pointee.event.close.target.pointee.path)
+                    sink.onFileOp(
+                        type: "write", pid: info.pid, ppid: info.ppid,
+                        process: info.path, user: info.uid,
+                        details: ["path": filePath]
+                    )
+                }
+
             case ES_EVENT_TYPE_NOTIFY_EXIT:
                 if tree.contains(info.pid) {
                     sink.onExit(
@@ -149,6 +160,7 @@ final class ESClient {
             ES_EVENT_TYPE_NOTIFY_WRITE,
             ES_EVENT_TYPE_NOTIFY_UNLINK,
             ES_EVENT_TYPE_NOTIFY_RENAME,
+            ES_EVENT_TYPE_NOTIFY_CLOSE,
             ES_EVENT_TYPE_NOTIFY_EXIT,
         ]
 
