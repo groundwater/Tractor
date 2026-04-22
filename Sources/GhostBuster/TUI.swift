@@ -391,12 +391,29 @@ final class TUI: EventSink {
         forceRender()
     }
 
+    /// Ensure process is disclosed and jump cursor to it
+    private func ensureDisclosedAndJump(_ pid: pid_t) {
+        lock.lock()
+        rows[pid]?.disclosed = true
+        lock.unlock()
+        // Rebuild display rows to find the process
+        forceRender()
+        for (i, r) in displayRows.enumerated() {
+            if case .process(let p, _) = r, p == pid {
+                selectedIndex = i
+                selectedIndices.removeAll()
+                break
+            }
+        }
+    }
+
     func toggleInfo() {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
         row.infoVisible = !row.infoVisible
-        row.infoDisclosed = row.infoVisible  // auto-open when showing
+        row.infoDisclosed = row.infoVisible
+        row.disclosed = true
         if row.infoDisclosed && !row.infoLoaded {
             lock.unlock()
             let (path, _, _) = getProcessInfo(pid)
@@ -409,7 +426,7 @@ final class TUI: EventSink {
             row.infoLoaded = true
         }
         lock.unlock()
-        forceRender()
+        ensureDisclosedAndJump(pid)
     }
 
     private func runSampleAsync(_ pid: pid_t) {
@@ -478,11 +495,12 @@ final class TUI: EventSink {
         guard let row = rows[pid] else { lock.unlock(); return }
         row.sampleVisible = !row.sampleVisible
         row.sampleDisclosed = row.sampleVisible
+        row.disclosed = true
         lock.unlock()
         if row.sampleVisible && row.sampleTree.isEmpty {
             runSampleAsync(pid)
         }
-        forceRender()
+        ensureDisclosedAndJump(pid)
     }
 
     private func runSample(_ pid: pid_t) -> [SampleNode] {
@@ -658,11 +676,12 @@ final class TUI: EventSink {
         guard let row = rows[pid] else { lock.unlock(); return }
         row.waitVisible = !row.waitVisible
         row.waitDisclosed = row.waitVisible
+        row.disclosed = true
         lock.unlock()
         if row.waitVisible && row.waitResults.isEmpty {
             runWaitAsync(pid)
         }
-        forceRender()
+        ensureDisclosedAndJump(pid)
     }
 
     private func runWaitDiagnosis(_ pid: pid_t) -> [String] {
