@@ -794,10 +794,10 @@ final class TUI: EventSink {
         attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
 
         // Column header
-        let colHeader = formatLine(
+        let colHeader = "  " + formatLine(
             pid: "PID", runtime: "TIME", ops: "OPS",
             status: "STATUS", process: "PROCESS",
-            maxWidth: Int(maxX)
+            maxWidth: Int(maxX) - 2
         )
         attron(ATTR_BOLD)
         mvaddstr(3, 0, colHeader)
@@ -1099,8 +1099,7 @@ final class TUI: EventSink {
             color = .exited
         }
 
-        let hasDetail = !row.connections.isEmpty || !row.files.isEmpty
-        let disc = !hasDetail ? "  " : (row.disclosed ? "\u{25BC} " : "\u{25B6} ")
+        let disc = row.disclosed ? "\u{25BC} " : "\u{25B6} "
         let processLabel = row.argv.isEmpty ? row.name : row.argv
         let line = formatLine(
             pid: "\(row.pid)",
