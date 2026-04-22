@@ -1838,7 +1838,7 @@ final class TUI: EventSink {
 
             case .infoBorderTop(_, let depth):
                 lock.unlock()
-                let boxCol = depth * 2 + 4
+                let boxCol = depth * 2 + 3
                 currentBoxIndent = boxCol
                 let indent = String(repeating: " ", count: boxCol)
                 let boxWidth = max(0, width - boxCol - 2)
@@ -1850,7 +1850,7 @@ final class TUI: EventSink {
 
             case .infoBorderBottom(_, let depth):
                 lock.unlock()
-                let boxCol = depth * 2 + 4
+                let boxCol = depth * 2 + 3
                 let indent = String(repeating: " ", count: boxCol)
                 let boxWidth = max(0, width - boxCol - 2)
                 let line = "\(indent)\u{2514}\(String(repeating: "\u{2500}", count: boxWidth))\u{2518}"
@@ -2475,14 +2475,12 @@ final class TUI: EventSink {
         let titleStr = truncate(title, to: innerWidth - 1)
         let padded = titleStr + String(repeating: " ", count: max(0, innerWidth - 1 - titleStr.count))
 
-        // Indent (no highlight)
+        // Indent + triangle (no highlight)
         mvaddstr(y, 0, String(repeating: " ", count: triIndent))
+        addstr(disc)
 
-        // Triangle + space + │ + title + pad + │ — all highlighted
+        // │ + title + pad + │ — highlighted
         let attr = highlighted ? (color | ATTR_REVERSE) : color
-        attron(attr)
-        addstr("\(disc) ")
-        attroff(attr)
         attron(ATTR_DIM)
         addstr("\u{2502}")
         attroff(ATTR_DIM)
