@@ -777,18 +777,17 @@ final class TUI: EventSink {
         forceRender()
     }
 
-    /// Flash a menu header with macOS-style blink (synchronous, blocks briefly)
+    /// Flash a menu header — non-blocking, shows simultaneously with action
     private func flashMenu(_ menu: MenuID) {
+        menuFlash = menu
         let width = Int(getmaxx(stdscr))
-        for _ in 0..<1 {
-            menuFlash = menu
-            renderMenuBar(y: 1, width: width)
+        renderMenuBar(y: 1, width: width)
+        refresh()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.menuFlash = nil
+            let w = Int(getmaxx(stdscr))
+            self?.renderMenuBar(y: 1, width: w)
             refresh()
-            usleep(80_000)  // 80ms on
-            menuFlash = nil
-            renderMenuBar(y: 1, width: width)
-            refresh()
-            usleep(80_000)  // 80ms off
         }
     }
 
