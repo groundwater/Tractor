@@ -1999,9 +1999,9 @@ final class TUI: EventSink {
         let ctx = contextMenuID()
         let ctxEntry: (before: String, key: String, after: String, id: MenuID)
         switch ctx {
-        case .sample:  ctxEntry = ("", "S", "ample", .sample)
-        case .network: ctxEntry = ("", "N", "etwork", .network)
-        case .files:   ctxEntry = ("File", "S", "ystem", .files)
+        case .sample:  ctxEntry = ("", "", "Sample", .sample)
+        case .network: ctxEntry = ("", "", "Network", .network)
+        case .files:   ctxEntry = ("", "", "FileSystem", .files)
         default:       ctxEntry = ("", "P", "rocess", .process)
         }
         let menus = [
@@ -2039,9 +2039,9 @@ final class TUI: EventSink {
         let ctx = contextMenuID()
         let ctxWidth: Int
         switch ctx {
-        case .sample: ctxWidth = 8     // " Sample "
-        case .network: ctxWidth = 10   // " Network "
-        case .files: ctxWidth = 12   // " FileSystem "
+        case .sample: ctxWidth = 10   // " Sample "
+        case .network: ctxWidth = 11  // " Network "
+        case .files: ctxWidth = 14    // " FileSystem "
         default: ctxWidth = 10         // " Process "
         }
         let menuWidths: [(id: MenuID, width: Int)] = [
