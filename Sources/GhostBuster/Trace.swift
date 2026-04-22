@@ -176,22 +176,9 @@ struct Trace: ParsableCommand {
                         t.toggleContextMenu()
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
-                    case 105: // 'i'
-                        t.toggleInfo()
-                    case 100: // 'd' - show files
-                        t.toggleFiles()
-                    case 110: // 'n' - show network
-                        t.toggleNetwork()
-                    case 122: // 'z'
-                        t.togglePauseProcess()
-                    case 107: // 'k'
-                        t.enterKillMode()
-                    case 115: // 's'
-                        t.sampleProcess()
-                    case 119: // 'w'
-                        t.diagnoseWait()
-                    case 108: // 'l' - clear exited
-                        t.clearExited()
+                    case 105, 100, 110, 122, 107, 115, 119, 108:
+                        // i, d, n, z, k, s, w, l — all routed through executeShortcut for flash
+                        t.executeShortcut(ch)
                     case 63: // '?'
                         t.toggleHints()
                     case 27: // ESC
