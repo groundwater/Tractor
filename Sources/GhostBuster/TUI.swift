@@ -111,7 +111,8 @@ final class ProcessRow {
     var waitDisclosed: Bool = false
 
     /// Sample/wait results stored per-process
-    var sampleTree: [SampleNode] = []
+    var sampleRuns: [(label: String, tree: [SampleNode], disclosed: Bool)] = []
+    var sampleTree: [SampleNode] { sampleRuns.last?.tree ?? [] }
     var waitResults: [String] = []
     var isSampling: Bool = false
     var processDisclosed: Bool = false
@@ -239,6 +240,8 @@ final class TUI: EventSink {
     private var showHints = true
     private var killMode = false       // waiting for signal number
     private var showExited = true
+    private var showReads = false
+    private var showWrites = true
 
     // Menu state
     private var activeMenu: MenuID? = nil
@@ -477,9 +480,12 @@ final class TUI: EventSink {
 
     private func sampleMenuItems() -> [MenuItem] {
         let hasPid = pidForRow(selectedIndex) != nil
+        lock.lock()
+        let hasSamples = pidForRow(selectedIndex).flatMap { rows[$0] }?.sampleRuns.isEmpty == false
+        lock.unlock()
         return [
-            MenuItem(label: "Resample...", shortcut: "", key: nil, enabled: hasPid),
-            MenuItem(label: "Delete...", shortcut: "", key: nil, enabled: hasPid),
+            MenuItem(label: "Resample", shortcut: "r", key: 114, enabled: hasPid && hasSamples),
+            MenuItem(label: "Delete", shortcut: "x", key: 120, enabled: hasPid && hasSamples),
             MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
         ]
     }
@@ -493,8 +499,8 @@ final class TUI: EventSink {
 
     private func filesMenuItems() -> [MenuItem] {
         return [
-            MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: false),
-            MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: true),
+            MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: showReads),
+            MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: showWrites),
         ]
     }
 
@@ -589,7 +595,14 @@ final class TUI: EventSink {
             return
         }
 
-        // Process menu — execute action
+        if menu == .files {
+            if item.label == "Show Reads" { showReads = !showReads }
+            else if item.label == "Show Writes" { showWrites = !showWrites }
+            forceRender()
+            return
+        }
+
+        // Process/Sample/Network menu — execute action via shortcut
         if let key = item.key, let action = shortcutAction(key) {
             action()
         }
@@ -656,6 +669,26 @@ final class TUI: EventSink {
         lock.unlock()
     }
 
+    func resampleLast() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        // Remove the last sample and re-run with same params
+        if !row.sampleRuns.isEmpty { row.sampleRuns.removeLast() }
+        lock.unlock()
+        runSampleAsync(pid)
+        forceRender()
+    }
+
+    func deleteLastSample() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        if !row.sampleRuns.isEmpty { row.sampleRuns.removeLast() }
+        lock.unlock()
+        forceRender()
+    }
+
     func clearExited() {
         lock.lock()
         let exited = rows.filter { !$0.value.isRunning }
@@ -674,6 +707,8 @@ final class TUI: EventSink {
         case 119: return diagnoseWait        // w
         case 107: return enterKillMode       // k
         case 122: return togglePauseProcess  // z
+        case 114: return resampleLast        // r
+        case 120: return deleteLastSample    // x
         case 108: return clearExited         // l
         default: return nil
         }
@@ -860,7 +895,11 @@ final class TUI: EventSink {
             let tree = self?.runSample(pid) ?? []
             DispatchQueue.main.async {
                 self?.lock.lock()
-                self?.rows[pid]?.sampleTree = tree
+                let dur = self?.sampleDuration ?? 3
+                let fmt = DateFormatter()
+                fmt.dateFormat = "HH:mm:ss"
+                let label = "Sample \(fmt.string(from: Date())) (\(dur)s)"
+                self?.rows[pid]?.sampleRuns.append((label: label, tree: tree, disclosed: true))
                 self?.rows[pid]?.isSampling = false
                 self?.lock.unlock()
                 self?.forceRender()
@@ -2536,19 +2575,25 @@ final class TUI: EventSink {
             if row.sampleDisclosed {
                 if row.isSampling {
                     displayRows.append(.processDetail(row.pid, "Sampling..."))
-                } else if row.sampleTree.isEmpty {
+                } else if row.sampleRuns.isEmpty {
                     displayRows.append(.processDetail(row.pid, "Press s to sample"))
                 } else {
-                    func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
-                        for (i, node) in nodes.enumerated() {
-                            let nodePath = path + [i]
-                            displayRows.append(.sampleNode(row.pid, nodePath))
-                            if node.disclosed {
-                                appendSampleNodes(node.children, path: nodePath)
+                    // Show all sample runs
+                    for (runIdx, run) in row.sampleRuns.enumerated() {
+                        displayRows.append(.processDetail(row.pid, run.label))
+                        if run.disclosed {
+                            func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
+                                for (i, node) in nodes.enumerated() {
+                                    let nodePath = path + [i]
+                                    displayRows.append(.sampleNode(row.pid, nodePath))
+                                    if node.disclosed {
+                                        appendSampleNodes(node.children, path: nodePath)
+                                    }
+                                }
                             }
+                            appendSampleNodes(run.tree, path: [])
                         }
                     }
-                    appendSampleNodes(row.sampleTree, path: [])
                 }
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
