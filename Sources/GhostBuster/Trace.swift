@@ -144,6 +144,8 @@ struct Trace: ParsableCommand {
                         case 261: t.menuRight()       // RIGHT
                         case 10, 13: t.menuSelect()   // Enter
                         case 27: t.closeMenu()        // ESC
+                        case 102: t.toggleMenu(.file)    // f
+                        case 101: t.toggleMenu(.edit)    // e
                         case 112: t.toggleMenu(.process) // p
                         case 118: t.toggleMenu(.view)    // v
                         default:
@@ -166,6 +168,10 @@ struct Trace: ParsableCommand {
                         t.collapse()
                     case 10, 13: // Enter
                         t.toggleDisclose()
+                    case 102: // 'f' - File menu
+                        t.toggleMenu(.file)
+                    case 101: // 'e' - Edit menu
+                        t.toggleMenu(.edit)
                     case 112: // 'p' - Process menu
                         t.toggleMenu(.process)
                     case 118: // 'v' - View menu

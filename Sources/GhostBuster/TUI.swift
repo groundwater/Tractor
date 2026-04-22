@@ -206,7 +206,7 @@ private enum DisplayRow: Equatable {
 
 // MARK: - Menu system
 
-enum MenuID { case process, view }
+enum MenuID { case file, edit, process, view }
 
 private struct MenuItem {
     let label: String
@@ -239,6 +239,8 @@ final class TUI: EventSink {
     // Menu state
     private var activeMenu: MenuID? = nil
     private var menuItemIndex = 0
+    private var menuFlash: MenuID? = nil
+    private var menuFlashTime: Date? = nil
     private var selectedIndex = -1
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
@@ -440,6 +442,21 @@ final class TUI: EventSink {
         ]
     }
 
+    private func fileMenuItems() -> [MenuItem] {
+        return [
+            MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
+        ]
+    }
+
+    private func editMenuItems() -> [MenuItem] {
+        return [
+            MenuItem(label: "Filter", shortcut: "/", key: nil, enabled: false),
+            MenuItem(label: "Find", shortcut: "f", key: nil, enabled: false),
+            MenuItem(label: "Clear", shortcut: "l", key: nil, enabled: false),
+            MenuItem(label: "Copy", shortcut: "c", key: nil, enabled: false),
+        ]
+    }
+
     private func viewMenuItems() -> [MenuItem] {
         return [
             MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
@@ -510,17 +527,21 @@ final class TUI: EventSink {
     func executeShortcut(_ key: Int32) {
         activeMenu = nil  // close menu on shortcut
         switch key {
-        case 105: toggleInfo()          // i
-        case 115: sampleProcess()       // s
-        case 119: diagnoseWait()        // w
-        case 107: enterKillMode()       // k
-        case 122: togglePauseProcess()  // z
+        case 105: flashMenu(.process); toggleInfo()          // i
+        case 115: flashMenu(.process); sampleProcess()       // s
+        case 119: flashMenu(.process); diagnoseWait()        // w
+        case 107: flashMenu(.process); enterKillMode()       // k
+        case 122: flashMenu(.process); togglePauseProcess()  // z
         default: break
         }
     }
 
+    private let menuOrder: [MenuID] = [.file, .edit, .process, .view]
+
     private func currentMenuItems() -> [MenuItem] {
         switch activeMenu {
+        case .file: return fileMenuItems()
+        case .edit: return editMenuItems()
         case .process: return processMenuItems()
         case .view: return viewMenuItems()
         case nil: return []
@@ -528,23 +549,29 @@ final class TUI: EventSink {
     }
 
     func menuLeft() {
-        guard activeMenu != nil else { return }
-        switch activeMenu {
-        case .view: activeMenu = .process
-        default: activeMenu = .view
-        }
+        guard let current = activeMenu, let idx = menuOrder.firstIndex(of: current) else { return }
+        activeMenu = menuOrder[(idx - 1 + menuOrder.count) % menuOrder.count]
         menuItemIndex = 0
         forceRender()
     }
 
     func menuRight() {
-        guard activeMenu != nil else { return }
-        switch activeMenu {
-        case .process: activeMenu = .view
-        default: activeMenu = .process
-        }
+        guard let current = activeMenu, let idx = menuOrder.firstIndex(of: current) else { return }
+        activeMenu = menuOrder[(idx + 1) % menuOrder.count]
         menuItemIndex = 0
         forceRender()
+    }
+
+    /// Flash a menu header briefly when a shortcut is used
+    private func flashMenu(_ menu: MenuID) {
+        menuFlash = menu
+        menuFlashTime = Date()
+        forceRender()
+        // Clear flash after 150ms
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.menuFlash = nil
+            self?.forceRender()
+        }
     }
 
     /// Ensure process is disclosed, render, and jump cursor to a target row
@@ -1565,9 +1592,6 @@ final class TUI: EventSink {
         var y: Int32 = 4
         let lastRow = maxY - 2
 
-        // Find last highlighted row for hint display
-        let allHighlighted = selectedIndices.isEmpty ? (selectedIndex >= 0 ? [selectedIndex] : []) : Array(selectedIndices)
-        let lastHighlightedIndex = allHighlighted.max() ?? -1
 
         var currentDepth = 0  // tracks the depth of the current process for sub-row indentation
         var currentBoxIndent = -1  // -1 = not in a box, >= 0 = left edge column
@@ -1777,33 +1801,6 @@ final class TUI: EventSink {
                 y += 1
             }
 
-            // Hint line below last highlighted process row
-            if showHints, i == lastHighlightedIndex, y <= lastRow {
-                if case .process(let pid, let depth) = dr {
-                    let hintIndent = String(repeating: " ", count: depth * 2 + 2)
-                    let hintText: String
-                    if killMode {
-                        hintText = "\(hintIndent)(k) cancel  1:HUP 2:INT 3:QUIT 9:KILL 15:TERM"
-                    } else {
-                        lock.lock()
-                        let isStopped = rows[pid]?.isStopped ?? false
-                        let isRunning = rows[pid]?.isRunning ?? false
-                        lock.unlock()
-                        var parts = ["(i) info"]
-                        if isRunning {
-                            parts.append("(z) \(isStopped ? "resume" : "pause")")
-                            parts.append("(k) kill")
-                            parts.append("(s) sample")
-                            parts.append("(w) wait")
-                        }
-                        hintText = "\(hintIndent)\(parts.joined(separator: "  "))"
-                    }
-                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
-                    mvaddstr(y, 0, truncate(hintText, to: width))
-                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
-                    y += 1
-                }
-            }
         }
 
         drawFooter(maxY: maxY, maxX: maxX)
@@ -1818,42 +1815,62 @@ final class TUI: EventSink {
 
 
     private func renderMenuBar(y: Int32, width: Int) {
-        // Light gray background across full width
         let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
         let pad = String(repeating: " ", count: width)
         attron(barAttr)
         mvaddstr(y, 0, pad)
         attroff(barAttr)
 
-        // Menu items
-        let menus: [(label: String, shortcut: String, id: MenuID)] = [
-            ("Process", "p", .process),
-            ("View", "v", .view),
+        // Menu items: (display, key char index, id)
+        // Display shows shortcut key in parens: (F)ile (E)dit (P)rocess (V)iew
+        let menus: [(prefix: String, key: String, suffix: String, id: MenuID)] = [
+            ("(", "F", ")ile", .file),
+            ("(", "E", ")dit", .edit),
+            ("(", "P", ")rocess", .process),
+            ("(", "V", ")iew", .view),
         ]
 
         var x: Int32 = 1
         for menu in menus {
-            let label = " \(menu.label) "
             let isActive = activeMenu == menu.id
-            let attr = isActive ? COLOR_PAIR(TUIColor.menuHighlight.rawValue) : barAttr
-            attron(attr)
-            mvaddstr(y, x, label)
-            attroff(attr)
-            x += Int32(label.count) + 1
+            let isFlashing = menuFlash == menu.id
+            let baseAttr = (isActive || isFlashing) ? COLOR_PAIR(TUIColor.menuHighlight.rawValue) : barAttr
+
+            attron(baseAttr)
+            mvaddstr(y, x, " \(menu.prefix)")
+            attroff(baseAttr)
+            // Underlined key character
+            attron(baseAttr | ATTR_BOLD)
+            addstr(menu.key)
+            attroff(baseAttr | ATTR_BOLD)
+            attron(baseAttr)
+            addstr("\(menu.suffix) ")
+            attroff(baseAttr)
+
+            x += Int32(menu.prefix.count + menu.key.count + menu.suffix.count + 2)
         }
     }
 
     private func renderMenuDropdown(menu: MenuID, maxY: Int32, maxX: Int32) {
         let items: [MenuItem]
-        let dropX: Int32
+        // Compute X position based on menu order
+        let menuWidths: [(id: MenuID, width: Int)] = [
+            (.file, 8),       // " (F)ile "
+            (.edit, 8),       // " (E)dit "
+            (.process, 12),   // " (P)rocess "
+            (.view, 8),       // " (V)iew "
+        ]
+        var dropX: Int32 = 1
+        for mw in menuWidths {
+            if mw.id == menu { break }
+            dropX += Int32(mw.width)
+        }
 
         switch menu {
-        case .process:
-            items = processMenuItems()
-            dropX = 1
-        case .view:
-            items = viewMenuItems()
-            dropX = 12  // after "Process" + spacing
+        case .file: items = fileMenuItems()
+        case .edit: items = editMenuItems()
+        case .process: items = processMenuItems()
+        case .view: items = viewMenuItems()
         }
 
         guard !items.isEmpty else { return }
