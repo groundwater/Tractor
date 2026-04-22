@@ -305,7 +305,7 @@ final class TUI: EventSink {
         // Skip non-selectable rows
         while selectedIndex > 0 && !isSelectable(selectedIndex) { selectedIndex -= 1 }
         selectedIndices.removeAll()
-        render()
+        forceRender()
     }
 
     func moveDown() {
@@ -314,7 +314,7 @@ final class TUI: EventSink {
         // Skip non-selectable rows
         while selectedIndex < displayRows.count - 1 && !isSelectable(selectedIndex) { selectedIndex += 1 }
         selectedIndices.removeAll()
-        render()
+        forceRender()
     }
 
     func shiftMoveUp() {
@@ -324,7 +324,7 @@ final class TUI: EventSink {
             selectedIndex -= 1
             selectedIndices.insert(selectedIndex)
         }
-        render()
+        forceRender()
     }
 
     func shiftMoveDown() {
@@ -334,7 +334,7 @@ final class TUI: EventSink {
             selectedIndex += 1
             selectedIndices.insert(selectedIndex)
         }
-        render()
+        forceRender()
     }
 
     func toggleViewMode() {
@@ -348,12 +348,12 @@ final class TUI: EventSink {
         selectedIndex = -1
         selectedIndices.removeAll()
         scrollOffset = 0
-        render()
+        forceRender()
     }
 
     func toggleHints() {
         showHints = !showHints
-        render()
+        forceRender()
     }
 
     func toggleInfo() {
@@ -400,7 +400,7 @@ final class TUI: EventSink {
             row.infoLoaded = true
         }
         lock.unlock()
-        render()
+        forceRender()
     }
 
     // MARK: - Process actions
@@ -417,14 +417,14 @@ final class TUI: EventSink {
             row.isStopped = true
         }
         lock.unlock()
-        render()
+        forceRender()
     }
 
     var isKillMode: Bool { killMode }
 
     func enterKillMode() {
         killMode = !killMode
-        render()
+        forceRender()
     }
 
     func sendSignal(_ signal: Int32) {
@@ -432,13 +432,13 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         kill(pid, signal)
         killMode = false
-        render()
+        forceRender()
     }
 
     func sampleProcess() {
         guard let pid = pidForRow(selectedIndex) else { return }
         samplingPid = pid
-        render()
+        forceRender()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let output = self?.runSample(pid) ?? []
@@ -452,7 +452,7 @@ final class TUI: EventSink {
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        proc.arguments = ["\(pid)", "3", "-invertCallTree"]
+        proc.arguments = ["\(pid)", "3"]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -462,34 +462,41 @@ final class TUI: EventSink {
 
         guard let output = String(data: data, encoding: .utf8) else { return [] }
 
-        // Parse: look for the heaviest leaf functions
-        var results: [(String, Int)] = []
+        // Parse call graph: find named leaf functions (deepest frames with symbols)
+        // Lines look like: "+   611 kevent64  (in libsystem_kernel.dylib) + 8  [0x...]"
+        // or: "+     685 ???  (in claude)  load address ..."
+        var funcCounts: [String: Int] = [:]
         var totalSamples = 0
 
         for line in output.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "+!|: "))
+            guard !trimmed.isEmpty else { continue }
+
+            // Extract sample count and function name
             if let spaceIdx = trimmed.firstIndex(of: " ") {
                 let numStr = String(trimmed[..<spaceIdx])
                 if let count = Int(numStr), count > 0 {
-                    let rest = trimmed[trimmed.index(after: spaceIdx)...].trimmingCharacters(in: .whitespaces)
-                    // Strip " (in libfoo.dylib) + 123" suffix
+                    let rest = String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
+                    // Skip ??? (stripped symbols)
+                    if rest.hasPrefix("???") { continue }
+                    // Extract function name before " (in "
                     let funcName: String
-                    if let parenIdx = rest.firstIndex(of: "(") {
-                        funcName = String(rest[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                    if let inIdx = rest.range(of: "  (in ") {
+                        funcName = String(rest[..<inIdx.lowerBound])
                     } else {
                         funcName = rest
                     }
-                    if totalSamples == 0 { totalSamples = count }
-                    if !funcName.isEmpty {
-                        results.append((funcName, count))
+                    if !funcName.isEmpty && funcName != "start" && funcName != "thread_start" && funcName != "_pthread_start" {
+                        if totalSamples == 0 { totalSamples = count }
+                        funcCounts[funcName, default: 0] = max(funcCounts[funcName, default: 0], count)
                     }
                 }
             }
         }
 
         guard totalSamples > 0 else { return ["No samples collected"] }
-        let top = results.prefix(10)
-        return top.map { name, count in
+        let sorted = funcCounts.sorted { $0.value > $1.value }
+        return sorted.prefix(10).map { name, count in
             let pct = count * 100 / totalSamples
             return "\(pct)% \(name)"
         }
@@ -503,12 +510,12 @@ final class TUI: EventSink {
         samplingPid = nil
         sampleResults = results
         sampleResultPid = pid
-        render()
+        forceRender()
     }
 
     func closeSampleModal() {
         sampleResults = []
-        render()
+        forceRender()
     }
 
     // MARK: - Wait diagnosis
@@ -525,22 +532,21 @@ final class TUI: EventSink {
             let results = self?.runWaitDiagnosis(pid) ?? []
             DispatchQueue.main.async {
                 self?.waitResults = results
-                self?.render()
+                self?.forceRender()
             }
         }
     }
 
     func closeWaitModal() {
         waitResults = []
-        render()
+        forceRender()
     }
 
     private func runWaitDiagnosis(_ pid: pid_t) -> [String] {
-        // Quick 1-sample snapshot to see what each thread is doing
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        proc.arguments = ["\(pid)", "1", "-onlyTarget"]
+        proc.arguments = ["\(pid)", "1"]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -550,49 +556,51 @@ final class TUI: EventSink {
 
         guard let output = String(data: data, encoding: .utf8) else { return [] }
 
-        // Parse: find the deepest (leaf) frame for each thread
-        var threadLeafs: [String: Int] = [:]  // leaf function -> count
+        // Parse: find the deepest named (non-???) frame per thread
+        var threadLeafs: [String: Int] = [:]
         var currentLeaf: String? = nil
+        var inCallGraph = false
 
         for line in output.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let raw = String(line)
+            if raw.contains("Call graph:") { inCallGraph = true; continue }
+            guard inCallGraph else { continue }
 
-            // Thread header: "Thread_0x..."
-            if trimmed.hasPrefix("Thread_") || trimmed.hasPrefix("+ ") || trimmed.hasPrefix("| ") || trimmed.hasPrefix("! ") {
-                // continuation of call tree
+            // Thread header resets leaf tracking
+            if raw.trimmingCharacters(in: .whitespaces).hasPrefix("Thread_") {
+                if let leaf = currentLeaf { threadLeafs[leaf, default: 0] += 1 }
+                currentLeaf = nil
+                continue
             }
 
-            // Look for the deepest indented frame — lines with sample counts
+            let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "+!|: \t"))
+            guard !trimmed.isEmpty else {
+                if let leaf = currentLeaf { threadLeafs[leaf, default: 0] += 1 }
+                currentLeaf = nil
+                continue
+            }
+
             if let spaceIdx = trimmed.firstIndex(of: " ") {
                 let numStr = String(trimmed[..<spaceIdx])
                 if let _ = Int(numStr) {
-                    let rest = trimmed[trimmed.index(after: spaceIdx)...].trimmingCharacters(in: .whitespaces)
+                    let rest = String(trimmed[trimmed.index(after: spaceIdx)...]).trimmingCharacters(in: .whitespaces)
+                    if rest.hasPrefix("???") { continue }
                     let funcName: String
-                    if let parenIdx = rest.firstIndex(of: "(") {
-                        funcName = String(rest[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                    if let inIdx = rest.range(of: "  (in ") {
+                        funcName = String(rest[..<inIdx.lowerBound])
                     } else {
-                        funcName = String(rest)
+                        funcName = rest
                     }
-                    if !funcName.isEmpty {
+                    if !funcName.isEmpty && funcName != "start" && funcName != "thread_start" && funcName != "_pthread_start" {
                         currentLeaf = funcName
                     }
                 }
             }
-
-            // Blank line = end of a thread's stack
-            if trimmed.isEmpty, let leaf = currentLeaf {
-                threadLeafs[leaf, default: 0] += 1
-                currentLeaf = nil
-            }
         }
-        // Flush last
-        if let leaf = currentLeaf {
-            threadLeafs[leaf, default: 0] += 1
-        }
+        if let leaf = currentLeaf { threadLeafs[leaf, default: 0] += 1 }
 
         guard !threadLeafs.isEmpty else { return ["No thread info available"] }
 
-        // Categorize and format
         let sorted = threadLeafs.sorted { $0.value > $1.value }
         return sorted.prefix(8).map { name, count in
             let category = categorizeWait(name)
@@ -653,10 +661,7 @@ final class TUI: EventSink {
     func clearSelection() {
         selectedIndices.removeAll()
         selectedIndex = -1
-        let wasPaused = paused
-        paused = false
-        render()
-        paused = wasPaused
+        forceRender()
     }
 
     func disclose() {
@@ -665,7 +670,7 @@ final class TUI: EventSink {
             setDisclosure(dr, open: true)
         }
         lock.unlock()
-        render()
+        forceRender()
     }
 
     func collapse() {
@@ -698,7 +703,7 @@ final class TUI: EventSink {
             selectedIndex = idx
             selectedIndices.removeAll()
         }
-        render()
+        forceRender()
     }
 
     func discloseAll() {
@@ -717,7 +722,7 @@ final class TUI: EventSink {
             setDisclosure(row, open: true)
         }
         lock.unlock()
-        render()
+        forceRender()
     }
 
     func collapseAll() {
@@ -756,7 +761,7 @@ final class TUI: EventSink {
             setDisclosure(dr, open: open)
         }
         lock.unlock()
-        render()
+        forceRender()
     }
 
     /// Returns display rows for all highlighted items, or just the cursor if no multi-selection
@@ -1137,6 +1142,15 @@ final class TUI: EventSink {
 
     private func render() {
         guard !paused else { return }
+        doRender()
+    }
+
+    /// Force render regardless of pause state — for user-initiated actions
+    private func forceRender() {
+        doRender()
+    }
+
+    private func doRender() {
         pollRunningProcesses()
 
         lock.lock()
