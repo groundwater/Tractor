@@ -325,6 +325,12 @@ final class TUI: EventSink {
 
     func toggleViewMode() {
         viewMode = viewMode == .flat ? .tree : .flat
+        // In tree mode, default all processes to disclosed (expanded)
+        if viewMode == .tree {
+            lock.lock()
+            for row in rows.values { row.disclosed = true }
+            lock.unlock()
+        }
         selectedIndex = -1
         selectedIndices.removeAll()
         scrollOffset = 0
@@ -377,7 +383,10 @@ final class TUI: EventSink {
 
     func closeModal() {
         modalPid = nil
+        let wasPaused = paused
+        paused = false
         render()
+        paused = wasPaused
     }
 
     func modalMoveUp() {
@@ -978,9 +987,6 @@ final class TUI: EventSink {
                 displayRows.append(.process(row.pid, depth))
                 if row.disclosed {
                     let children = childrenOf[row.pid] ?? []
-                    if !children.isEmpty {
-                        displayRows.append(.separator(row.pid))
-                    }
                     for child in children {
                         appendTree(child, depth: depth + 1)
                     }
