@@ -352,6 +352,91 @@ final class TUI: EventSink {
         render()
     }
 
+    /// Shift+Right: open self and all descendants
+    func discloseAll() {
+        guard let row = displayRows[safe: selectedIndex] else { return }
+        lock.lock()
+        switch row {
+        case .process(let pid):
+            if let r = rows[pid] {
+                r.disclosed = true
+                r.filesDisclosed = true
+                r.netDisclosed = true
+            }
+        case .filesHeader(let pid):
+            if let r = rows[pid] { r.filesDisclosed = true }
+        case .netHeader(let pid):
+            if let r = rows[pid] { r.netDisclosed = true }
+        default: break
+        }
+        lock.unlock()
+        render()
+    }
+
+    /// Shift+Left: if open, close self and all descendants; if closed, close parent and jump to it
+    func collapseAll() {
+        guard let row = displayRows[safe: selectedIndex] else { return }
+        lock.lock()
+        switch row {
+        case .process(let pid):
+            if let r = rows[pid] {
+                if r.disclosed {
+                    r.disclosed = false
+                    r.filesDisclosed = false
+                    r.netDisclosed = false
+                }
+            }
+        case .filesHeader(let pid):
+            if let r = rows[pid] {
+                if r.filesDisclosed {
+                    r.filesDisclosed = false
+                } else {
+                    // Close parent process and jump to it
+                    r.disclosed = false
+                    r.filesDisclosed = false
+                    r.netDisclosed = false
+                    lock.unlock()
+                    jumpToParent(.process(pid))
+                    return
+                }
+            }
+        case .netHeader(let pid):
+            if let r = rows[pid] {
+                if r.netDisclosed {
+                    r.netDisclosed = false
+                } else {
+                    r.disclosed = false
+                    r.filesDisclosed = false
+                    r.netDisclosed = false
+                    lock.unlock()
+                    jumpToParent(.process(pid))
+                    return
+                }
+            }
+        case .fileDetail(let pid, _):
+            // Close files section and parent, jump to process
+            if let r = rows[pid] {
+                r.disclosed = false
+                r.filesDisclosed = false
+                r.netDisclosed = false
+            }
+            lock.unlock()
+            jumpToParent(.process(pid))
+            return
+        case .netDetail(let pid, _):
+            if let r = rows[pid] {
+                r.disclosed = false
+                r.filesDisclosed = false
+                r.netDisclosed = false
+            }
+            lock.unlock()
+            jumpToParent(.process(pid))
+            return
+        }
+        lock.unlock()
+        render()
+    }
+
     func toggleDisclose() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()

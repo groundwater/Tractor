@@ -137,9 +137,17 @@ struct Trace: ParsableCommand {
                             t.moveDown()
                         }
                     case 261: // KEY_RIGHT
-                        t.disclose()
+                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                            t.discloseAll()
+                        } else {
+                            t.disclose()
+                        }
                     case 260: // KEY_LEFT
-                        t.collapse()
+                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                            t.collapseAll()
+                        } else {
+                            t.collapse()
+                        }
                     case 10, 13: // Enter/Return
                         t.toggleDisclose()
                     case 27: // ESC
