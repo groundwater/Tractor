@@ -137,23 +137,19 @@ struct Trace: ParsableCommand {
                             t.moveDown()
                         }
                     case 261: // KEY_RIGHT
-                        let shiftOrAlt = CGEventSource.flagsState(.combinedSessionState)
-                            .intersection([.maskShift, .maskAlternate])
-                        if !shiftOrAlt.isEmpty {
+                        t.disclose()
+                    case 260: // KEY_LEFT
+                        t.collapse()
+                    case 43: // '+' - disclose all descendants
+                        t.discloseAll()
+                    case 45: // '-' - collapse all descendants
+                        t.collapseAll()
+                    case 10, 13: // Enter/Return
+                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
                             t.discloseAll()
                         } else {
-                            t.disclose()
+                            t.toggleDisclose()
                         }
-                    case 260: // KEY_LEFT
-                        let shiftOrAlt = CGEventSource.flagsState(.combinedSessionState)
-                            .intersection([.maskShift, .maskAlternate])
-                        if !shiftOrAlt.isEmpty {
-                            t.collapseAll()
-                        } else {
-                            t.collapse()
-                        }
-                    case 10, 13: // Enter/Return
-                        t.toggleDisclose()
                     case 27: // ESC
                         t.clearSelection()
                     case 113: // 'q'
