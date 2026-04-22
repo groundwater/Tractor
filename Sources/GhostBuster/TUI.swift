@@ -538,7 +538,9 @@ final class TUI: EventSink {
                 if y <= lastRow {
                     let summary = buildExitedSummary(row)
                     if !summary.isEmpty {
-                        let subLine = truncate("    \(summary)", to: Int(maxX))
+                        // Align with PROCESS column: 2(marker) + 7+1+6+1+5+1+5+1 = 29
+                        let indent = String(repeating: " ", count: 29)
+                        let subLine = truncate("\(indent)\(summary)", to: Int(maxX))
                         attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
                         mvaddstr(y, 0, subLine)
                         attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
