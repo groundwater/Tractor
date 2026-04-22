@@ -75,6 +75,8 @@ final class ProcessRow {
     var fileOps: Int = 0
     var cwd: String = ""
     var disclosed: Bool = false
+    var filesDisclosed: Bool = false
+    var netDisclosed: Bool = false
 
     /// Per-file stats: path -> FileStats
     var files: [String: FileStats] = [:]
@@ -126,6 +128,16 @@ final class ProcessRow {
     }
 }
 
+// MARK: - Display row types for flat cursor navigation
+
+private enum DisplayRow {
+    case process(pid_t)
+    case filesHeader(pid_t)
+    case fileDetail(pid_t, String)       // pid, path
+    case netHeader(pid_t)
+    case netDetail(pid_t, String)        // pid, connection key
+}
+
 // MARK: - TUI
 
 final class TUI: EventSink {
@@ -137,9 +149,9 @@ final class TUI: EventSink {
     private var paused = false
     private var selectedIndex = -1
     private var selectedPids: Set<pid_t> = []
-    /// Snapshot of visible process list for cursor navigation
-    private var visiblePids: [pid_t] = []
-    /// Scroll offset — index of first visible process in the list
+    /// Flat list of all displayable rows for cursor navigation
+    private var displayRows: [DisplayRow] = []
+    /// Scroll offset — index of first visible row
     private var scrollOffset = 0
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
@@ -237,34 +249,33 @@ final class TUI: EventSink {
     }
 
     func moveUp() {
-        if selectedIndex < 0 { selectedIndex = visiblePids.count - 1 }
+        if selectedIndex < 0 { selectedIndex = displayRows.count - 1 }
         else if selectedIndex > 0 { selectedIndex -= 1 }
-        selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
+        selectedPids.removeAll()
         render()
     }
 
     func moveDown() {
         if selectedIndex < 0 { selectedIndex = 0 }
-        else if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
-        selectedPids = [visiblePids[safe: selectedIndex]].compactMap { $0 }.asSet()
+        else if selectedIndex < displayRows.count - 1 { selectedIndex += 1 }
+        selectedPids.removeAll()
         render()
     }
 
     func shiftMoveUp() {
         if selectedIndex > 0 {
-            // Add current to selection before moving
-            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
             selectedIndex -= 1
-            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
         }
         render()
     }
 
     func shiftMoveDown() {
-        if selectedIndex < visiblePids.count - 1 {
-            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+        if selectedIndex < displayRows.count - 1 {
+            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
             selectedIndex += 1
-            if let pid = visiblePids[safe: selectedIndex] { selectedPids.insert(pid) }
+            if let pid = pidForRow(selectedIndex) { selectedPids.insert(pid) }
         }
         render()
     }
@@ -279,37 +290,56 @@ final class TUI: EventSink {
     }
 
     func disclose() {
-        let pids = effectiveSelection()
+        guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        for pid in pids { rows[pid]?.disclosed = true }
+        toggleRow(row, open: true)
         lock.unlock()
         render()
     }
 
     func collapse() {
-        let pids = effectiveSelection()
+        guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        for pid in pids { rows[pid]?.disclosed = false }
+        toggleRow(row, open: false)
         lock.unlock()
         render()
     }
 
     func toggleDisclose() {
-        let pids = effectiveSelection()
+        guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        for pid in pids {
-            if let row = rows[pid] { row.disclosed = !row.disclosed }
+        switch row {
+        case .process(let pid):
+            if let r = rows[pid] { r.disclosed = !r.disclosed }
+        case .filesHeader(let pid):
+            if let r = rows[pid] { r.filesDisclosed = !r.filesDisclosed }
+        case .netHeader(let pid):
+            if let r = rows[pid] { r.netDisclosed = !r.netDisclosed }
+        default: break
         }
         lock.unlock()
         render()
     }
 
-    /// Returns selected PIDs, or just the cursor PID if no multi-selection
-    private func effectiveSelection() -> Set<pid_t> {
-        if selectedPids.isEmpty, let pid = visiblePids[safe: selectedIndex] {
-            return [pid]
+    private func toggleRow(_ row: DisplayRow, open: Bool) {
+        switch row {
+        case .process(let pid):
+            if let r = rows[pid] { r.disclosed = open }
+        case .filesHeader(let pid):
+            if let r = rows[pid] { r.filesDisclosed = open }
+        case .netHeader(let pid):
+            if let r = rows[pid] { r.netDisclosed = open }
+        default: break
         }
-        return selectedPids
+    }
+
+    private func pidForRow(_ index: Int) -> pid_t? {
+        guard let row = displayRows[safe: index] else { return nil }
+        switch row {
+        case .process(let pid), .filesHeader(let pid), .fileDetail(let pid, _),
+             .netHeader(let pid), .netDetail(let pid, _):
+            return pid
+        }
     }
 
     func togglePause() {
@@ -586,67 +616,129 @@ final class TUI: EventSink {
         mvaddstr(3, 0, colHeader)
         attroff(ATTR_BOLD)
 
-        let availableLines = Int(maxY) - 5  // header(1) + stats(1) + blank(1) + colheader(1) + footer(1)
+        let availableLines = Int(maxY) - 5
+        let width = Int(maxX)
 
-        // Build visible process list
+        // Build flat display row list
         let allVisible = running + exited
-        visiblePids = allVisible.map { $0.pid }
-        // Clamp selection (-1 = no cursor)
-        if selectedIndex >= allVisible.count { selectedIndex = max(-1, allVisible.count - 1) }
-        let cursorPid: pid_t = (selectedIndex >= 0 && selectedIndex < allVisible.count)
-            ? allVisible[selectedIndex].pid : pid_t(-1)
-
-        // Calculate line count per process
-        func linesFor(_ row: ProcessRow) -> Int {
+        displayRows = []
+        for row in allVisible {
+            displayRows.append(.process(row.pid))
             if row.disclosed {
-                // 1 (main) + connections + files + overflow indicators
-                let conns = row.sortedConnections.count
-                let files = row.recentWrittenFiles.count
-                return 1 + min(conns, 20) + (conns > 20 ? 1 : 0) + min(files, 20) + (files > 20 ? 1 : 0)
+                let files = row.recentWrittenFiles
+                let conns = row.sortedConnections
+                // Files section
+                if !files.isEmpty {
+                    let totalWrites = files.reduce(0) { $0 + $1.stats.writes }
+                    displayRows.append(.filesHeader(row.pid))
+                    if row.filesDisclosed {
+                        for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
+                    }
+                }
+                // Network section
+                if !conns.isEmpty {
+                    displayRows.append(.netHeader(row.pid))
+                    if row.netDisclosed {
+                        for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
+                    }
+                }
             }
-            return 1
         }
+
+        // Clamp selection
+        if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
 
         // Adjust scroll offset to keep selectedIndex visible
         if selectedIndex >= 0 {
-            // Scroll up if cursor is above viewport
-            if selectedIndex < scrollOffset {
-                scrollOffset = selectedIndex
-            }
-            // Scroll down if cursor would be below viewport
-            var linesUsed = 0
-            for i in scrollOffset...selectedIndex {
-                linesUsed += linesFor(allVisible[i])
-            }
-            while linesUsed > availableLines && scrollOffset < selectedIndex {
-                linesUsed -= linesFor(allVisible[scrollOffset])
-                scrollOffset += 1
-            }
+            if selectedIndex < scrollOffset { scrollOffset = selectedIndex }
+            if selectedIndex >= scrollOffset + availableLines { scrollOffset = selectedIndex - availableLines + 1 }
         }
-        // Clamp scroll offset
-        scrollOffset = max(0, min(scrollOffset, allVisible.count - 1))
+        scrollOffset = max(0, min(scrollOffset, max(0, displayRows.count - 1)))
 
-        // Render from scrollOffset
+        // Render rows
         var y: Int32 = 4
         let lastRow = maxY - 2
 
-        for i in scrollOffset..<allVisible.count {
+        for i in scrollOffset..<displayRows.count {
             guard y <= lastRow else { break }
-            let row = allVisible[i]
-            let isHighlighted = row.pid == cursorPid || selectedPids.contains(row.pid)
-            let showSub = row.disclosed
+            let isCursor = i == selectedIndex
+            let dr = displayRows[i]
 
-            if showSub {
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isHighlighted)
-            } else {
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
+            lock.lock()
+            switch dr {
+            case .process(let pid):
+                if let row = rows[pid] {
+                    let isHighlighted = isCursor || selectedPids.contains(pid)
+                    lock.unlock()
+                    y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
+                } else { lock.unlock() }
+
+            case .filesHeader(let pid):
+                if let row = rows[pid] {
+                    let totalWrites = row.files.values.reduce(0) { $0 + $1.writes }
+                    let fileCount = row.recentWrittenFiles.count
+                    let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
+                    let label = "  \(disc) Files (\(fileCount) written, W:\(totalWrites))"
+                    lock.unlock()
+                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD)
+                    attron(attr)
+                    mvaddstr(y, 0, truncate(label, to: width))
+                    attroff(attr)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .fileDetail(let pid, let path):
+                if let row = rows[pid] {
+                    let stats = row.files[path]
+                    lock.unlock()
+                    var parts: [String] = []
+                    if let s = stats {
+                        parts.append("W:\(s.writes)")
+                        var sb = stat()
+                        let exists = stat(path, &sb) == 0
+                        if exists && sb.st_size > 0 { parts.append(formatBytes(UInt64(sb.st_size))) }
+                    }
+                    let statsStr = parts.joined(separator: " ")
+                    let relPath = relativePath(path, cwd: row.cwd)
+                    let shortPath = shortenPath(relPath, maxLen: width - 10 - statsStr.count)
+                    let label = "      \(shortPath)  \(statsStr)"
+                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
+                    attron(attr)
+                    mvaddstr(y, 0, truncate(label, to: width))
+                    attroff(attr)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netHeader(let pid):
+                if let row = rows[pid] {
+                    let connCount = row.connections.count
+                    let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
+                    let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
+                    let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
+                    let label = "  \(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))"
+                    lock.unlock()
+                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD)
+                    attron(attr)
+                    mvaddstr(y, 0, truncate(label, to: width))
+                    attroff(attr)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netDetail(let pid, let key):
+                if let row = rows[pid], let conn = row.connections[key] {
+                    lock.unlock()
+                    var line = "      \(conn.label)"
+                    if conn.txBytes > 0 || conn.rxBytes > 0 {
+                        line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
+                    }
+                    let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
+                    let attr = isCursor ? (COLOR_PAIR(connColor.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(connColor.rawValue) | ATTR_DIM)
+                    attron(attr)
+                    mvaddstr(y, 0, truncate(line, to: width))
+                    attroff(attr)
+                    y += 1
+                } else { lock.unlock() }
             }
-        }
-
-        // Show scroll indicator if content is clipped
-        let totalProcesses = allVisible.count
-        if scrollOffset > 0 || y > lastRow {
-            // Show on the stats line
         }
 
         drawFooter(maxY: maxY, maxX: maxX)
@@ -685,8 +777,6 @@ final class TUI: EventSink {
     }
 
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false) -> Int32 {
-        var y = y
-
         let status: String
         let color: TUIColor
         if row.isRunning {
@@ -720,75 +810,7 @@ final class TUI: EventSink {
         attron(attr)
         mvaddstr(y, 0, disc + line)
         attroff(attr)
-        y += 1
-
-        guard showSubRows else { return y }
-
-        // Sub-rows: connections (alive = yellow, dead = gray) with byte counts
-        let conns = row.sortedConnections
-        for (i, conn) in conns.enumerated() {
-            guard y < maxY - 1, i < maxSubRows else { break }
-            var line = "    -> \(conn.stats.label)"
-            if conn.stats.txBytes > 0 || conn.stats.rxBytes > 0 {
-                line += "  \u{2191}\(formatBytes(conn.stats.txBytes)) \u{2193}\(formatBytes(conn.stats.rxBytes))"
-            }
-            let subLine = truncate(line, to: Int(maxX))
-            let connAttr = conn.stats.alive
-                ? COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
-                : COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
-            attron(connAttr)
-            mvaddstr(y, 0, subLine)
-            attroff(connAttr)
-            y += 1
-        }
-        if conns.count > maxSubRows, y < maxY - 1 {
-            let moreNet = "    -> ... +\(conns.count - maxSubRows) more"
-            attron(COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM)
-            mvaddstr(y, 0, truncate(moreNet, to: Int(maxX)))
-            attroff(COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM)
-            y += 1
-        }
-
-
-        // Sub-rows: most recently written files (latest first)
-        let writtenFiles = row.recentWrittenFiles
-        let showFiles = Array(writtenFiles.prefix(maxSubRows))
-        for file in showFiles {
-            guard y < maxY - 1 else { break }
-            var parts: [String] = []
-            parts.append("W:\(file.stats.writes)")
-            // Show file size and check if still exists
-            var sb = stat()
-            let fileExists = stat(file.path, &sb) == 0
-            if fileExists && sb.st_size > 0 {
-                parts.append(formatBytes(UInt64(sb.st_size)))
-            }
-            if file.stats.unlinks > 0 { parts.append("D:\(file.stats.unlinks)") }
-            if file.stats.renames > 0 { parts.append("MV:\(file.stats.renames)") }
-            let statsStr = parts.joined(separator: " ")
-            let relPath = relativePath(file.path, cwd: row.cwd)
-            let shortPath = shortenPath(relPath, maxLen: Int(maxX) - 12 - statsStr.count)
-            let subLine = truncate(
-                "    -> \(shortPath)  \(statsStr)",
-                to: Int(maxX)
-            )
-            let fileAttr = fileExists
-                ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
-                : COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
-            attron(fileAttr)
-            mvaddstr(y, 0, subLine)
-            attroff(fileAttr)
-            y += 1
-        }
-        if writtenFiles.count > maxSubRows, y < maxY - 1 {
-            let moreFile = "  FILE ... +\(writtenFiles.count - maxSubRows) more"
-            attron(COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
-            mvaddstr(y, 0, truncate(moreFile, to: Int(maxX)))
-            attroff(COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
-            y += 1
-        }
-
-        return y
+        return y + 1
     }
 
     // MARK: - Formatting helpers
