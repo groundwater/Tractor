@@ -135,15 +135,13 @@ struct Trace: ParsableCommand {
                         continue
                     }
 
-                    // Kill mode intercepts number keys
+                    // Kill modal
                     if t.isKillMode {
                         switch ch {
-                        case 49: t.sendSignal(1)
-                        case 50: t.sendSignal(2)
-                        case 51: t.sendSignal(3)
-                        case 57: t.sendSignal(9)
-                        case 53: t.sendSignal(15)
-                        case 27, 107: t.enterKillMode()
+                        case 259: t.killModalUp()
+                        case 258: t.killModalDown()
+                        case 10, 13: t.killModalConfirm()
+                        case 27, 107: t.enterKillMode() // esc or k = cancel
                         default: break
                         }
                         continue

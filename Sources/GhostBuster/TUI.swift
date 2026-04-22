@@ -35,6 +35,7 @@ enum TUIColor: Int32 {
     case subFile = 7
     case menuBar = 8
     case menuHighlight = 9
+    case menuDisabled = 10
 }
 
 // MARK: - Sample tree node
@@ -348,6 +349,12 @@ final class TUI: EventSink {
         init_pair(Int16(TUIColor.subFile.rawValue), Int16(COLOR_MAGENTA), -1)
         init_pair(Int16(TUIColor.menuBar.rawValue), Int16(COLOR_BLACK), Int16(COLOR_WHITE))
         init_pair(Int16(TUIColor.menuHighlight.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLUE))
+        // Custom gray for disabled menu highlight (256-color terminal)
+        if COLORS >= 256 {
+            init_pair(Int16(TUIColor.menuDisabled.rawValue), 245, 240)  // gray on dark gray
+        } else {
+            init_pair(Int16(TUIColor.menuDisabled.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLACK))
+        }
 
         // Install SIGWINCH handler
         signal(SIGWINCH) { _ in
@@ -891,14 +898,40 @@ final class TUI: EventSink {
     }
 
     var isKillMode: Bool { killMode }
+    private var killSignalIndex = 0
+    private let killSignals: [(name: String, signal: Int32)] = [
+        ("SIGHUP (1)", 1),
+        ("SIGINT (2)", 2),
+        ("SIGQUIT (3)", 3),
+        ("SIGTERM (15)", 15),
+        ("SIGKILL (9)", 9),
+    ]
 
     func enterKillMode() {
         killMode = !killMode
+        killSignalIndex = 3  // default to SIGTERM
+        forceRender()
+    }
+
+    func killModalUp() {
+        if killSignalIndex > 0 { killSignalIndex -= 1 }
+        forceRender()
+    }
+
+    func killModalDown() {
+        if killSignalIndex < killSignals.count - 1 { killSignalIndex += 1 }
+        forceRender()
+    }
+
+    func killModalConfirm() {
+        guard killMode else { return }
+        guard let pid = pidForRow(selectedIndex) else { return }
+        kill(pid, killSignals[killSignalIndex].signal)
+        killMode = false
         forceRender()
     }
 
     func sendSignal(_ signal: Int32) {
-        guard killMode else { return }
         guard let pid = pidForRow(selectedIndex) else { return }
         kill(pid, signal)
         killMode = false
@@ -2109,6 +2142,9 @@ final class TUI: EventSink {
         if isSampleConfigOpen {
             renderSampleConfigModal(maxY: maxY, maxX: maxX)
         }
+        if killMode {
+            renderKillModal(maxY: maxY, maxX: maxX)
+        }
 
         refresh()
     }
@@ -2325,7 +2361,7 @@ final class TUI: EventSink {
             if isHighlighted && item.enabled {
                 itemAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
             } else if isHighlighted && !item.enabled {
-                itemAttr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_REVERSE  // darker gray for disabled highlight
+                itemAttr = COLOR_PAIR(TUIColor.menuDisabled.rawValue)
             } else if !item.enabled {
                 itemAttr = barAttr | ATTR_DIM
             } else {
@@ -2392,6 +2428,40 @@ final class TUI: EventSink {
         let footer = "Enter: start    Esc: cancel    \u{2191}\u{2193}: field    \u{25C0}\u{25B6}: value"
         attron(barAttr | ATTR_DIM)
         mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
+        attroff(barAttr | ATTR_DIM)
+    }
+
+    private func renderKillModal(maxY: Int32, maxX: Int32) {
+        let mWidth = 30
+        let mHeight = killSignals.count + 4
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let hlAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+
+        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        attron(barAttr | ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Send Signal \(String(repeating: "\u{2500}", count: max(0, mWidth - 16)))\u{2510}")
+        for row in 1..<(mHeight - 1) {
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: mWidth - 2))\u{2502}")
+        }
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
+        attroff(barAttr | ATTR_BOLD)
+
+        for (i, sig) in killSignals.enumerated() {
+            let lineY = Int32(mY + 2 + i)
+            let isSelected = i == killSignalIndex
+            let attr = isSelected ? hlAttr : barAttr
+            let padded = "  \(sig.name)" + String(repeating: " ", count: max(0, mWidth - 4 - sig.name.count))
+            attron(attr)
+            mvaddstr(lineY, Int32(mX + 1), String(padded.prefix(mWidth - 2)))
+            attroff(attr)
+        }
+
+        let footer = "Enter: send    Esc: cancel"
+        attron(barAttr | ATTR_DIM)
+        mvaddstr(Int32(mY + 1), Int32(mX + 2), footer)
         attroff(barAttr | ATTR_DIM)
     }
 
