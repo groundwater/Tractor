@@ -106,6 +106,7 @@ final class NetworkStats {
                 this.lock.lock()
                 this.sourceDesc.removeValue(forKey: sourceKey)
                 this.sourceCounts.removeValue(forKey: sourceKey)
+                this.sources.removeAll { $0 == source }
                 this.lock.unlock()
             }
 
@@ -142,17 +143,27 @@ final class NetworkStats {
     /// Trigger a refresh — queries descriptions and counts per source
     func refresh() {
         guard ready else { return }
+        // Don't queue if a refresh is already pending
+        guard !refreshing else { return }
+        refreshing = true
         queue.async { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
-            let srcs = self.sources
+            let srcs = Array(self.sources)
             self.lock.unlock()
             for src in srcs {
+                // Check source is still valid before querying
+                self.lock.lock()
+                let valid = self.sources.contains(where: { $0 == src })
+                self.lock.unlock()
+                guard valid else { continue }
                 self.queryDescFn(src)
                 self.queryCountsFn(src)
             }
+            self.refreshing = false
         }
     }
+    private var refreshing = false
 
     /// Get all connections for a specific PID, merging desc + counts
     func connectionsForPid(_ pid: pid_t) -> [NetConnectionInfo] {
