@@ -284,7 +284,7 @@ final class TUI: EventSink {
 
     private static let baseColumnLayout = ColumnLayout(pid: 2, time: 10, ops: 17, status: 23, process: 29)
 
-    /// PIDs to exclude from display (GhostBuster itself + parents)
+    /// PIDs to exclude from display (Tractor itself + parents)
     private var excludedPids: Set<pid_t> = []
     /// Our own PID for dynamic child exclusion
     private var selfPid: pid_t = 0
@@ -931,7 +931,20 @@ final class TUI: EventSink {
         case .sampleHeader, .sampleNode: return .sample
         case .netHeader, .netDetail: return .network
         case .filesHeader, .fileDetail: return .files
-        default: return .process
+        default:
+            // Check if we're inside a sample box by scanning upward for sampleHeader
+            if let pid = pidForRow(selectedIndex) {
+                for i in stride(from: selectedIndex - 1, through: max(0, selectedIndex - 50), by: -1) {
+                    guard let r = displayRows[safe: i] else { break }
+                    switch r {
+                    case .sampleHeader(let p) where p == pid: return .sample
+                    case .infoBorderTop: return .process  // hit box top, stop
+                    case .process: return .process  // hit a process row, stop
+                    default: continue
+                    }
+                }
+            }
+            return .process
         }
     }
 
@@ -1478,24 +1491,27 @@ final class TUI: EventSink {
             return
         }
         guard let row = displayRows[safe: selectedIndex] else { return }
+
+        // Gather state under lock, then act after releasing
         lock.lock()
-        if isDisclosed(row) {
+        let disclosed = isDisclosed(row)
+        let parent = disclosed ? nil : parentRow(row)
+        if disclosed {
             setDisclosure(row, open: false)
-            lock.unlock()
+        }
+        lock.unlock()
+
+        if disclosed {
             forceRender()
-        } else if let parent = parentRow(row) {
-            lock.unlock()
+        } else if let parent = parent {
             jumpToParent(parent)
         } else {
-            lock.unlock()
             forceRender()
         }
     }
 
     private func jumpToParent(_ target: DisplayRow) {
-        // First rebuild display rows
-        doRender()
-        // Then find the target
+        // Find the target in the current display rows
         if case .process(let pid, _) = target {
             for (i, dr) in displayRows.enumerated() {
                 if case .process(let p, _) = dr, p == pid {
@@ -1508,7 +1524,6 @@ final class TUI: EventSink {
             selectedIndex = idx
             selectedIndices.removeAll()
         }
-        // Render again with correct cursor and scroll
         forceRender()
     }
 
@@ -1534,9 +1549,12 @@ final class TUI: EventSink {
     func collapseAll() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         guard let pid = pidForRow(selectedIndex) else { return }
+
+        // Gather state under lock, then act after releasing
         lock.lock()
-        if isDisclosed(row) {
-            // Close self and all descendants
+        let disclosed = isDisclosed(row)
+        var parent: DisplayRow? = nil
+        if disclosed {
             switch row {
             case .process:
                 closeAllDisclosures(pid)
@@ -1548,14 +1566,19 @@ final class TUI: EventSink {
             default:
                 setDisclosure(row, open: false)
             }
-            lock.unlock()
-            forceRender()
-        } else if let parent = parentRow(row) {
-            setDisclosure(parent, open: false)
-            lock.unlock()
-            jumpToParent(parent)
         } else {
-            lock.unlock()
+            parent = parentRow(row)
+            if let p = parent {
+                setDisclosure(p, open: false)
+            }
+        }
+        lock.unlock()
+
+        if disclosed {
+            forceRender()
+        } else if parent != nil {
+            jumpToParent(parent!)
+        } else {
             forceRender()
         }
     }
@@ -1657,10 +1680,9 @@ final class TUI: EventSink {
         switch row {
         case .process(let pid, let depth):
             // In tree mode, find the parent process by ppid
+            // NOTE: caller must hold lock
             if depth > 0 {
-                lock.lock()
                 let ppid = rows[pid]?.ppid ?? 0
-                lock.unlock()
                 // Find the parent process row in displayRows
                 for dr in displayRows {
                     if case .process(let p, _) = dr, p == ppid { return dr }
@@ -2024,7 +2046,7 @@ final class TUI: EventSink {
         let allRows = Array(rows.values)
         lock.unlock()
 
-        // Filter out GhostBuster's own processes and its children
+        // Filter out Tractor's own processes and its children
         let visible = allRows.filter { !isExcluded($0) && (showExited || $0.isRunning) }
 
         // Sort: running first (oldest start first), then exited (most recent exit first)

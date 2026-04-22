@@ -1,4 +1,4 @@
-PROJECT  = GhostBuster
+PROJECT  = Tractor
 SCHEME   = $(PROJECT)
 BUILD_DIR = $(CURDIR)/.build
 

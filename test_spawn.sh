@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wait for GhostBuster to attach
+# Wait for Tractor to attach
 sleep 3
 
 echo "Spawning child processes..."

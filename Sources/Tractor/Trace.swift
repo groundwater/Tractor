@@ -68,7 +68,7 @@ struct Trace: ParsableCommand {
         } else {
             let t = TUI()
             t.excludeSelf()
-            t.start(header: "GhostBuster - tracing \(agentLabel)")
+            t.start(header: "Tractor - tracing \(agentLabel)")
             tui = t
             sink = t
         }
@@ -109,7 +109,7 @@ struct Trace: ParsableCommand {
         }
 
         if json {
-            fputs("GhostBuster: tracing started. JSON output on stdout.\n", stderr)
+            fputs("Tractor: tracing started. JSON output on stdout.\n", stderr)
         }
 
         // In TUI mode, also check for 'q' keypress to quit
@@ -221,8 +221,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.files)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
-                    case 105, 100, 110, 122, 107, 115, 119, 108:
-                        // i, d, n, z, k, s, w, l — all routed through executeShortcut for flash
+                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120:
+                        // i, d, n, z, k, s, w, l, r, x — all routed through executeShortcut for flash
                         t.executeShortcut(ch)
                     case 63: // '?'
                         t.toggleHints()

@@ -34,7 +34,7 @@ final class NetworkStats {
     private let queryDescFn: QueryDescFn
 
     private var manager: Ptr?
-    private let queue = DispatchQueue(label: "com.ghostbuster.netstats")
+    private let queue = DispatchQueue(label: "com.jacobgroundwater.tractor.netstats")
     private let lock = NSLock()
 
     /// Retain ObjC blocks via NSMutableArray so they aren't freed

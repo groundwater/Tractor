@@ -1,8 +1,8 @@
-name: GhostBuster
+name: Tractor
 options:
   deploymentTarget:
     macOS: "15.0"
-  bundleIdPrefix: com.ghostbuster
+  bundleIdPrefix: com.jacobgroundwater
 
 packages:
   swift-argument-parser:
@@ -10,26 +10,26 @@ packages:
     from: "1.3.0"
 
 targets:
-  GhostBuster:
+  Tractor:
     type: tool
     platform: macOS
     sources:
-      - Sources/GhostBuster
+      - Sources/Tractor
     dependencies:
       - package: swift-argument-parser
         product: ArgumentParser
     settings:
       base:
-        PRODUCT_NAME: GhostBuster
+        PRODUCT_NAME: Tractor
         SWIFT_VERSION: "5.9"
         CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_ENTITLEMENTS: Sources/GhostBuster/GhostBuster.entitlements
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/GhostBuster/BridgingHeader.h
+        CODE_SIGN_ENTITLEMENTS: Sources/Tractor/Tractor.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
         OTHER_LDFLAGS:
           - "-lEndpointSecurity"
           - "-lbsm"
           - "-lpcap"
     entitlements:
-      path: Sources/GhostBuster/GhostBuster.entitlements
+      path: Sources/Tractor/Tractor.entitlements
       properties:
         com.apple.developer.endpoint-security.client: true
