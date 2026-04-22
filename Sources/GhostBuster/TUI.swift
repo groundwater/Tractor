@@ -96,9 +96,12 @@ final class ProcessRow {
     var isStopped: Bool = false
     var disclosed: Bool = false
 
-    /// Independent panel disclosures — all can be open simultaneously
+    /// Panel visibility (toggled by i/s/w) and disclosure state
+    var infoVisible: Bool = false
     var infoDisclosed: Bool = false
+    var sampleVisible: Bool = false
     var sampleDisclosed: Bool = false
+    var waitVisible: Bool = false
     var waitDisclosed: Bool = false
 
     /// Sample/wait results stored per-process
@@ -392,7 +395,8 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        row.infoDisclosed = !row.infoDisclosed
+        row.infoVisible = !row.infoVisible
+        row.infoDisclosed = row.infoVisible  // auto-open when showing
         if row.infoDisclosed && !row.infoLoaded {
             lock.unlock()
             let (path, _, _) = getProcessInfo(pid)
@@ -472,9 +476,10 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        row.sampleDisclosed = !row.sampleDisclosed
+        row.sampleVisible = !row.sampleVisible
+        row.sampleDisclosed = row.sampleVisible
         lock.unlock()
-        if row.sampleDisclosed && row.sampleTree.isEmpty {
+        if row.sampleVisible && row.sampleTree.isEmpty {
             runSampleAsync(pid)
         }
         forceRender()
@@ -651,9 +656,10 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        row.waitDisclosed = !row.waitDisclosed
+        row.waitVisible = !row.waitVisible
+        row.waitDisclosed = row.waitVisible
         lock.unlock()
-        if row.waitDisclosed && row.waitResults.isEmpty {
+        if row.waitVisible && row.waitResults.isEmpty {
             runWaitAsync(pid)
         }
         forceRender()
@@ -1319,7 +1325,9 @@ final class TUI: EventSink {
         case .flat:
             for row in allVisible {
                 displayRows.append(.process(row.pid, 0))
-                appendPanelRows(row, depth: 0)
+                if row.disclosed {
+                    appendPanelRows(row, depth: 0)
+                }
             }
         case .tree:
             // Build parent->children map
@@ -1335,10 +1343,10 @@ final class TUI: EventSink {
             }
             func appendTree(_ row: ProcessRow, depth: Int) {
                 displayRows.append(.process(row.pid, depth))
-                // Inline panel
-                appendPanelRows(row, depth: depth)
-                // Child processes
                 if row.disclosed {
+                    // Inline panels
+                    appendPanelRows(row, depth: depth)
+                    // Child processes
                     let children = childrenOf[row.pid] ?? []
                     for child in children {
                         appendTree(child, depth: depth + 1)
@@ -1650,50 +1658,56 @@ final class TUI: EventSink {
     }
 
     private func appendPanelRows(_ row: ProcessRow, depth: Int) {
-        // Info box
-        displayRows.append(.infoBorderTop(row.pid, depth))
-        displayRows.append(.processHeader(row.pid))
-        if row.infoDisclosed {
-            appendProcessDisclosures(row)
+        // Info box (only if visible)
+        if row.infoVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
+            displayRows.append(.processHeader(row.pid))
+            if row.infoDisclosed {
+                appendProcessDisclosures(row)
+            }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
-        displayRows.append(.infoBorderBottom(row.pid, depth))
 
-        // Sample box
-        displayRows.append(.infoBorderTop(row.pid, depth))
-        displayRows.append(.sampleHeader(row.pid))
-        if row.sampleDisclosed {
-            if row.isSampling {
-                displayRows.append(.processDetail(row.pid, "Sampling..."))
-            } else if row.sampleTree.isEmpty {
-                displayRows.append(.processDetail(row.pid, "Press s to sample"))
-            } else {
-                func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
-                    for (i, node) in nodes.enumerated() {
-                        let nodePath = path + [i]
-                        displayRows.append(.sampleNode(row.pid, nodePath))
-                        if node.disclosed {
-                            appendSampleNodes(node.children, path: nodePath)
+        // Sample box (only if visible)
+        if row.sampleVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
+            displayRows.append(.sampleHeader(row.pid))
+            if row.sampleDisclosed {
+                if row.isSampling {
+                    displayRows.append(.processDetail(row.pid, "Sampling..."))
+                } else if row.sampleTree.isEmpty {
+                    displayRows.append(.processDetail(row.pid, "Press s to sample"))
+                } else {
+                    func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {
+                        for (i, node) in nodes.enumerated() {
+                            let nodePath = path + [i]
+                            displayRows.append(.sampleNode(row.pid, nodePath))
+                            if node.disclosed {
+                                appendSampleNodes(node.children, path: nodePath)
+                            }
                         }
                     }
+                    appendSampleNodes(row.sampleTree, path: [])
                 }
-                appendSampleNodes(row.sampleTree, path: [])
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
-        displayRows.append(.infoBorderBottom(row.pid, depth))
 
-        // Wait box
-        displayRows.append(.infoBorderTop(row.pid, depth))
-        displayRows.append(.waitHeader(row.pid))
-        if row.waitDisclosed {
-            if row.waitResults.isEmpty {
-                displayRows.append(.processDetail(row.pid, "Press w to diagnose"))
-            } else {
-                for i in 0..<row.waitResults.count {
-                    displayRows.append(.waitLine(row.pid, i))
+        // Wait box (only if visible)
+        if row.waitVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
+            displayRows.append(.waitHeader(row.pid))
+            if row.waitDisclosed {
+                if row.waitResults.isEmpty {
+                    displayRows.append(.processDetail(row.pid, "Press w to diagnose"))
+                } else {
+                    for i in 0..<row.waitResults.count {
+                        displayRows.append(.waitLine(row.pid, i))
+                    }
                 }
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
-        displayRows.append(.infoBorderBottom(row.pid, depth))
     }
 
     private func appendProcessDisclosures(_ row: ProcessRow) {
