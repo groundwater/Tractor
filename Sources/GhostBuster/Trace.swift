@@ -178,6 +178,10 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.view)
                     case 105: // 'i'
                         t.toggleInfo()
+                    case 100: // 'd' - show files
+                        t.toggleFiles()
+                    case 110: // 'n' - show network
+                        t.toggleNetwork()
                     case 122: // 'z'
                         t.togglePauseProcess()
                     case 107: // 'k'

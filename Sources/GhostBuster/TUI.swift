@@ -101,6 +101,8 @@ final class ProcessRow {
     /// Panel visibility (toggled by i/s/w) and disclosure state
     var infoVisible: Bool = false
     var infoDisclosed: Bool = false
+    var filesVisible: Bool = false
+    var netVisible: Bool = false
     var sampleVisible: Bool = false
     var sampleDisclosed: Bool = false
     var waitVisible: Bool = false
@@ -429,11 +431,18 @@ final class TUI: EventSink {
         let hasPid = pidForRow(selectedIndex) != nil
         lock.lock()
         let pid = pidForRow(selectedIndex)
-        let isRunning = pid != nil ? (rows[pid!]?.isRunning ?? false) : false
-        let isStopped = pid != nil ? (rows[pid!]?.isStopped ?? false) : false
+        let row = pid != nil ? rows[pid!] : nil
+        let isRunning = row?.isRunning ?? false
+        let isStopped = row?.isStopped ?? false
+        let infoVis = row?.infoVisible ?? false
+        let filesVis = row?.filesVisible ?? false
+        let netVis = row?.netVisible ?? false
         lock.unlock()
         return [
-            MenuItem(label: "Info", shortcut: "i", key: 105, enabled: hasPid),
+            MenuItem(label: "Show Info", shortcut: "i", key: 105, checked: infoVis, enabled: hasPid),
+            MenuItem(label: "Show Files", shortcut: "d", key: 100, checked: filesVis, enabled: hasPid),
+            MenuItem(label: "Show Network", shortcut: "n", key: 110, checked: netVis, enabled: hasPid),
+            .sep(),
             MenuItem(label: "Sample", shortcut: "s", key: 115, enabled: hasPid && isRunning),
             MenuItem(label: "Wait", shortcut: "w", key: 119, enabled: hasPid && isRunning),
             .sep(),
@@ -524,10 +533,32 @@ final class TUI: EventSink {
         forceRender()
     }
 
+    func toggleFiles() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        row.filesVisible = !row.filesVisible
+        row.disclosed = true
+        lock.unlock()
+        ensureDisclosedAndJump(pid, to: row.filesVisible ? .filesHeader(pid) : nil)
+    }
+
+    func toggleNetwork() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        row.netVisible = !row.netVisible
+        row.disclosed = true
+        lock.unlock()
+        ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
+    }
+
     func executeShortcut(_ key: Int32) {
         activeMenu = nil  // close menu on shortcut
         switch key {
         case 105: flashMenu(.process); toggleInfo()          // i
+        case 100: flashMenu(.process); toggleFiles()         // d
+        case 110: flashMenu(.process); toggleNetwork()       // n
         case 115: flashMenu(.process); sampleProcess()       // s
         case 119: flashMenu(.process); diagnoseWait()        // w
         case 107: flashMenu(.process); enterKillMode()       // k
@@ -1966,6 +1997,20 @@ final class TUI: EventSink {
             displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
+        // Files box (only if visible)
+        if row.filesVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
+            appendFilesDisclosures(row)
+            displayRows.append(.infoBorderBottom(row.pid, depth))
+        }
+
+        // Network box (only if visible)
+        if row.netVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
+            appendNetDisclosures(row)
+            displayRows.append(.infoBorderBottom(row.pid, depth))
+        }
+
         // Sample box (only if visible)
         if row.sampleVisible {
             displayRows.append(.infoBorderTop(row.pid, depth))
@@ -2028,19 +2073,21 @@ final class TUI: EventSink {
             displayRows.append(.resourceDetail(row.pid, "FDs"))
             displayRows.append(.resourceDetail(row.pid, "Disk"))
         }
+    }
+
+    private func appendFilesDisclosures(_ row: ProcessRow) {
         let files = row.recentWrittenFiles
-        if !files.isEmpty {
-            displayRows.append(.filesHeader(row.pid))
-            if row.filesDisclosed {
-                for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
-            }
+        displayRows.append(.filesHeader(row.pid))
+        if row.filesDisclosed {
+            for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
         }
+    }
+
+    private func appendNetDisclosures(_ row: ProcessRow) {
         let conns = row.sortedConnections
-        if !conns.isEmpty {
-            displayRows.append(.netHeader(row.pid))
-            if row.netDisclosed {
-                for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
-            }
+        displayRows.append(.netHeader(row.pid))
+        if row.netDisclosed {
+            for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
         }
     }
 
