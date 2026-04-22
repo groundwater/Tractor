@@ -654,14 +654,12 @@ final class TUI: EventSink {
         let needsInfo = rows.values.filter { $0.processDisclosed && !$0.infoLoaded }
         lock.unlock()
         for row in needsInfo {
-            let (path, _, argv) = getProcessInfo(row.pid)
+            let (path, _, _) = getProcessInfo(row.pid)
+            let args = getProcessArgs(row.pid)
             let envVars = getProcessEnv(row.pid)
             lock.lock()
             row.fullPath = path
-            row.argvArray = argv.components(separatedBy: "\0").filter { !$0.isEmpty }
-            if row.argvArray.isEmpty {
-                row.argvArray = argv.components(separatedBy: " ")
-            }
+            row.argvArray = args
             row.envVars = envVars
             row.infoLoaded = true
             lock.unlock()
@@ -895,9 +893,7 @@ final class TUI: EventSink {
             case .processHeader(let pid):
                 let disc = rows[pid]?.processDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                let label = "  \(disc) Process"
-                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 2, content: "\(disc) Process", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -911,9 +907,7 @@ final class TUI: EventSink {
                     default:        value = key
                     }
                     lock.unlock()
-                    let label = "      \(value)"
-                    let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
-                    attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                    drawLine(y: y, indent: 6, content: value, color: ATTR_DIM, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -921,42 +915,32 @@ final class TUI: EventSink {
                 let count = rows[pid]?.argvArray.count ?? 0
                 let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                let label = "    \(disc) Args (\(count))"
-                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 4, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                 y += 1
 
             case .argDetail(let pid, let idx):
                 let arg = rows[pid]?.argvArray[safe: idx] ?? ""
                 lock.unlock()
-                let label = "        \(arg)"
-                let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 8, content: arg, color: ATTR_DIM, highlighted: isCursor, width: width)
                 y += 1
 
             case .envHeader(let pid):
                 let count = rows[pid]?.envVars.count ?? 0
                 let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                let label = "    \(disc) Env (\(count) vars)"
-                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 4, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                 y += 1
 
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                let label = "        \(env)"
-                let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 8, content: env, color: ATTR_DIM, highlighted: isCursor, width: width)
                 y += 1
 
             case .resourcesHeader(let pid):
                 let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                let label = "    \(disc) Resources"
-                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
-                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                drawLine(y: y, indent: 4, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                 y += 1
 
             case .resourceDetail(let pid, let key):
@@ -967,18 +951,13 @@ final class TUI: EventSink {
                         let uMin = Int(row.cpuUser) / 60; let uSec = Int(row.cpuUser) % 60
                         let sMin = Int(row.cpuSys) / 60; let sSec = Int(row.cpuSys) % 60
                         value = "CPU: \(uMin):\(String(format: "%02d", uSec)) user, \(sMin):\(String(format: "%02d", sSec)) sys"
-                    case "Memory":
-                        value = "Memory: \(formatBytes(row.rss)) RSS"
-                    case "FDs":
-                        value = "FDs: \(row.fdCount) open"
-                    case "Disk":
-                        value = "Disk: R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
+                    case "Memory":  value = "Memory: \(formatBytes(row.rss)) RSS"
+                    case "FDs":     value = "FDs: \(row.fdCount) open"
+                    case "Disk":    value = "Disk: R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
                     default: value = key
                     }
                     lock.unlock()
-                    let label = "        \(value)"
-                    let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
-                    attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                    drawLine(y: y, indent: 8, content: value, color: ATTR_DIM, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -987,12 +966,8 @@ final class TUI: EventSink {
                     let totalWrites = row.files.values.reduce(0) { $0 + $1.writes }
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
-                    let label = "  \(disc) Files (\(fileCount) written, W:\(totalWrites))"
                     lock.unlock()
-                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD)
-                    attron(attr)
-                    mvaddstr(y, 0, truncate(label, to: width))
-                    attroff(attr)
+                    drawLine(y: y, indent: 2, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1004,17 +979,12 @@ final class TUI: EventSink {
                     if let s = stats {
                         parts.append("W:\(s.writes)")
                         var sb = stat()
-                        let exists = stat(path, &sb) == 0
-                        if exists && sb.st_size > 0 { parts.append(formatBytes(UInt64(sb.st_size))) }
+                        if stat(path, &sb) == 0 && sb.st_size > 0 { parts.append(formatBytes(UInt64(sb.st_size))) }
                     }
                     let statsStr = parts.joined(separator: " ")
                     let relPath = relativePath(path, cwd: row.cwd)
-                    let shortPath = shortenPath(relPath, maxLen: width - 10 - statsStr.count)
-                    let label = "      \(shortPath)  \(statsStr)"
-                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
-                    attron(attr)
-                    mvaddstr(y, 0, truncate(label, to: width))
-                    attroff(attr)
+                    let shortPath = shortenPath(relPath, maxLen: width - 8 - statsStr.count)
+                    drawLine(y: y, indent: 6, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1024,27 +994,20 @@ final class TUI: EventSink {
                     let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
-                    let label = "  \(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))"
                     lock.unlock()
-                    let attr = isCursor ? (COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD)
-                    attron(attr)
-                    mvaddstr(y, 0, truncate(label, to: width))
-                    attroff(attr)
+                    drawLine(y: y, indent: 2, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
 
             case .netDetail(let pid, let key):
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
-                    var line = "      \(conn.label)"
+                    var line = "\(conn.label)"
                     if conn.txBytes > 0 || conn.rxBytes > 0 {
                         line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
                     }
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
-                    let attr = isCursor ? (COLOR_PAIR(connColor.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(connColor.rawValue) | ATTR_DIM)
-                    attron(attr)
-                    mvaddstr(y, 0, truncate(line, to: width))
-                    attroff(attr)
+                    drawLine(y: y, indent: 6, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isCursor, width: width)
                     y += 1
                 } else { lock.unlock() }
             }
@@ -1131,6 +1094,19 @@ final class TUI: EventSink {
                             (status as NSString).utf8String!)
         let processWidth = max(10, maxWidth - prefix.count)
         return prefix + truncateProcess(process, to: processWidth)
+    }
+
+    /// Render a line with highlighting starting at the indent level
+    private func drawLine(y: Int32, indent: Int, content: String, color: Int32, highlighted: Bool, width: Int) {
+        let indentStr = String(repeating: " ", count: indent)
+        let contentStr = truncate(content, to: width - indent)
+        // Pad content to fill the line (so reverse covers the full width)
+        let padded = contentStr + String(repeating: " ", count: max(0, width - indent - contentStr.count))
+        mvaddstr(y, 0, indentStr)
+        let attr = highlighted ? (color | ATTR_REVERSE) : color
+        attron(attr)
+        addstr(padded)
+        attroff(attr)
     }
 
     private func formatBytes(_ bytes: UInt64) -> String {

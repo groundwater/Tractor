@@ -193,6 +193,38 @@ func getProcessInfo(_ pid: pid_t) -> (path: String, ppid: pid_t, argv: String) {
     return (path, ppid, argv)
 }
 
+/// Get argv as an array for a process
+func getProcessArgs(_ pid: pid_t) -> [String] {
+    var argmax: Int = 0
+    var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]
+    var argmaxSize = MemoryLayout<Int>.size
+    sysctl(&mib, 2, &argmax, &argmaxSize, nil, 0)
+
+    var procArgs = [UInt8](repeating: 0, count: argmax)
+    var procArgsSize = argmax
+    var mib2: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    guard sysctl(&mib2, 3, &procArgs, &procArgsSize, nil, 0) == 0, procArgsSize > MemoryLayout<Int32>.size else {
+        return []
+    }
+
+    let argc = procArgs.withUnsafeBytes { $0.load(as: Int32.self) }
+    var offset = MemoryLayout<Int32>.size
+
+    while offset < procArgsSize && procArgs[offset] != 0 { offset += 1 }
+    while offset < procArgsSize && procArgs[offset] == 0 { offset += 1 }
+
+    var args: [String] = []
+    for _ in 0..<argc {
+        guard offset < procArgsSize else { break }
+        var end = offset
+        while end < procArgsSize && procArgs[end] != 0 { end += 1 }
+        let arg = String(bytes: procArgs[offset..<end], encoding: .utf8) ?? ""
+        args.append(arg)
+        offset = end + 1
+    }
+    return args
+}
+
 /// Get environment variables for a process from KERN_PROCARGS2
 func getProcessEnv(_ pid: pid_t) -> [String] {
     var argmax: Int = 0
