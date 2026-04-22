@@ -23,6 +23,20 @@ struct Trace: ParsableCommand {
     var json: Bool = false
 
     func run() throws {
+        // Auto-escalate to root if needed
+        if geteuid() != 0 {
+            let args = CommandLine.arguments
+            let sudo = Process()
+            sudo.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            sudo.arguments = args
+            sudo.standardInput = FileHandle.standardInput
+            sudo.standardOutput = FileHandle.standardOutput
+            sudo.standardError = FileHandle.standardError
+            try sudo.run()
+            sudo.waitUntilExit()
+            Foundation.exit(sudo.terminationStatus)
+        }
+
         guard agent != nil || pid != nil else {
             throw ValidationError("Provide --agent or --pid")
         }
@@ -190,6 +204,8 @@ struct Trace: ParsableCommand {
                         t.sampleProcess()
                     case 119: // 'w'
                         t.diagnoseWait()
+                    case 108: // 'l' - clear exited
+                        t.clearExited()
                     case 63: // '?'
                         t.toggleHints()
                     case 27: // ESC

@@ -489,7 +489,7 @@ final class TUI: EventSink {
         return [
             MenuItem(label: "Filter", shortcut: "/", key: nil, enabled: false),
             MenuItem(label: "Find", shortcut: "f", key: nil, enabled: false),
-            MenuItem(label: "Clear", shortcut: "l", key: nil, enabled: false),
+            MenuItem(label: "Clear", shortcut: "l", key: 108),
             MenuItem(label: "Copy", shortcut: "c", key: nil, enabled: false),
         ]
     }
@@ -581,6 +581,14 @@ final class TUI: EventSink {
         ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
     }
 
+    func clearExited() {
+        lock.lock()
+        let exited = rows.filter { !$0.value.isRunning }
+        for (pid, _) in exited { rows.removeValue(forKey: pid) }
+        lock.unlock()
+        forceRender()
+    }
+
     /// Map of shortcut key → (menu, action)
     private func shortcutAction(_ key: Int32) -> (() -> Void)? {
         switch key {
@@ -591,6 +599,7 @@ final class TUI: EventSink {
         case 119: return diagnoseWait        // w
         case 107: return enterKillMode       // k
         case 122: return togglePauseProcess  // z
+        case 108: return clearExited         // l
         default: return nil
         }
     }
