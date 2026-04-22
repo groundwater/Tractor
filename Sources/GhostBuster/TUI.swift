@@ -1825,7 +1825,9 @@ final class TUI: EventSink {
             case .processHeader(let pid):
                 let disc = rows[pid]?.infoDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Process Info", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                // Disclosure triangle outside the box border
+                mvaddstr(y, Int32(depthIndent), disc)
+                drawLine(y: y, indent: depthIndent + 4, content: "Process Info", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -1899,7 +1901,8 @@ final class TUI: EventSink {
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    mvaddstr(y, Int32(depthIndent), disc)
+                    drawLine(y: y, indent: depthIndent + 4, content: "Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1927,7 +1930,8 @@ final class TUI: EventSink {
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    mvaddstr(y, Int32(depthIndent), disc)
+                    drawLine(y: y, indent: depthIndent + 4, content: "Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1947,7 +1951,8 @@ final class TUI: EventSink {
                 let disc = rows[pid]?.sampleDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 let status = rows[pid]?.isSampling == true ? "Sampling..." : "Sample (3s)"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) \(status)", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                mvaddstr(y, Int32(depthIndent), disc)
+                drawLine(y: y, indent: depthIndent + 4, content: status, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .sampleNode(let pid, let path):
@@ -1966,7 +1971,8 @@ final class TUI: EventSink {
             case .waitHeader(let pid):
                 let disc = rows[pid]?.waitDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Wait Diagnosis", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                mvaddstr(y, Int32(depthIndent), disc)
+                drawLine(y: y, indent: depthIndent + 4, content: "Wait Diagnosis", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .waitLine(let pid, let idx):
@@ -2099,7 +2105,7 @@ final class TUI: EventSink {
             if isHighlighted && item.enabled {
                 itemAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
             } else if isHighlighted && !item.enabled {
-                itemAttr = barAttr | ATTR_DIM | ATTR_REVERSE
+                itemAttr = barAttr | ATTR_DIM  // light gray highlight for disabled
             } else if !item.enabled {
                 itemAttr = barAttr | ATTR_DIM
             } else {
