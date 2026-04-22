@@ -152,6 +152,8 @@ struct Trace: ParsableCommand {
                         t.toggleDisclose()
                     case 105: // 'i' - toggle inline info
                         t.toggleInfo()
+                    case 63: // '?' - toggle hints
+                        t.toggleHints()
                     case 27: // ESC
                         t.clearSelection()
                     case 104: // 'h' - toggle view mode

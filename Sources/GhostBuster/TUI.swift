@@ -175,6 +175,7 @@ final class TUI: EventSink {
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var paused = false
+    private var showHints = true
     private var selectedIndex = -1
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
@@ -332,6 +333,11 @@ final class TUI: EventSink {
         selectedIndex = -1
         selectedIndices.removeAll()
         scrollOffset = 0
+        render()
+    }
+
+    func toggleHints() {
+        showHints = !showHints
         render()
     }
 
@@ -1137,9 +1143,9 @@ final class TUI: EventSink {
             }
 
             // Hint line below last highlighted process row
-            if i == lastHighlightedIndex, y <= lastRow {
+            if showHints, i == lastHighlightedIndex, y <= lastRow {
                 if case .process(_, let depth) = dr {
-                    let hintIndent = String(repeating: " ", count: depth * 2 + 4)
+                    let hintIndent = String(repeating: " ", count: depth * 2 + 2)
                     let hint = "\(hintIndent)(i) info"
                     attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
                     mvaddstr(y, 0, truncate(hint, to: width))
