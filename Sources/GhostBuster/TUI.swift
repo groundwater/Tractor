@@ -191,10 +191,6 @@ final class TUI: EventSink {
         nodelay(stdscr, true)
         keypad(stdscr, true)
 
-        // Register Shift+Up/Down escape sequences as custom key codes
-        define_key("\u{1b}[1;2A", 400)  // Shift+Up
-        define_key("\u{1b}[1;2B", 401)  // Shift+Down
-
         guard has_colors() else {
             endwin()
             fputs("ERROR: Terminal does not support colors\n", stderr)
@@ -652,7 +648,7 @@ final class TUI: EventSink {
         if paused {
             label = "PAUSED"
         } else {
-            label = "q: quit  space: pause  \u{2191}\u{2193}: select  \u{25B6}\u{25C0}: expand"
+            label = "q: quit  space: pause  \u{2191}\u{2193}: select  J/K: multi-select  \u{25B6}\u{25C0}/enter: expand  esc: clear"
         }
 
         let text: String
