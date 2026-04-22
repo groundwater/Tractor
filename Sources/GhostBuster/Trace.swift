@@ -121,6 +121,30 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
+                    // Sample modal intercepts keys
+                    if t.isSampleModalOpen {
+                        switch ch {
+                        case 27, 113: t.closeSampleModal() // esc or q
+                        case 115: t.closeSampleModal(); t.sampleProcess() // s = resample
+                        default: break
+                        }
+                        continue
+                    }
+
+                    // Kill mode intercepts number keys
+                    if t.isKillMode {
+                        switch ch {
+                        case 49: t.sendSignal(1)   // 1 = HUP
+                        case 50: t.sendSignal(2)   // 2 = INT
+                        case 51: t.sendSignal(3)   // 3 = QUIT
+                        case 57: t.sendSignal(9)   // 9 = KILL
+                        case 53: t.sendSignal(15)  // 5 = TERM (shown as 15)
+                        case 27, 107: t.enterKillMode() // esc or k = cancel
+                        default: break
+                        }
+                        continue
+                    }
+
                     switch ch {
                     case 32:  // space
                         t.togglePause()
@@ -152,6 +176,12 @@ struct Trace: ParsableCommand {
                         t.toggleDisclose()
                     case 105: // 'i' - toggle inline info
                         t.toggleInfo()
+                    case 122: // 'z' - pause/unpause process
+                        t.togglePauseProcess()
+                    case 107: // 'k' - kill mode
+                        t.enterKillMode()
+                    case 115: // 's' - sample process
+                        t.sampleProcess()
                     case 63: // '?' - toggle hints
                         t.toggleHints()
                     case 27: // ESC

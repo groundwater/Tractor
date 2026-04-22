@@ -74,6 +74,7 @@ final class ProcessRow {
     var exitCode: Int32?
     var fileOps: Int = 0
     var cwd: String = ""
+    var isStopped: Bool = false
     var disclosed: Bool = false
     var infoDisclosed: Bool = false
     var processDisclosed: Bool = false
@@ -176,6 +177,8 @@ final class TUI: EventSink {
     private var stopped = false
     private var paused = false
     private var showHints = true
+    private var killMode = false       // waiting for signal number
+    private var samplingPid: pid_t? = nil  // currently sampling
     private var selectedIndex = -1
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
@@ -354,7 +357,33 @@ final class TUI: EventSink {
     }
 
     func toggleInfo() {
+        guard let dr = displayRows[safe: selectedIndex] else { return }
         guard let pid = pidForRow(selectedIndex) else { return }
+
+        // If we're inside an info box (not on a process row), close info and jump to process
+        if case .process = dr {
+            // On a process row — toggle normally
+        } else {
+            lock.lock()
+            rows[pid]?.infoDisclosed = false
+            lock.unlock()
+            // Jump to the process row
+            if let idx = displayRows.firstIndex(of: .process(pid, 0)) {
+                selectedIndex = idx
+            } else {
+                // Search for any depth
+                for (i, r) in displayRows.enumerated() {
+                    if case .process(let p, _) = r, p == pid {
+                        selectedIndex = i
+                        break
+                    }
+                }
+            }
+            selectedIndices.removeAll()
+            render()
+            return
+        }
+
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
         row.infoDisclosed = !row.infoDisclosed
@@ -371,6 +400,114 @@ final class TUI: EventSink {
             row.infoLoaded = true
         }
         lock.unlock()
+        render()
+    }
+
+    // MARK: - Process actions
+
+    func togglePauseProcess() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        lock.lock()
+        guard let row = rows[pid], row.isRunning else { lock.unlock(); return }
+        if row.isStopped {
+            kill(pid, SIGCONT)
+            row.isStopped = false
+        } else {
+            kill(pid, SIGSTOP)
+            row.isStopped = true
+        }
+        lock.unlock()
+        render()
+    }
+
+    var isKillMode: Bool { killMode }
+
+    func enterKillMode() {
+        killMode = !killMode
+        render()
+    }
+
+    func sendSignal(_ signal: Int32) {
+        guard killMode else { return }
+        guard let pid = pidForRow(selectedIndex) else { return }
+        kill(pid, signal)
+        killMode = false
+        render()
+    }
+
+    func sampleProcess() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        samplingPid = pid
+        render()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let output = self?.runSample(pid) ?? []
+            DispatchQueue.main.async {
+                self?.showSampleResult(pid: pid, results: output)
+            }
+        }
+    }
+
+    private func runSample(_ pid: pid_t) -> [String] {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+        proc.arguments = ["\(pid)", "3", "-invertCallTree"]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+
+        do { try proc.run() } catch { return ["sample failed: \(error)"] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+
+        guard let output = String(data: data, encoding: .utf8) else { return [] }
+
+        // Parse: look for the heaviest leaf functions
+        var results: [(String, Int)] = []
+        var totalSamples = 0
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let spaceIdx = trimmed.firstIndex(of: " ") {
+                let numStr = String(trimmed[..<spaceIdx])
+                if let count = Int(numStr), count > 0 {
+                    let rest = trimmed[trimmed.index(after: spaceIdx)...].trimmingCharacters(in: .whitespaces)
+                    // Strip " (in libfoo.dylib) + 123" suffix
+                    let funcName: String
+                    if let parenIdx = rest.firstIndex(of: "(") {
+                        funcName = String(rest[..<parenIdx]).trimmingCharacters(in: .whitespaces)
+                    } else {
+                        funcName = rest
+                    }
+                    if totalSamples == 0 { totalSamples = count }
+                    if !funcName.isEmpty {
+                        results.append((funcName, count))
+                    }
+                }
+            }
+        }
+
+        guard totalSamples > 0 else { return ["No samples collected"] }
+        let top = results.prefix(10)
+        return top.map { name, count in
+            let pct = count * 100 / totalSamples
+            return "\(pct)% \(name)"
+        }
+    }
+
+    private var sampleResults: [String] = []
+    private var sampleResultPid: pid_t = 0
+    var isSampleModalOpen: Bool { !sampleResults.isEmpty }
+
+    private func showSampleResult(pid: pid_t, results: [String]) {
+        samplingPid = nil
+        sampleResults = results
+        sampleResultPid = pid
+        render()
+    }
+
+    func closeSampleModal() {
+        sampleResults = []
         render()
     }
 
@@ -1156,11 +1293,28 @@ final class TUI: EventSink {
 
             // Hint line below last highlighted process row
             if showHints, i == lastHighlightedIndex, y <= lastRow {
-                if case .process(_, let depth) = dr {
+                if case .process(let pid, let depth) = dr {
                     let hintIndent = String(repeating: " ", count: depth * 2 + 2)
-                    let hint = "\(hintIndent)(i) info"
+                    let hintText: String
+                    if killMode {
+                        hintText = "\(hintIndent)(k) cancel  1:HUP 2:INT 3:QUIT 9:KILL 15:TERM"
+                    } else if samplingPid == pid {
+                        hintText = "\(hintIndent)Sampling..."
+                    } else {
+                        lock.lock()
+                        let isStopped = rows[pid]?.isStopped ?? false
+                        let isRunning = rows[pid]?.isRunning ?? false
+                        lock.unlock()
+                        var parts = ["(i) info"]
+                        if isRunning {
+                            parts.append("(z) \(isStopped ? "resume" : "pause")")
+                            parts.append("(k) kill")
+                            parts.append("(s) sample")
+                        }
+                        hintText = "\(hintIndent)\(parts.joined(separator: "  "))"
+                    }
                     attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
-                    mvaddstr(y, 0, truncate(hint, to: width))
+                    mvaddstr(y, 0, truncate(hintText, to: width))
                     attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
                     y += 1
                 }
@@ -1169,9 +1323,51 @@ final class TUI: EventSink {
 
         drawFooter(maxY: maxY, maxX: maxX)
 
+        // Sample result modal
+        if !sampleResults.isEmpty {
+            renderSampleModal(maxY: maxY, maxX: maxX)
+        }
+
         refresh()
     }
 
+
+    private func renderSampleModal(maxY: Int32, maxX: Int32) {
+        let mWidth = min(Int(maxX) - 4, 60)
+        let mHeight = min(Int(maxY) - 4, sampleResults.count + 4)
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        let title = " Sample: PID \(sampleResultPid) (3s) "
+        let hLine = String(repeating: "\u{2500}", count: max(0, mWidth - 2 - title.count))
+        let topLine = "\u{250C}\(title)\(hLine)\u{2510}"
+        let botLine = "\u{2514}\(String(repeating: "\u{2500}", count: mWidth - 2))\u{2518}"
+
+        attron(ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), topLine)
+        for row in 1..<(mHeight - 1) {
+            let blank = String(repeating: " ", count: mWidth - 2)
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(blank)\u{2502}")
+        }
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), botLine)
+        attroff(ATTR_BOLD)
+
+        // Content
+        let innerWidth = mWidth - 4
+        for (idx, line) in sampleResults.prefix(mHeight - 4).enumerated() {
+            let truncated = String(truncate(line, to: innerWidth).prefix(innerWidth))
+            let padded = truncated + String(repeating: " ", count: max(0, innerWidth - truncated.count))
+            attron(ATTR_DIM)
+            mvaddstr(Int32(mY + 1 + idx), Int32(mX + 2), padded)
+            attroff(ATTR_DIM)
+        }
+
+        // Footer
+        let footer = "esc: close  s: resample"
+        attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+        mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), footer)
+        attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+    }
 
     private func drawFooter(maxY: Int32, maxX: Int32) {
         let width = Int(maxX)
@@ -1246,7 +1442,10 @@ final class TUI: EventSink {
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false, depth: Int = 0) -> Int32 {
         let status: String
         let color: TUIColor
-        if row.isRunning {
+        if row.isStopped {
+            status = "STOP"
+            color = .failed
+        } else if row.isRunning {
             status = "RUN"
             color = .running
         } else if let code = row.exitCode, code != 0 {
@@ -1260,13 +1459,14 @@ final class TUI: EventSink {
         let indent = String(repeating: "  ", count: depth)
         let disc = row.disclosed ? "\u{25BC} " : "\u{25B6} "
         let processLabel = row.argv.isEmpty ? row.name : row.argv
+        let prefixWidth = indent.count + 2  // indent + disclosure triangle
         let line = formatLine(
             pid: "\(row.pid)",
             runtime: row.runtimeString,
             ops: "\(row.fileOps)",
             status: status,
             process: processLabel,
-            maxWidth: Int(maxX) - 2
+            maxWidth: Int(maxX) - prefixWidth
         )
 
         var attr = row.isRunning
@@ -1298,7 +1498,8 @@ final class TUI: EventSink {
             // Draw with box borders
             let boxLeft = String(repeating: " ", count: boxIndent) + "\u{2502} "
             let innerWidth = max(0, width - boxLeft.count - 1)  // -1 for right border
-            let contentIndent = max(0, indent - boxLeft.count)
+            // indent is absolute; convert to relative inside the box
+            let contentIndent = max(0, indent - boxIndent - 2)
             let indentStr = String(repeating: " ", count: contentIndent)
             let contentStr = truncate(content, to: innerWidth - contentIndent)
             let padded = indentStr + contentStr + String(repeating: " ", count: max(0, innerWidth - contentIndent - contentStr.count))
