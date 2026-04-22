@@ -11,6 +11,8 @@ final class ESClient {
     private var client: OpaquePointer?
     private let tree: ProcessTree
     private let sink: EventSink
+    /// Patterns to auto-discover new agent processes
+    var agentPatterns: [String] = []
 
     init(tree: ProcessTree, sink: EventSink) {
         self.tree = tree
@@ -20,6 +22,7 @@ final class ESClient {
     func start() throws {
         let tree = self.tree
         let sink = self.sink
+        let patterns = self.agentPatterns
 
         let result = es_new_client(&client) { esClient, message in
             let proc = message.pointee.process
@@ -33,9 +36,18 @@ final class ESClient {
                 let targetInfo = esProcessInfo(target)
 
                 // Track if the parent (ppid) is in our tree
-                let tracked = tree.contains(targetInfo.ppid) || tree.contains(targetInfo.pid)
+                var tracked = tree.contains(targetInfo.ppid) || tree.contains(targetInfo.pid)
                 if tracked {
                     tree.trackIfChild(pid: targetInfo.pid, ppid: targetInfo.ppid)
+                }
+
+                // Auto-discover new agent processes by name/path
+                if !tracked && !patterns.isEmpty {
+                    let path = targetInfo.path.lowercased()
+                    if patterns.contains(where: { path.contains($0) }) {
+                        tree.addRoots([targetInfo.pid])
+                        tracked = true
+                    }
                 }
 
                 // Always allow — we're observing, not blocking

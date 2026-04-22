@@ -85,6 +85,10 @@ struct Trace: ParsableCommand {
 
         // Start ES client
         let esClient = ESClient(tree: tree, sink: sink)
+        // Set agent patterns for auto-discovery of new instances
+        if let agentName = agent, let kind = AgentKind(rawValue: agentName.lowercased()) {
+            esClient.agentPatterns = kind.processPatterns
+        }
 
         // Store refs for signal handler cleanup
         activeTUI = tui

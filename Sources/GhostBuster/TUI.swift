@@ -272,7 +272,10 @@ final class TUI: EventSink {
     func clearSelection() {
         selectedPids.removeAll()
         selectedIndex = -1
+        let wasPaused = paused
+        paused = false
         render()
+        paused = wasPaused
     }
 
     func disclose() {
