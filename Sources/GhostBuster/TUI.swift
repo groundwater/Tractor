@@ -429,6 +429,7 @@ final class TUI: EventSink {
     var isMenuOpen: Bool { activeMenu != nil }
 
     private func processMenuItems() -> [MenuItem] {
+        let dr = displayRows[safe: selectedIndex]
         let hasPid = pidForRow(selectedIndex) != nil
         lock.lock()
         let pid = pidForRow(selectedIndex)
@@ -439,6 +440,32 @@ final class TUI: EventSink {
         let filesVis = row?.filesVisible ?? false
         let netVis = row?.netVisible ?? false
         lock.unlock()
+
+        // Context-sensitive menus based on what's highlighted
+        if let dr = dr {
+            switch dr {
+            case .sampleHeader, .sampleNode:
+                return [
+                    MenuItem(label: "Resample...", shortcut: "", key: nil, enabled: hasPid && isRunning),
+                    MenuItem(label: "Delete...", shortcut: "", key: nil, enabled: hasPid),
+                    MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
+                ]
+            case .filesHeader, .fileDetail:
+                return [
+                    MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: false, enabled: false),
+                    MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: true, enabled: false),
+                ]
+            case .netHeader, .netDetail:
+                return [
+                    MenuItem(label: "Reverse DNS Lookup", shortcut: "", key: nil, checked: true, enabled: false),
+                    MenuItem(label: "SNI Inspection", shortcut: "", key: nil, checked: true, enabled: false),
+                ]
+            default:
+                break
+            }
+        }
+
+        // Default process menu
         return [
             MenuItem(label: "Show Info", shortcut: "i", key: 105, checked: infoVis, enabled: hasPid),
             MenuItem(label: "Show Files", shortcut: "d", key: 100, checked: filesVis, enabled: hasPid),
