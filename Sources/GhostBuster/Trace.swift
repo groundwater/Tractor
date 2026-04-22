@@ -162,6 +162,7 @@ struct Trace: ParsableCommand {
                         case 101: t.toggleMenu(.edit)    // e
                         case 109: t.toggleMenu(.sample)   // m
                         case 116: t.toggleMenu(.network) // t
+                        case 121: t.toggleMenu(.files)   // y
                         case 112: t.toggleContextMenu() // p
                         case 118: t.toggleMenu(.view)    // v
                         default:
@@ -194,6 +195,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.sample)
                     case 116: // 't' - Network menu
                         t.toggleMenu(.network)
+                    case 121: // 'y' - FileSystem menu
+                        t.toggleMenu(.files)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
                     case 105, 100, 110, 122, 107, 115, 119, 108:

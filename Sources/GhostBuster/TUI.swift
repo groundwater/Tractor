@@ -1265,7 +1265,9 @@ final class TUI: EventSink {
     }
 
     private func jumpToParent(_ target: DisplayRow) {
-        // For process rows, match by PID regardless of depth
+        // First rebuild display rows
+        doRender()
+        // Then find the target
         if case .process(let pid, _) = target {
             for (i, dr) in displayRows.enumerated() {
                 if case .process(let p, _) = dr, p == pid {
@@ -1278,6 +1280,7 @@ final class TUI: EventSink {
             selectedIndex = idx
             selectedIndices.removeAll()
         }
+        // Render again with correct cursor and scroll
         forceRender()
     }
 
@@ -1855,7 +1858,8 @@ final class TUI: EventSink {
         let columnLayout = columnLayout(for: displayRows)
         renderColumnHeader(y: 3, width: width, layout: columnLayout)
 
-        // Adjust scroll offset to keep selectedIndex visible
+        // Clamp selectedIndex and adjust scroll
+        if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
         if selectedIndex >= 0 {
             if selectedIndex < scrollOffset { scrollOffset = selectedIndex }
             if selectedIndex >= scrollOffset + availableLines { scrollOffset = selectedIndex - availableLines + 1 }
@@ -2227,7 +2231,7 @@ final class TUI: EventSink {
             switch ctx {
             case .sample:  menus.append(("Sa", "m", "ple", .sample))
             case .network: menus.append(("Ne", "t", "work", .network))
-            case .files:   menus.append(("", "", "FileSystem", .files))
+            case .files:   menus.append(("FileS", "y", "stem", .files))
             default: break
             }
         }
@@ -2265,7 +2269,7 @@ final class TUI: EventSink {
             case .process: return 10
             case .sample: return 10
             case .network: return 11
-            case .files: return 14
+            case .files: return 12
             case .view: return 6
             }
         }
@@ -2318,7 +2322,7 @@ final class TUI: EventSink {
             if isHighlighted && item.enabled {
                 itemAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
             } else if isHighlighted && !item.enabled {
-                itemAttr = barAttr | ATTR_DIM  // light gray highlight for disabled
+                itemAttr = COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_REVERSE  // darker gray for disabled highlight
             } else if !item.enabled {
                 itemAttr = barAttr | ATTR_DIM
             } else {
