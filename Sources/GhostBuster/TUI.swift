@@ -1875,8 +1875,8 @@ final class TUI: EventSink {
             case .processHeader(let pid):
                 let disc = rows[pid]?.infoDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: "Process Info", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
+                let triIndent = depthIndent + 2  // child level
+                drawBoxHeader(y: y, disc: disc, title: "Process Info", triIndent: triIndent, color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .processDetail(let pid, let key):
@@ -1950,8 +1950,8 @@ final class TUI: EventSink {
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 4, content: "Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                    drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
+                    let triIndent = depthIndent + 2
+                    drawBoxHeader(y: y, disc: disc, title: "Files (\(fileCount) written, W:\(totalWrites))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1979,8 +1979,8 @@ final class TUI: EventSink {
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 4, content: "Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                    drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
+                    let triIndent = depthIndent + 2
+                    drawBoxHeader(y: y, disc: disc, title: "Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -2000,8 +2000,8 @@ final class TUI: EventSink {
                 let disc = rows[pid]?.sampleDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 let status = rows[pid]?.isSampling == true ? "Sampling..." : "Sample (3s)"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: status, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
+                let triIndent = depthIndent + 2
+                drawBoxHeader(y: y, disc: disc, title: status, triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .sampleNode(let pid, let path):
@@ -2020,8 +2020,8 @@ final class TUI: EventSink {
             case .waitHeader(let pid):
                 let disc = rows[pid]?.waitDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: "Wait Diagnosis", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                drawDisclosureTriangle(disc, y: y, indent: depthIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted)
+                let triIndent = depthIndent + 2
+                drawBoxHeader(y: y, disc: disc, title: "Wait Diagnosis", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .waitLine(let pid, let idx):
@@ -2468,6 +2468,33 @@ final class TUI: EventSink {
     }
 
     /// Render a line with highlighting starting at the indent level
+    /// Render a box header line: triangle outside │, title inside, continuous highlight
+    private func drawBoxHeader(y: Int32, disc: String, title: String, triIndent: Int, color: Int32, highlighted: Bool, width: Int, boxIndent: Int) {
+        guard boxIndent >= 0 else { return }
+        let boxLeft = boxIndent  // position of │
+        let innerWidth = max(0, width - boxLeft - 2)  // between │ and │
+        let titleStr = truncate(title, to: innerWidth - 1)
+        let padded = titleStr + String(repeating: " ", count: max(0, innerWidth - 1 - titleStr.count))
+
+        // Indent (no highlight)
+        mvaddstr(y, 0, String(repeating: " ", count: triIndent))
+
+        // Triangle + space + │ + title + pad + │ — all highlighted
+        let attr = highlighted ? (color | ATTR_REVERSE) : color
+        attron(attr)
+        addstr("\(disc) ")
+        attroff(attr)
+        attron(ATTR_DIM)
+        addstr("\u{2502}")
+        attroff(ATTR_DIM)
+        attron(attr)
+        addstr(padded)
+        attroff(attr)
+        attron(ATTR_DIM)
+        addstr("\u{2502}")
+        attroff(ATTR_DIM)
+    }
+
     private func drawLine(y: Int32, indent: Int, content: String, color: Int32, highlighted: Bool, width: Int, boxIndent: Int = -1) {
         if boxIndent >= 0 {
             // Draw with box borders
