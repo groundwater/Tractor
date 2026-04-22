@@ -1533,7 +1533,7 @@ final class TUI: EventSink {
                     let fileCount = row.recentWrittenFiles.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Files (\(fileCount) written, W:\(totalWrites))", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1550,7 +1550,7 @@ final class TUI: EventSink {
                     let statsStr = parts.joined(separator: " ")
                     let relPath = relativePath(path, cwd: row.cwd)
                     let shortPath = shortenPath(relPath, maxLen: width - 8 - statsStr.count)
-                    drawLine(y: y, indent: depthIndent + 6, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 8, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1561,7 +1561,7 @@ final class TUI: EventSink {
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 2, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1573,7 +1573,7 @@ final class TUI: EventSink {
                         line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
                     }
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
-                    drawLine(y: y, indent: depthIndent + 6, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 8, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
