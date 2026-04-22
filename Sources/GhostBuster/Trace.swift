@@ -121,6 +121,19 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
+                    if t.isModalOpen {
+                        // Modal key handling
+                        switch ch {
+                        case 259: t.modalMoveUp()       // UP
+                        case 258: t.modalMoveDown()     // DOWN
+                        case 261: t.modalDisclose()     // RIGHT
+                        case 260: t.modalCollapse()     // LEFT
+                        case 10, 13: t.modalToggle()    // Enter
+                        case 27: t.closeModal()         // ESC
+                        case 113: t.closeModal()        // q
+                        default: break
+                        }
+                    } else {
                     switch ch {
                     case 32:  // space
                         t.togglePause()
@@ -144,14 +157,16 @@ struct Trace: ParsableCommand {
                         t.discloseAll()
                     case 393: // KEY_SLEFT (Shift+Left)
                         t.collapseAll()
-                    case 337: // KEY_SR (Shift+Up) - from terminals with proper sequences
+                    case 337: // KEY_SR (Shift+Up)
                         t.shiftMoveUp()
                     case 336: // KEY_SF (Shift+Down)
                         t.shiftMoveDown()
-                    case 10, 13: // Enter/Return
-                        t.toggleDisclose()
+                    case 10, 13: // Enter - open modal
+                        t.openModal()
                     case 27: // ESC
                         t.clearSelection()
+                    case 104: // 'h' - toggle view mode
+                        t.toggleViewMode()
                     case 113: // 'q'
                         activeInputSource?.cancel()
                         t.stop()
@@ -160,6 +175,7 @@ struct Trace: ParsableCommand {
                     default:
                         break
                     }
+                    } // end else (non-modal)
                 }
             }
             activeInputSource = quitSource

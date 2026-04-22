@@ -147,7 +147,7 @@ final class ProcessRow {
 // MARK: - Display row types for flat cursor navigation
 
 private enum DisplayRow: Equatable {
-    case process(pid_t)
+    case process(pid_t, Int)             // pid, depth (for tree indent)
     case processHeader(pid_t)            // "Process" section
     case processDetail(pid_t, String)    // pid, label (Path:, CWD:, etc)
     case argsHeader(pid_t)
@@ -160,6 +160,7 @@ private enum DisplayRow: Equatable {
     case fileDetail(pid_t, String)       // pid, path
     case netHeader(pid_t)
     case netDetail(pid_t, String)        // pid, connection key
+    case separator(pid_t)               // horizontal rule between info and children
 }
 
 // MARK: - TUI
@@ -178,6 +179,15 @@ final class TUI: EventSink {
     private var displayRows: [DisplayRow] = []
     /// Scroll offset — index of first visible row
     private var scrollOffset = 0
+
+    private enum ViewMode { case flat, tree }
+    private var viewMode: ViewMode = .tree
+
+    /// Modal inspect state
+    private var modalPid: pid_t? = nil
+    private var modalScrollOffset = 0
+    private var modalSelectedIndex = 0
+    private var modalDisplayRows: [DisplayRow] = []
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -313,6 +323,105 @@ final class TUI: EventSink {
         render()
     }
 
+    func toggleViewMode() {
+        viewMode = viewMode == .flat ? .tree : .flat
+        selectedIndex = -1
+        selectedIndices.removeAll()
+        scrollOffset = 0
+        render()
+    }
+
+    var isModalOpen: Bool { modalPid != nil }
+
+    func openModal() {
+        guard let pid = pidForRow(selectedIndex) else { return }
+        // Load info if needed
+        lock.lock()
+        if let row = rows[pid], !row.infoLoaded {
+            lock.unlock()
+            let (path, _, _) = getProcessInfo(pid)
+            let args = getProcessArgs(pid)
+            let envVars = getProcessEnv(pid)
+            lock.lock()
+            row.fullPath = path
+            row.argvArray = args
+            row.envVars = envVars
+            row.infoLoaded = true
+        }
+        // Poll resources
+        if let row = rows[pid] {
+            lock.unlock()
+            var taskInfo = proc_taskinfo()
+            let size = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(MemoryLayout<proc_taskinfo>.size))
+            if size > 0 {
+                lock.lock()
+                row.cpuUser = TimeInterval(taskInfo.pti_total_user) / 1_000_000_000
+                row.cpuSys = TimeInterval(taskInfo.pti_total_system) / 1_000_000_000
+                row.rss = UInt64(taskInfo.pti_resident_size)
+                lock.unlock()
+            }
+            let fdSize = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+            if fdSize > 0 {
+                lock.lock()
+                row.fdCount = Int(fdSize) / MemoryLayout<proc_fdinfo>.size
+                lock.unlock()
+            }
+        } else {
+            lock.unlock()
+        }
+        modalPid = pid
+        modalSelectedIndex = 0
+        modalScrollOffset = 0
+        render()
+    }
+
+    func closeModal() {
+        modalPid = nil
+        render()
+    }
+
+    func modalMoveUp() {
+        if modalSelectedIndex > 0 { modalSelectedIndex -= 1 }
+        render()
+    }
+
+    func modalMoveDown() {
+        if modalSelectedIndex < modalDisplayRows.count - 1 { modalSelectedIndex += 1 }
+        render()
+    }
+
+    func modalDisclose() {
+        guard let dr = modalDisplayRows[safe: modalSelectedIndex] else { return }
+        lock.lock()
+        setDisclosure(dr, open: true)
+        lock.unlock()
+        render()
+    }
+
+    func modalCollapse() {
+        guard let dr = modalDisplayRows[safe: modalSelectedIndex] else { return }
+        lock.lock()
+        if isDisclosed(dr) {
+            setDisclosure(dr, open: false)
+        } else if let parent = parentRow(dr) {
+            setDisclosure(parent, open: false) // doesn't jump, just collapses
+            if let idx = modalDisplayRows.firstIndex(of: parent) {
+                modalSelectedIndex = idx
+            }
+        }
+        lock.unlock()
+        render()
+    }
+
+    func modalToggle() {
+        guard let dr = modalDisplayRows[safe: modalSelectedIndex] else { return }
+        lock.lock()
+        let open = !isDisclosed(dr)
+        setDisclosure(dr, open: open)
+        lock.unlock()
+        render()
+    }
+
     func clearSelection() {
         selectedIndices.removeAll()
         selectedIndex = -1
@@ -434,7 +543,7 @@ final class TUI: EventSink {
     /// Set a single disclosure flag for a row
     private func setDisclosure(_ row: DisplayRow, open: Bool) {
         switch row {
-        case .process(let pid):       rows[pid]?.disclosed = open
+        case .process(let pid, _):       rows[pid]?.disclosed = open
         case .processHeader(let pid): rows[pid]?.processDisclosed = open
         case .argsHeader(let pid):    rows[pid]?.argsDisclosed = open
         case .envHeader(let pid):     rows[pid]?.envDisclosed = open
@@ -448,7 +557,7 @@ final class TUI: EventSink {
     /// Is this row currently disclosed?
     private func isDisclosed(_ row: DisplayRow) -> Bool {
         switch row {
-        case .process(let pid):       return rows[pid]?.disclosed ?? false
+        case .process(let pid, _):       return rows[pid]?.disclosed ?? false
         case .processHeader(let pid): return rows[pid]?.processDisclosed ?? false
         case .argsHeader(let pid):    return rows[pid]?.argsDisclosed ?? false
         case .envHeader(let pid):     return rows[pid]?.envDisclosed ?? false
@@ -488,7 +597,7 @@ final class TUI: EventSink {
         switch row {
         case .process: return nil
         case .processHeader(let pid), .filesHeader(let pid), .netHeader(let pid):
-            return .process(pid)
+            return .process(pid, 0)
         case .argsHeader(let pid), .envHeader(let pid), .resourcesHeader(let pid):
             return .processHeader(pid)
         case .processDetail(let pid, _):
@@ -503,18 +612,21 @@ final class TUI: EventSink {
             return .filesHeader(pid)
         case .netDetail(let pid, _):
             return .netHeader(pid)
+        case .separator(let pid):
+            return .process(pid, 0)
         }
     }
 
     private func pidForRow(_ index: Int) -> pid_t? {
         guard let row = displayRows[safe: index] else { return nil }
         switch row {
-        case .process(let pid), .processHeader(let pid), .processDetail(let pid, _),
+        case .process(let pid, _), .processHeader(let pid), .processDetail(let pid, _),
              .argsHeader(let pid), .argDetail(let pid, _),
              .envHeader(let pid), .envDetail(let pid, _),
              .resourcesHeader(let pid), .resourceDetail(let pid, _),
              .filesHeader(let pid), .fileDetail(let pid, _),
-             .netHeader(let pid), .netDetail(let pid, _):
+             .netHeader(let pid), .netDetail(let pid, _),
+             .separator(let pid):
             return pid
         }
     }
@@ -838,54 +950,44 @@ final class TUI: EventSink {
         let savedRow = displayRows[safe: selectedIndex]
         let savedSelected = selectedIndices.compactMap { displayRows[safe: $0] }
 
-        // Build flat display row list
+        // Build display row list based on view mode
         let allVisible = running + exited
         displayRows = []
-        for row in allVisible {
-            displayRows.append(.process(row.pid))
-            if row.disclosed {
-                // Process section
-                displayRows.append(.processHeader(row.pid))
-                if row.processDisclosed {
-                    displayRows.append(.processDetail(row.pid, "Path"))
-                    displayRows.append(.processDetail(row.pid, "CWD"))
-                    displayRows.append(.processDetail(row.pid, "IDs"))
-                    displayRows.append(.processDetail(row.pid, "Started"))
-                    // Args sub-section
-                    displayRows.append(.argsHeader(row.pid))
-                    if row.argsDisclosed {
-                        for i in 0..<row.argvArray.count { displayRows.append(.argDetail(row.pid, i)) }
+
+        switch viewMode {
+        case .flat:
+            for row in allVisible {
+                displayRows.append(.process(row.pid, 0))
+                if row.disclosed {
+                    appendProcessDisclosures(row)
+                }
+            }
+        case .tree:
+            // Build parent->children map
+            let pidSet = Set(allVisible.map { $0.pid })
+            var childrenOf: [pid_t: [ProcessRow]] = [:]
+            var roots: [ProcessRow] = []
+            for row in allVisible {
+                if pidSet.contains(row.ppid) && row.ppid != row.pid {
+                    childrenOf[row.ppid, default: []].append(row)
+                } else {
+                    roots.append(row)
+                }
+            }
+            func appendTree(_ row: ProcessRow, depth: Int) {
+                displayRows.append(.process(row.pid, depth))
+                if row.disclosed {
+                    let children = childrenOf[row.pid] ?? []
+                    if !children.isEmpty {
+                        displayRows.append(.separator(row.pid))
                     }
-                    // Env sub-section
-                    displayRows.append(.envHeader(row.pid))
-                    if row.envDisclosed {
-                        for i in 0..<row.envVars.count { displayRows.append(.envDetail(row.pid, i)) }
-                    }
-                    // Resources sub-section
-                    displayRows.append(.resourcesHeader(row.pid))
-                    if row.resourcesDisclosed {
-                        displayRows.append(.resourceDetail(row.pid, "CPU"))
-                        displayRows.append(.resourceDetail(row.pid, "Memory"))
-                        displayRows.append(.resourceDetail(row.pid, "FDs"))
-                        displayRows.append(.resourceDetail(row.pid, "Disk"))
+                    for child in children {
+                        appendTree(child, depth: depth + 1)
                     }
                 }
-                // Files section
-                let files = row.recentWrittenFiles
-                if !files.isEmpty {
-                    displayRows.append(.filesHeader(row.pid))
-                    if row.filesDisclosed {
-                        for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
-                    }
-                }
-                // Network section
-                let conns = row.sortedConnections
-                if !conns.isEmpty {
-                    displayRows.append(.netHeader(row.pid))
-                    if row.netDisclosed {
-                        for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
-                    }
-                }
+            }
+            for root in roots {
+                appendTree(root, depth: 0)
             }
         }
 
@@ -916,11 +1018,23 @@ final class TUI: EventSink {
 
             lock.lock()
             switch dr {
-            case .process(let pid):
+            case .process(let pid, let depth):
                 if let row = rows[pid] {
                     lock.unlock()
-                    y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
+                    y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted, depth: depth)
                 } else { lock.unlock() }
+
+            case .separator(let pid):
+                lock.unlock()
+                // Find depth from the process row above
+                let depth = rows[pid]?.disclosed == true ? 1 : 0
+                let indent = String(repeating: "  ", count: depth + 1)
+                let lineWidth = max(0, width - indent.count * 2)
+                let hr = indent + String(repeating: "\u{2500}", count: lineWidth)
+                attron(ATTR_DIM)
+                mvaddstr(y, 0, String(hr.prefix(width)))
+                attroff(ATTR_DIM)
+                y += 1
 
             case .processHeader(let pid):
                 let disc = rows[pid]?.processDisclosed == true ? "\u{25BC}" : "\u{25B6}"
@@ -1047,7 +1161,203 @@ final class TUI: EventSink {
 
         drawFooter(maxY: maxY, maxX: maxX)
 
+        // Modal overlay
+        if let pid = modalPid {
+            renderModal(pid: pid, maxY: maxY, maxX: maxX)
+        }
+
         refresh()
+    }
+
+    private func renderModal(pid: pid_t, maxY: Int32, maxX: Int32) {
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+
+        // Build modal display rows
+        modalDisplayRows = []
+        modalDisplayRows.append(.processDetail(pid, "Path"))
+        modalDisplayRows.append(.processDetail(pid, "CWD"))
+        modalDisplayRows.append(.processDetail(pid, "IDs"))
+        modalDisplayRows.append(.processDetail(pid, "Started"))
+        modalDisplayRows.append(.processDetail(pid, "Runtime"))
+
+        modalDisplayRows.append(.argsHeader(pid))
+        if row.argsDisclosed {
+            for i in 0..<row.argvArray.count { modalDisplayRows.append(.argDetail(pid, i)) }
+        }
+        modalDisplayRows.append(.envHeader(pid))
+        if row.envDisclosed {
+            for i in 0..<row.envVars.count { modalDisplayRows.append(.envDetail(pid, i)) }
+        }
+        modalDisplayRows.append(.resourcesHeader(pid))
+        if row.resourcesDisclosed {
+            modalDisplayRows.append(.resourceDetail(pid, "CPU"))
+            modalDisplayRows.append(.resourceDetail(pid, "Memory"))
+            modalDisplayRows.append(.resourceDetail(pid, "FDs"))
+            modalDisplayRows.append(.resourceDetail(pid, "Disk"))
+        }
+
+        let files = row.recentWrittenFiles
+        if !files.isEmpty {
+            modalDisplayRows.append(.filesHeader(pid))
+            if row.filesDisclosed {
+                for file in files { modalDisplayRows.append(.fileDetail(pid, file.path)) }
+            }
+        }
+        let conns = row.sortedConnections
+        if !conns.isEmpty {
+            modalDisplayRows.append(.netHeader(pid))
+            if row.netDisclosed {
+                for conn in conns { modalDisplayRows.append(.netDetail(pid, conn.key)) }
+            }
+        }
+
+        let processName = row.argv.isEmpty ? row.name : row.argv
+        lock.unlock()
+
+        // Clamp modal selection
+        if modalSelectedIndex >= modalDisplayRows.count { modalSelectedIndex = max(0, modalDisplayRows.count - 1) }
+
+        // Modal dimensions
+        let mWidth = min(Int(maxX) - 4, 80)
+        let mHeight = min(Int(maxY) - 4, modalDisplayRows.count + 4)
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        // Adjust modal scroll
+        if modalSelectedIndex < modalScrollOffset { modalScrollOffset = modalSelectedIndex }
+        let contentHeight = mHeight - 3  // title + bottom border + footer
+        if modalSelectedIndex >= modalScrollOffset + contentHeight {
+            modalScrollOffset = modalSelectedIndex - contentHeight + 1
+        }
+
+        // Draw border
+        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        let title = " PID \(pid) \(truncateProcess(processName, to: mWidth - 12)) "
+        let titleLine = "\u{250C}\(title)\(String(repeating: "\u{2500}", count: max(0, mWidth - 2 - title.count)))\u{2510}"
+
+        attron(ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), titleLine)
+        for row in 1..<(mHeight - 1) {
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}")
+            mvaddstr(Int32(mY + row), Int32(mX + mWidth - 1), "\u{2502}")
+        }
+        let bottomLine = "\u{2514}\(hLine)\u{2518}"
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), bottomLine)
+        attroff(ATTR_BOLD)
+
+        // Render content
+        let innerWidth = mWidth - 4
+        for i in 0..<contentHeight {
+            let rowIdx = modalScrollOffset + i
+            let screenY = Int32(mY + 1 + i)
+            guard rowIdx < modalDisplayRows.count else {
+                // Clear empty lines
+                mvaddstr(screenY, Int32(mX + 2), String(repeating: " ", count: innerWidth))
+                continue
+            }
+            let dr = modalDisplayRows[rowIdx]
+            let isHL = rowIdx == modalSelectedIndex
+
+            lock.lock()
+            let content: String
+            var color: Int32 = ATTR_DIM
+
+            switch dr {
+            case .processDetail(_, let key):
+                switch key {
+                case "Path":    content = "Path: \(rows[pid]?.fullPath ?? "?")"
+                case "CWD":     content = "CWD:  \(rows[pid]?.cwd ?? "?")"
+                case "IDs":     content = "PID: \(pid)  PPID: \(rows[pid]?.ppid ?? 0)  UID: \(getuid())"
+                case "Started":
+                    let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                    content = "Started: \(fmt.string(from: rows[pid]?.startTime ?? Date()))"
+                case "Runtime": content = "Runtime: \(rows[pid]?.runtimeString ?? "?")"
+                default:        content = key
+                }
+            case .argsHeader:
+                let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let count = rows[pid]?.argvArray.count ?? 0
+                content = "\(disc) Args (\(count))"
+                color = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
+            case .argDetail(_, let idx):
+                content = "  \(rows[pid]?.argvArray[safe: idx] ?? "")"
+            case .envHeader:
+                let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let count = rows[pid]?.envVars.count ?? 0
+                content = "\(disc) Env (\(count) vars)"
+                color = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
+            case .envDetail(_, let idx):
+                content = "  \(rows[pid]?.envVars[safe: idx] ?? "")"
+            case .resourcesHeader:
+                let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                content = "\(disc) Resources"
+                color = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
+            case .resourceDetail(_, let key):
+                if let r = rows[pid] {
+                    switch key {
+                    case "CPU":
+                        let uM = Int(r.cpuUser)/60; let uS = Int(r.cpuUser)%60
+                        let sM = Int(r.cpuSys)/60; let sS = Int(r.cpuSys)%60
+                        content = "  CPU: \(uM):\(String(format:"%02d",uS)) user, \(sM):\(String(format:"%02d",sS)) sys"
+                    case "Memory": content = "  Memory: \(formatBytes(r.rss)) RSS"
+                    case "FDs":    content = "  FDs: \(r.fdCount) open"
+                    case "Disk":   content = "  Disk: R:\(formatBytes(r.diskBytesRead)) W:\(formatBytes(r.diskBytesWritten))"
+                    default: content = key
+                    }
+                } else { content = key }
+            case .filesHeader:
+                let disc = rows[pid]?.filesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let count = rows[pid]?.recentWrittenFiles.count ?? 0
+                let writes = rows[pid]?.files.values.reduce(0) { $0 + $1.writes } ?? 0
+                content = "\(disc) Files (\(count) written, W:\(writes))"
+                color = COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD
+            case .fileDetail(_, let path):
+                let relPath = relativePath(path, cwd: rows[pid]?.cwd ?? "")
+                var parts: [String] = []
+                if let s = rows[pid]?.files[path] { parts.append("W:\(s.writes)") }
+                var sb = stat()
+                if stat(path, &sb) == 0 && sb.st_size > 0 { parts.append(formatBytes(UInt64(sb.st_size))) }
+                content = "  \(shortenPath(relPath, maxLen: innerWidth - 10))  \(parts.joined(separator: " "))"
+                color = COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
+            case .netHeader:
+                let disc = rows[pid]?.netDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                let count = rows[pid]?.connections.count ?? 0
+                let rx = rows[pid]?.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes } ?? 0
+                let tx = rows[pid]?.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes } ?? 0
+                content = "\(disc) Network (\(count) conn \u{2191}\(formatBytes(tx)) \u{2193}\(formatBytes(rx)))"
+                color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD
+            case .netDetail(_, let key):
+                if let conn = rows[pid]?.connections[key] {
+                    var line = "  \(conn.label)"
+                    if conn.txBytes > 0 || conn.rxBytes > 0 {
+                        line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
+                    }
+                    content = line
+                    color = conn.alive ? COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM : COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
+                } else { content = key }
+            default:
+                content = ""
+            }
+            lock.unlock()
+
+            let truncated = String(truncate(content, to: innerWidth).prefix(innerWidth))
+            let padded = truncated + String(repeating: " ", count: max(0, innerWidth - truncated.count))
+
+            // Draw with highlighting
+            mvaddstr(screenY, Int32(mX + 2), "")
+            let attr = isHL ? (color | ATTR_REVERSE) : color
+            attron(attr)
+            addstr(padded)
+            attroff(attr)
+        }
+
+        // Footer inside modal
+        let footer = "esc: close  enter: toggle  \u{2191}\u{2193}: nav"
+        let footerPad = String(repeating: " ", count: max(0, innerWidth - footer.count))
+        attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+        mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), footer + footerPad)
+        attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
     }
 
     private func drawFooter(maxY: Int32, maxX: Int32) {
@@ -1056,7 +1366,8 @@ final class TUI: EventSink {
         if paused {
             label = "PAUSED"
         } else {
-            label = "q: quit  space: pause  \u{2191}\u{2193}: select  shift+\u{2191}\u{2193}: multi  enter: expand  esc: clear"
+            let mode = viewMode == .tree ? "tree" : "flat"
+            label = "q: quit  space: pause  enter: inspect  h: \(mode)  \u{2191}\u{2193}: nav  esc: clear"
         }
 
         let text: String
@@ -1080,7 +1391,46 @@ final class TUI: EventSink {
         attroff(attr)
     }
 
-    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false) -> Int32 {
+    private func appendProcessDisclosures(_ row: ProcessRow) {
+        displayRows.append(.processHeader(row.pid))
+        if row.processDisclosed {
+            displayRows.append(.processDetail(row.pid, "Path"))
+            displayRows.append(.processDetail(row.pid, "CWD"))
+            displayRows.append(.processDetail(row.pid, "IDs"))
+            displayRows.append(.processDetail(row.pid, "Started"))
+            displayRows.append(.argsHeader(row.pid))
+            if row.argsDisclosed {
+                for i in 0..<row.argvArray.count { displayRows.append(.argDetail(row.pid, i)) }
+            }
+            displayRows.append(.envHeader(row.pid))
+            if row.envDisclosed {
+                for i in 0..<row.envVars.count { displayRows.append(.envDetail(row.pid, i)) }
+            }
+            displayRows.append(.resourcesHeader(row.pid))
+            if row.resourcesDisclosed {
+                displayRows.append(.resourceDetail(row.pid, "CPU"))
+                displayRows.append(.resourceDetail(row.pid, "Memory"))
+                displayRows.append(.resourceDetail(row.pid, "FDs"))
+                displayRows.append(.resourceDetail(row.pid, "Disk"))
+            }
+        }
+        let files = row.recentWrittenFiles
+        if !files.isEmpty {
+            displayRows.append(.filesHeader(row.pid))
+            if row.filesDisclosed {
+                for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
+            }
+        }
+        let conns = row.sortedConnections
+        if !conns.isEmpty {
+            displayRows.append(.netHeader(row.pid))
+            if row.netDisclosed {
+                for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
+            }
+        }
+    }
+
+    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false, depth: Int = 0) -> Int32 {
         let status: String
         let color: TUIColor
         if row.isRunning {
@@ -1094,6 +1444,7 @@ final class TUI: EventSink {
             color = .exited
         }
 
+        let indent = String(repeating: "  ", count: depth)
         let disc = row.disclosed ? "\u{25BC} " : "\u{25B6} "
         let processLabel = row.argv.isEmpty ? row.name : row.argv
         let line = formatLine(
@@ -1111,7 +1462,7 @@ final class TUI: EventSink {
         if highlight { attr |= ATTR_REVERSE }
 
         attron(attr)
-        mvaddstr(y, 0, disc + line)
+        mvaddstr(y, 0, indent + disc + line)
         attroff(attr)
         return y + 1
     }
