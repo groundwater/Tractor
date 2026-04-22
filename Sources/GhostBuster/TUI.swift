@@ -241,32 +241,17 @@ final class TUI: EventSink {
         }
     }
 
-    /// Cache stat results to avoid repeated syscalls
-    private var regularFileCache: [String: Bool] = [:]
-
-    private func isRegularFile(_ path: String) -> Bool {
-        if let cached = regularFileCache[path] { return cached }
-        var sb = stat()
-        let result = stat(path, &sb) == 0 && (sb.st_mode & S_IFMT) == S_IFREG
-        regularFileCache[path] = result
-        return result
-    }
-
     func recordFileOp(type: String, pid: pid_t, path: String) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
         row.fileOps += 1
         guard type != "open" else { return }
-        // Skip temp files (will be captured via rename destination)
-        if type == "write" && path.contains(".tmp.") { return }
-        // For renames, path is already the destination — check it's a real file
-        if type != "rename" && !isRegularFile(path) { return }
         var stats = row.files[path, default: FileStats()]
         switch type {
         case "write":  stats.writes += 1; stats.lastWrite = Date()
         case "unlink": stats.unlinks += 1
-        case "rename": stats.renames += 1; stats.writes += 1; stats.lastWrite = Date()
+        case "rename": stats.writes += 1; stats.lastWrite = Date()
         default: break
         }
         row.files[path] = stats
