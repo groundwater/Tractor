@@ -121,19 +121,6 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
-                    if t.isModalOpen {
-                        // Modal key handling
-                        switch ch {
-                        case 259: t.modalMoveUp()       // UP
-                        case 258: t.modalMoveDown()     // DOWN
-                        case 261: t.modalDisclose()     // RIGHT
-                        case 260: t.modalCollapse()     // LEFT
-                        case 10, 13: t.modalToggle()    // Enter
-                        case 27: t.closeModal()         // ESC
-                        case 113: t.closeModal()        // q
-                        default: break
-                        }
-                    } else {
                     switch ch {
                     case 32:  // space
                         t.togglePause()
@@ -161,8 +148,10 @@ struct Trace: ParsableCommand {
                         t.shiftMoveUp()
                     case 336: // KEY_SF (Shift+Down)
                         t.shiftMoveDown()
-                    case 10, 13: // Enter - open modal
-                        t.openModal()
+                    case 10, 13: // Enter - toggle disclosure
+                        t.toggleDisclose()
+                    case 105: // 'i' - toggle inline info
+                        t.toggleInfo()
                     case 27: // ESC
                         t.clearSelection()
                     case 104: // 'h' - toggle view mode
@@ -175,7 +164,6 @@ struct Trace: ParsableCommand {
                     default:
                         break
                     }
-                    } // end else (non-modal)
                 }
             }
             activeInputSource = quitSource
