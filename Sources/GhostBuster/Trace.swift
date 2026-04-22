@@ -121,6 +121,20 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
+                    // Sample config modal intercepts keys
+                    if t.isSampleConfigOpen {
+                        switch ch {
+                        case 259: t.sampleConfigUp()
+                        case 258: t.sampleConfigDown()
+                        case 260: t.sampleConfigLeft()
+                        case 261: t.sampleConfigRight()
+                        case 10, 13: t.sampleConfigStart()
+                        case 27: t.sampleConfigCancel()
+                        default: break
+                        }
+                        continue
+                    }
+
                     // Kill mode intercepts number keys
                     if t.isKillMode {
                         switch ch {
@@ -146,6 +160,7 @@ struct Trace: ParsableCommand {
                         case 27: t.closeMenu()        // ESC
                         case 102: t.toggleMenu(.file)    // f
                         case 101: t.toggleMenu(.edit)    // e
+                        case 109: t.toggleMenu(.sample)   // m
                         case 112: t.toggleContextMenu() // p
                         case 118: t.toggleMenu(.view)    // v
                         default:
@@ -174,6 +189,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.edit)
                     case 112: // 'p' - Process/context menu
                         t.toggleContextMenu()
+                    case 109: // 'm' - Sample menu
+                        t.toggleMenu(.sample)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
                     case 105, 100, 110, 122, 107, 115, 119, 108:

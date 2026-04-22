@@ -244,6 +244,13 @@ final class TUI: EventSink {
     private var menuItemIndex = 0
     private var menuFlash: MenuID? = nil
     private var menuFlashTime: Date? = nil
+
+    // Sample config modal
+    var isSampleConfigOpen = false
+    private var sampleDuration = 3
+    private var sampleThreshold = 5
+    private var sampleMaxDepth = 5
+    private var sampleConfigField = 0  // 0=duration, 1=threshold, 2=maxDepth
     private var selectedIndex = 0
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
@@ -899,24 +906,66 @@ final class TUI: EventSink {
     }
 
     func sampleProcess() {
+        guard pidForRow(selectedIndex) != nil else { return }
+        // Show config modal
+        isSampleConfigOpen = true
+        sampleConfigField = 0
+        forceRender()
+    }
+
+    func sampleConfigUp() {
+        if sampleConfigField > 0 { sampleConfigField -= 1 }
+        forceRender()
+    }
+
+    func sampleConfigDown() {
+        if sampleConfigField < 2 { sampleConfigField += 1 }
+        forceRender()
+    }
+
+    func sampleConfigLeft() {
+        switch sampleConfigField {
+        case 0: sampleDuration = max(1, sampleDuration - 1)
+        case 1: sampleThreshold = max(1, sampleThreshold - 1)
+        case 2: sampleMaxDepth = max(1, sampleMaxDepth - 1)
+        default: break
+        }
+        forceRender()
+    }
+
+    func sampleConfigRight() {
+        switch sampleConfigField {
+        case 0: sampleDuration = min(30, sampleDuration + 1)
+        case 1: sampleThreshold = min(50, sampleThreshold + 1)
+        case 2: sampleMaxDepth = min(20, sampleMaxDepth + 1)
+        default: break
+        }
+        forceRender()
+    }
+
+    func sampleConfigCancel() {
+        isSampleConfigOpen = false
+        forceRender()
+    }
+
+    func sampleConfigStart() {
+        isSampleConfigOpen = false
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        row.sampleVisible = !row.sampleVisible
-        row.sampleDisclosed = row.sampleVisible
+        row.sampleVisible = true
+        row.sampleDisclosed = true
         row.disclosed = true
         lock.unlock()
-        if row.sampleVisible && row.sampleTree.isEmpty {
-            runSampleAsync(pid)
-        }
-        ensureDisclosedAndJump(pid, to: row.sampleVisible ? .sampleHeader(pid) : nil)
+        runSampleAsync(pid)
+        ensureDisclosedAndJump(pid, to: .sampleHeader(pid))
     }
 
     private func runSample(_ pid: pid_t) -> [SampleNode] {
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        proc.arguments = ["\(pid)", "3"]
+        proc.arguments = ["\(pid)", "\(sampleDuration)"]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -1049,13 +1098,13 @@ final class TUI: EventSink {
 
         for (name, info) in sorted {
             let pct = info.count * 100 / totalSamples
-            guard pct >= 5 else { continue }
+            guard pct >= sampleThreshold else { continue }
 
             let node = SampleNode(name: name, count: info.count, pct: pct)
 
             // Merge caller chains into a tree (callers shown as children)
             func mergeCallers(_ chains: [[String]], depth: Int) -> [SampleNode] {
-                guard depth < 5 else { return [] }
+                guard depth < sampleMaxDepth else { return [] }
                 var groups: [String: [[String]]] = [:]
                 for chain in chains where !chain.isEmpty {
                     groups[chain[0], default: []].append(Array(chain.dropFirst()))
@@ -2039,6 +2088,11 @@ final class TUI: EventSink {
             renderMenuDropdown(menu: menu, maxY: maxY, maxX: maxX)
         }
 
+        // Sample config modal
+        if isSampleConfigOpen {
+            renderSampleConfigModal(maxY: maxY, maxX: maxX)
+        }
+
         refresh()
     }
 
@@ -2161,7 +2215,7 @@ final class TUI: EventSink {
         ]
         if ctx != .process {
             switch ctx {
-            case .sample:  menus.append(("", "", "Sample", .sample))
+            case .sample:  menus.append(("Sa", "m", "ple", .sample))
             case .network: menus.append(("", "", "Network", .network))
             case .files:   menus.append(("", "", "FileSystem", .files))
             default: break
@@ -2272,6 +2326,56 @@ final class TUI: EventSink {
         let bottomY = dropY + Int32(items.count) + 1
         mvaddstr(bottomY, dropX, "\u{2514}\(hLine)\u{2518}")
         attroff(barAttr)
+    }
+
+    private func renderSampleConfigModal(maxY: Int32, maxX: Int32) {
+        let mWidth = 40
+        let mHeight = 9
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let hlAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+
+        // Border
+        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        attron(barAttr | ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Sample Configuration \(String(repeating: "\u{2500}", count: max(0, mWidth - 24)))\u{2510}")
+        for row in 1..<(mHeight - 1) {
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: mWidth - 2))\u{2502}")
+        }
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
+        attroff(barAttr | ATTR_BOLD)
+
+        // Fields
+        let fields: [(label: String, value: String, unit: String)] = [
+            ("Duration:", " \(sampleDuration) ", "seconds"),
+            ("Threshold:", " \(sampleThreshold) ", "% min to show"),
+            ("Max depth:", " \(sampleMaxDepth) ", "caller levels"),
+        ]
+
+        for (i, field) in fields.enumerated() {
+            let lineY = Int32(mY + 2 + i)
+            let isSelected = i == sampleConfigField
+            attron(barAttr)
+            mvaddstr(lineY, Int32(mX + 2), " \(field.label)  ")
+            attroff(barAttr)
+
+            let valAttr = isSelected ? hlAttr : barAttr
+            attron(valAttr)
+            addstr("◀\(field.value)▶")
+            attroff(valAttr)
+
+            attron(barAttr)
+            addstr("  \(field.unit)")
+            attroff(barAttr)
+        }
+
+        // Footer
+        let footer = "Enter: start    Esc: cancel    \u{2191}\u{2193}: field    \u{25C0}\u{25B6}: value"
+        attron(barAttr | ATTR_DIM)
+        mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
+        attroff(barAttr | ATTR_DIM)
     }
 
     private func drawFooter(maxY: Int32, maxX: Int32) {
