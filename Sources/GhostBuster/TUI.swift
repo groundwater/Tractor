@@ -538,6 +538,7 @@ final class TUI: EventSink {
         var entries: [RawEntry] = []
         var inCallGraph = false
         var totalSamples = 0
+        var minDepth = Int.max
 
         for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
             let raw = String(line)
@@ -557,7 +558,6 @@ final class TUI: EventSink {
             guard numStart >= 0, numEnd >= numStart else { continue }
             let countStr = String(chars[numStart...numEnd])
             guard let count = Int(countStr), count > 0 else { continue }
-            if totalSamples == 0 { totalSamples = count }
 
             let restStart = numEnd + 1
             guard restStart < chars.count else { continue }
@@ -565,6 +565,8 @@ final class TUI: EventSink {
 
             let depth = numStart / 2
             let isUnknown = rest.hasPrefix("???")
+
+            if depth < minDepth { minDepth = depth }
 
             if isUnknown {
                 entries.append(RawEntry(depth: depth, count: count, name: "", isNamed: false))
@@ -584,6 +586,10 @@ final class TUI: EventSink {
             entries.append(RawEntry(depth: depth, count: count, name: funcName, isNamed: true))
         }
 
+        // totalSamples = sum of all thread root counts
+        for entry in entries where entry.depth == minDepth {
+            totalSamples += entry.count
+        }
         guard totalSamples > 0 else { return [] }
 
         // Walk the entries top-down, tracking the stack of named frames.
@@ -628,7 +634,7 @@ final class TUI: EventSink {
             // Record leaf with max count and caller chain
             let callers = Array(namedStack.dropLast().reversed().map { $0.name })
             var info = leafMap[entry.name, default: LeafInfo(count: 0, callerChains: [])]
-            info.count = max(info.count, entry.count)
+            info.count += entry.count
             info.callerChains.append(callers)
             leafMap[entry.name] = info
         }
