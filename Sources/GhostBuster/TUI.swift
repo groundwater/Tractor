@@ -712,39 +712,49 @@ final class TUI: EventSink {
 
     // MARK: - Track modal
 
-    func openTrackModal() {
-        // Build list: agents first, then running processes
+    private func buildTrackList() {
         trackModalItems = []
-        // Known agents
+        let search = trackCustomInput.lowercased()
+
+        // Known agents first (always shown, filtered)
         for kind in AgentKind.allCases {
+            let name = kind.rawValue
+            if !search.isEmpty && !name.lowercased().contains(search) { continue }
             let pids = findAgentPIDs(kind)
-            let label = pids.isEmpty ? "\(kind.rawValue) (not running)" : "\(kind.rawValue) (PID \(pids.first!))"
+            let label = pids.isEmpty ? "\(name) (not running)" : "\(name) (PID \(pids.first!))"
             trackModalItems.append((name: label, pid: pids.first, isAgent: true))
         }
-        // All running processes (top by CPU)
+
+        // All running processes, filtered by search
         var allPids = [pid_t](repeating: 0, count: 4096)
         let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
         if count > 0 {
-            for i in 0..<min(Int(count), 50) {
+            for i in 0..<Int(count) {
                 let p = allPids[i]
                 if p <= 0 { continue }
                 var nameBuf = [CChar](repeating: 0, count: 256)
                 proc_name(p, &nameBuf, UInt32(nameBuf.count))
                 let name = String(cString: nameBuf)
-                if !name.isEmpty && name != "kernel_task" {
-                    trackModalItems.append((name: "\(name) (PID \(p))", pid: p, isAgent: false))
-                }
+                if name.isEmpty || name == "kernel_task" { continue }
+                if !search.isEmpty && !name.lowercased().contains(search) { continue }
+                // Skip if already shown as an agent
+                let isAgent = AgentKind.allCases.contains { name.lowercased().contains($0.rawValue) }
+                if isAgent { continue }
+                trackModalItems.append((name: "\(name) (\(p))", pid: p, isAgent: false))
             }
         }
-        // Custom entry at the end
-        trackModalItems.append((name: "Custom: \(trackCustomInput)_", pid: nil, isAgent: false))
-        trackModalIndex = 0
+    }
+
+    func openTrackModal() {
+        trackCustomInput = ""
+        buildTrackList()
+        trackModalIndex = -1  // -1 = input field focused
         isTrackModalOpen = true
         forceRender()
     }
 
     func trackModalUp() {
-        if trackModalIndex > 0 { trackModalIndex -= 1 }
+        if trackModalIndex > -1 { trackModalIndex -= 1 }
         forceRender()
     }
 
@@ -754,56 +764,63 @@ final class TUI: EventSink {
     }
 
     func trackModalType(_ ch: Int32) {
-        // Only when custom input is selected (last item)
-        guard trackModalIndex == trackModalItems.count - 1 else { return }
         if ch == 127 || ch == 8 {  // backspace
             if !trackCustomInput.isEmpty { trackCustomInput.removeLast() }
         } else if ch >= 32 && ch < 127 {
             trackCustomInput.append(Character(UnicodeScalar(Int(ch))!))
+        } else {
+            return
         }
-        trackModalItems[trackModalItems.count - 1].name = "Custom: \(trackCustomInput)_"
+        buildTrackList()
+        trackModalIndex = -1  // stay on input
         forceRender()
     }
 
     func trackModalCancel() {
         isTrackModalOpen = false
+        trackCustomInput = ""
         forceRender()
     }
 
     func trackModalConfirm() {
         isTrackModalOpen = false
-        guard trackModalIndex < trackModalItems.count else { return }
-        let item = trackModalItems[trackModalIndex]
+        let search = trackCustomInput.lowercased()
 
-        if let pid = item.pid {
-            // Track this specific PID
-            let tree = ProcessTree()
-            let expanded = expandProcessTree(roots: [pid])
-            tree.addRoots(expanded)
-            // Add to our rows
-            for trackedPid in expanded {
-                let (path, ppid, argv) = getProcessInfo(trackedPid)
-                addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
+        if trackModalIndex >= 0, trackModalIndex < trackModalItems.count {
+            // Selected a list item — track that PID and add as pattern
+            let item = trackModalItems[trackModalIndex]
+            if let pid = item.pid {
+                let expanded = expandProcessTree(roots: [pid])
+                for trackedPid in expanded {
+                    let (path, ppid, argv) = getProcessInfo(trackedPid)
+                    addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
+                }
             }
-        } else if trackModalIndex == trackModalItems.count - 1 && !trackCustomInput.isEmpty {
-            // Custom name — search for matching processes
-            let search = trackCustomInput.lowercased()
-            var pids = [pid_t](repeating: 0, count: 4096)
-            let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.size * pids.count))
+        }
+
+        // Always add the search text as a future match pattern (if non-empty)
+        if !search.isEmpty {
+            // Track all currently matching processes
+            var allPids = [pid_t](repeating: 0, count: 4096)
+            let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
             if count > 0 {
                 for i in 0..<Int(count) {
-                    let p = pids[i]
+                    let p = allPids[i]
                     if p <= 0 { continue }
                     var nameBuf = [CChar](repeating: 0, count: 256)
                     proc_name(p, &nameBuf, UInt32(nameBuf.count))
                     let name = String(cString: nameBuf).lowercased()
                     if name.contains(search) {
-                        let (path, ppid, argv) = getProcessInfo(p)
-                        addProcess(pid: p, ppid: ppid, name: path, argv: argv)
+                        let expanded = expandProcessTree(roots: [p])
+                        for trackedPid in expanded {
+                            let (path, ppid, argv) = getProcessInfo(trackedPid)
+                            addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
+                        }
                     }
                 }
             }
         }
+
         trackCustomInput = ""
         forceRender()
     }
@@ -2634,37 +2651,61 @@ final class TUI: EventSink {
     }
 
     private func renderTrackModal(maxY: Int32, maxX: Int32) {
-        let mWidth = min(60, Int(maxX) - 4)
-        let visibleItems = min(trackModalItems.count, Int(maxY) - 8)
-        let mHeight = visibleItems + 4
+        let mWidth = min(50, Int(maxX) - 4)
+        let listHeight = 10
+        let mHeight = listHeight + 5  // title + input + separator + list + footer
         let mX = (Int(maxX) - mWidth) / 2
         let mY = (Int(maxY) - mHeight) / 2
 
         let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
         let hlAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+        let innerW = mWidth - 2
 
-        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        // Draw box
+        let hLine = String(repeating: "\u{2500}", count: innerW)
         attron(barAttr | ATTR_BOLD)
-        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Track Process \(String(repeating: "\u{2500}", count: max(0, mWidth - 18)))\u{2510}")
+        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Track Process \(String(repeating: "\u{2500}", count: max(0, innerW - 16)))\u{2510}")
         for row in 1..<(mHeight - 1) {
-            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: mWidth - 2))\u{2502}")
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: innerW))\u{2502}")
         }
         mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
         attroff(barAttr | ATTR_BOLD)
 
-        // Scroll offset for long lists
-        let scrollStart = max(0, trackModalIndex - visibleItems + 2)
-        for vi in 0..<visibleItems {
-            let idx = scrollStart + vi
-            guard idx < trackModalItems.count else { break }
+        // Search input (line 1)
+        let inputY = Int32(mY + 1)
+        let isInputFocused = trackModalIndex == -1
+        let cursor = isInputFocused ? "_" : ""
+        let inputText = "Search: \(trackCustomInput)\(cursor)"
+        let inputAttr = isInputFocused ? hlAttr : barAttr
+        attron(inputAttr)
+        let inputPad = String(repeating: " ", count: max(0, innerW - inputText.count))
+        mvaddstr(inputY, Int32(mX + 1), String((inputText + inputPad).prefix(innerW)))
+        attroff(inputAttr)
+
+        // Separator (line 2)
+        attron(barAttr)
+        mvaddstr(Int32(mY + 2), Int32(mX), "\u{251C}\(hLine)\u{2524}")
+        attroff(barAttr)
+
+        // List (lines 3..3+listHeight)
+        let listStart = max(0, trackModalIndex - listHeight + 2)
+        for vi in 0..<listHeight {
+            let idx = listStart + vi
+            let lineY = Int32(mY + 3 + vi)
+            guard idx < trackModalItems.count else {
+                // Empty row
+                attron(barAttr)
+                mvaddstr(lineY, Int32(mX + 1), String(repeating: " ", count: innerW))
+                attroff(barAttr)
+                continue
+            }
             let item = trackModalItems[idx]
-            let lineY = Int32(mY + 2 + vi)
             let isSelected = idx == trackModalIndex
 
-            let prefix = item.isAgent ? "\u{2605} " : "  "  // star for agents
+            let prefix = item.isAgent ? "\u{2605} " : "  "
             let label = "\(prefix)\(item.name)"
-            let padded = String(truncate(label, to: mWidth - 4).prefix(mWidth - 4))
-                + String(repeating: " ", count: max(0, mWidth - 4 - label.count))
+            let padded = String(truncate(label, to: innerW).prefix(innerW))
+                + String(repeating: " ", count: max(0, innerW - label.count))
 
             let attr = isSelected ? hlAttr : barAttr
             attron(attr)
@@ -2672,9 +2713,10 @@ final class TUI: EventSink {
             attroff(attr)
         }
 
-        let footer = "Enter: track    Esc: cancel    \u{2191}\u{2193}: select"
+        // Footer
+        let footer = "Enter: track  Esc: cancel  \u{2191}\u{2193}: select"
         attron(barAttr | ATTR_DIM)
-        mvaddstr(Int32(mY + 1), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
+        mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(innerW - 2)))
         attroff(barAttr | ATTR_DIM)
     }
 
