@@ -603,10 +603,6 @@ final class TUI: EventSink {
                 let conns = row.sortedConnections.count
                 let files = row.recentWrittenFiles.count
                 return 1 + min(conns, 20) + (conns > 20 ? 1 : 0) + min(files, 20) + (files > 20 ? 1 : 0)
-            } else if !row.isRunning {
-                // Exited collapsed: 1 (main) + 1 (summary) if has data
-                let hasSummary = !row.connections.isEmpty || !row.files.isEmpty
-                return hasSummary ? 2 : 1
             }
             return 1
         }
@@ -642,20 +638,6 @@ final class TUI: EventSink {
 
             if showSub {
                 y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isHighlighted)
-            } else if !row.isRunning {
-                // Exited collapsed: process line + summary
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
-                if y <= lastRow {
-                    let summary = buildExitedSummary(row)
-                    if !summary.isEmpty {
-                        let indent = String(repeating: " ", count: 29)
-                        let subLine = truncate("\(indent)\(summary)", to: Int(maxX))
-                        attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
-                        mvaddstr(y, 0, subLine)
-                        attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
-                        y += 1
-                    }
-                }
             } else {
                 y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
             }
@@ -700,26 +682,6 @@ final class TUI: EventSink {
         attron(attr)
         mvaddstr(maxY - 1, 0, padded)
         attroff(attr)
-    }
-
-    private func buildExitedSummary(_ row: ProcessRow) -> String {
-        var parts: [String] = []
-        let connCount = row.connections.count
-        if connCount > 0 {
-            let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
-            let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
-            if totalTx > 0 || totalRx > 0 {
-                parts.append("\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx))")
-            } else {
-                parts.append("\(connCount) conn")
-            }
-        }
-        let fileCount = row.files.count
-        if fileCount > 0 {
-            let totalWrites = row.files.values.reduce(0) { $0 + $1.writes }
-            parts.append("\(fileCount) files W:\(totalWrites)")
-        }
-        return parts.joined(separator: "  ")
     }
 
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false) -> Int32 {
