@@ -129,6 +129,9 @@ final class TUI: EventSink {
     /// Network stats from private framework
     private var netStats: NetworkStats?
 
+    /// SNI sniffer for hostname resolution
+    private var sniSniffer: SNISniffer?
+
     func excludeSelf() {
         selfPid = getpid()
         lock.lock()
@@ -152,9 +155,11 @@ final class TUI: EventSink {
     func start(header: String) {
         headerText = header
 
-        // Start network stats
+        // Start network stats and SNI sniffer
         netStats = NetworkStats()
         netStats?.start()
+        sniSniffer = SNISniffer()
+        sniSniffer?.start()
 
         setlocale(LC_ALL, "")
         initscr()
@@ -203,6 +208,7 @@ final class TUI: EventSink {
         timer?.cancel()
         timer = nil
         netStats?.stop()
+        sniSniffer?.stop()
         endwin()
     }
 
@@ -344,31 +350,28 @@ final class TUI: EventSink {
 
     private func resolveNewAddresses() {
         lock.lock()
-        var toResolve: Set<String> = []
+        var toResolve: [(addr: String, port: UInt16)] = []
         for row in rows.values {
             for conn in row.connections.values {
                 if conn.hostname == nil && dnsCache[conn.remoteAddr] == nil {
-                    toResolve.insert(conn.remoteAddr)
+                    toResolve.append((conn.remoteAddr, conn.remotePort))
+                    dnsCache[conn.remoteAddr] = ""  // Mark as pending
                 }
             }
-        }
-        // Mark as pending
-        for addr in toResolve {
-            dnsCache[addr] = ""
         }
         lock.unlock()
 
         // Resolve in background
-        for addr in toResolve {
+        for item in toResolve {
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let hostname = self?.reverseDNS(addr)
+                let hostname = self?.resolveHost(item.addr, port: item.port)
                 self?.lock.lock()
-                self?.dnsCache[addr] = hostname ?? ""
+                self?.dnsCache[item.addr] = hostname ?? ""
                 // Update all connections with this IP
                 if let hostname = hostname, !hostname.isEmpty {
                     for row in self?.rows.values ?? [:].values {
                         for (key, var conn) in row.connections {
-                            if conn.remoteAddr == addr {
+                            if conn.remoteAddr == item.addr {
                                 conn.hostname = hostname
                                 row.connections[key] = conn
                             }
@@ -380,26 +383,36 @@ final class TUI: EventSink {
         }
     }
 
+    private func resolveHost(_ ip: String, port: UInt16) -> String? {
+        // Try SNI sniffer first — has the hostname from the ClientHello
+        if let name = sniSniffer?.hostname(for: ip) { return name }
+        // Fall back to reverse DNS
+        if let name = reverseDNS(ip) { return name }
+        return nil
+    }
+
     private func reverseDNS(_ ip: String) -> String? {
+        // Try PTR record first
         var hints = addrinfo()
         hints.ai_flags = AI_NUMERICHOST
         hints.ai_family = AF_UNSPEC
 
         var res: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(ip, nil, &hints, &res) == 0, let addrInfo = res else { return nil }
-        defer { freeaddrinfo(addrInfo) }
+        if getaddrinfo(ip, nil, &hints, &res) == 0, let addrInfo = res {
+            defer { freeaddrinfo(addrInfo) }
+            var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let ret = getnameinfo(
+                addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen,
+                &hostBuf, socklen_t(hostBuf.count),
+                nil, 0, 0
+            )
+            if ret == 0 {
+                let hostname = String(cString: hostBuf)
+                if hostname != ip { return hostname }
+            }
+        }
 
-        var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let ret = getnameinfo(
-            addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen,
-            &hostBuf, socklen_t(hostBuf.count),
-            nil, 0, 0
-        )
-        guard ret == 0 else { return nil }
-        let hostname = String(cString: hostBuf)
-        // If getnameinfo just returned the IP back, that's not useful
-        if hostname == ip { return nil }
-        return hostname
+        return nil
     }
 
     // MARK: - Rendering

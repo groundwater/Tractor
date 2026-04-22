@@ -28,6 +28,7 @@ targets:
         OTHER_LDFLAGS:
           - "-lEndpointSecurity"
           - "-lbsm"
+          - "-lpcap"
     entitlements:
       path: Sources/GhostBuster/GhostBuster.entitlements
       properties:
