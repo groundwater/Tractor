@@ -1965,7 +1965,14 @@ final class TUI: EventSink {
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 6, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                // Bold the KEY= part, dim the value
+                if let eqIdx = env.firstIndex(of: "=") {
+                    let key = String(env[...eqIdx])
+                    let val = String(env[env.index(after: eqIdx)...])
+                    drawLine(y: y, indent: depthIndent + 6, content: key + val, color: ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                } else {
+                    drawLine(y: y, indent: depthIndent + 6, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                }
                 y += 1
 
             case .resourcesHeader(let pid):
@@ -2035,10 +2042,13 @@ final class TUI: EventSink {
             case .netDetail(let pid, let key):
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
-                    var line = "\(conn.label)"
-                    if conn.txBytes > 0 || conn.rxBytes > 0 {
-                        line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
-                    }
+                    // Columnar: HOST:PORT          ↑Up       ↓Down
+                    let host = truncate(conn.label, to: 35)
+                    let hostPad = String(repeating: " ", count: max(1, 36 - host.count))
+                    let up = "\u{2191}\(formatBytes(conn.txBytes))"
+                    let upPad = String(repeating: " ", count: max(1, 10 - up.count))
+                    let down = "\u{2193}\(formatBytes(conn.rxBytes))"
+                    let line = "\(host)\(hostPad)\(up)\(upPad)\(down)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
@@ -2216,7 +2226,7 @@ final class TUI: EventSink {
         if ctx != .process {
             switch ctx {
             case .sample:  menus.append(("Sa", "m", "ple", .sample))
-            case .network: menus.append(("", "", "Network", .network))
+            case .network: menus.append(("Ne", "t", "work", .network))
             case .files:   menus.append(("", "", "FileSystem", .files))
             default: break
             }
@@ -2576,8 +2586,8 @@ final class TUI: EventSink {
         guard boxIndent >= 0 else { return }
         let boxLeft = boxIndent  // position of │
         let innerWidth = max(0, width - boxLeft - 2)  // between │ and │
-        let titleStr = truncate(title, to: innerWidth - 1)
-        let padded = titleStr + String(repeating: " ", count: max(0, innerWidth - 1 - titleStr.count))
+        let titleStr = truncate(title, to: innerWidth)
+        let padded = titleStr + String(repeating: " ", count: max(0, innerWidth - titleStr.count))
 
         // Indent + triangle (no highlight)
         mvaddstr(y, 0, String(repeating: " ", count: triIndent))
