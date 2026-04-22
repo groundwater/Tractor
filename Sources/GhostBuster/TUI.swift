@@ -525,14 +525,14 @@ final class TUI: EventSink {
     }
 
     private func parseSampleTree(_ output: String) -> [SampleNode] {
-        // Parse the call graph into a tree
-        // Each line: indentation + count + function name
-        // Depth determined by column position of the count number
+        // Parse the call graph, then invert it to show bottom-up
+        // (leaf functions at top, callers as children)
 
         struct RawEntry {
             let depth: Int
             let count: Int
-            let name: String
+            let name: String  // empty for ??? frames
+            let isNamed: Bool
         }
 
         var entries: [RawEntry] = []
@@ -545,8 +545,6 @@ final class TUI: EventSink {
             if raw.contains("Total number") { inCallGraph = false; continue }
             guard inCallGraph else { continue }
 
-            // Find the position and value of the count number
-            // Strip tree chars (+!|:) but track position
             let chars = Array(raw)
             var numStart = -1
             var numEnd = -1
@@ -554,80 +552,121 @@ final class TUI: EventSink {
                 if c.isNumber {
                     if numStart == -1 { numStart = i }
                     numEnd = i
-                } else if numStart != -1 {
-                    break
-                }
+                } else if numStart != -1 { break }
             }
             guard numStart >= 0, numEnd >= numStart else { continue }
             let countStr = String(chars[numStart...numEnd])
             guard let count = Int(countStr), count > 0 else { continue }
             if totalSamples == 0 { totalSamples = count }
 
-            // Extract function name after the count
             let restStart = numEnd + 1
             guard restStart < chars.count else { continue }
             let rest = String(chars[restStart...]).trimmingCharacters(in: .whitespaces)
 
-            // Parse function name
+            let depth = numStart / 2
+            let isUnknown = rest.hasPrefix("???")
+
+            if isUnknown {
+                entries.append(RawEntry(depth: depth, count: count, name: "", isNamed: false))
+                continue
+            }
+
             let funcName: String
-            if rest.hasPrefix("???") {
-                continue  // Skip stripped symbols
-            } else if let inIdx = rest.range(of: "  (in ") {
+            if let inIdx = rest.range(of: "  (in ") {
                 funcName = String(rest[..<inIdx.lowerBound])
             } else if rest.hasPrefix("Thread_") {
-                // Thread header — extract thread name
                 funcName = String(rest.prefix(while: { !$0.isWhitespace }))
             } else {
                 funcName = rest
             }
 
             guard !funcName.isEmpty else { continue }
-
-            // Depth = column position of the number (roughly)
-            let depth = numStart / 2
-
-            entries.append(RawEntry(depth: depth, count: count, name: funcName))
+            entries.append(RawEntry(depth: depth, count: count, name: funcName, isNamed: true))
         }
 
         guard totalSamples > 0 else { return [] }
 
-        // Build tree from flat depth-sorted entries
-        // Use a stack to track parent chain
-        var root: [SampleNode] = []
-        var stack: [(node: SampleNode, depth: Int)] = []
+        // Walk the entries top-down, tracking the stack of named frames.
+        // At each leaf (deepest point before depth decreases), record the
+        // inverted stack: leaf first, then callers going up.
+        // A "leaf" in the sample tree is the last entry before depth decreases.
 
-        for entry in entries {
-            let pct = entry.count * 100 / totalSamples
-            // Only include nodes >= 5% to keep tree manageable
-            guard pct >= 5 else { continue }
+        // Collect: for each named function, aggregate sample counts
+        // and track which named callers lead to it
+        var leafCounts: [String: Int] = [:]
+        var callerChains: [String: [[String]]] = [:]  // leaf -> [[caller1, caller2, ...]]
 
-            let node = SampleNode(name: entry.name, count: entry.count, pct: pct)
+        // Build stacks: walk entries maintaining a stack of named frames
+        var namedStack: [(name: String, depth: Int)] = []
 
-            // Pop stack to find parent at lower depth
-            while !stack.isEmpty && stack.last!.depth >= entry.depth {
-                stack.removeLast()
+        for i in 0..<entries.count {
+            let entry = entries[i]
+
+            // Pop stack to current depth
+            while !namedStack.isEmpty && namedStack.last!.depth >= entry.depth {
+                namedStack.removeLast()
             }
 
-            if let parent = stack.last {
-                parent.node.children.append(node)
-            } else {
-                root.append(node)
-            }
-            stack.append((node, entry.depth))
-        }
+            if entry.isNamed {
+                namedStack.append((entry.name, entry.depth))
 
-        // Auto-disclose nodes with high percentage
-        func autoDisclose(_ nodes: [SampleNode], depth: Int) {
-            for node in nodes where depth < 3 {
-                if node.hasChildren && node.pct >= 20 {
-                    node.disclosed = true
-                    autoDisclose(node.children, depth: depth + 1)
+                // Check if this is a leaf: next entry has <= depth, or is last
+                let isLeaf: Bool
+                if i + 1 >= entries.count {
+                    isLeaf = true
+                } else {
+                    isLeaf = entries[i + 1].depth <= entry.depth
+                }
+
+                if isLeaf && entry.name != "start" && entry.name != "thread_start" && entry.name != "_pthread_start" {
+                    leafCounts[entry.name, default: 0] += entry.count
+                    // Record caller chain (reversed stack minus the leaf itself)
+                    let callers = namedStack.dropLast().reversed().map { $0.name }
+                    callerChains[entry.name, default: []].append(Array(callers))
                 }
             }
         }
-        autoDisclose(root, depth: 0)
 
-        return root
+        // Build bottom-up tree: leaf functions as roots, unique callers as children
+        var roots: [SampleNode] = []
+        let sorted = leafCounts.sorted { $0.value > $1.value }
+
+        for (name, count) in sorted {
+            let pct = count * 100 / totalSamples
+            guard pct >= 5 else { continue }
+
+            let node = SampleNode(name: name, count: count, pct: pct)
+
+            // Build caller tree from chains
+            let chains = callerChains[name] ?? []
+            if !chains.isEmpty {
+                // Merge caller chains into a tree
+                func mergeChains(_ chains: [[String]], depth: Int) -> [SampleNode] {
+                    guard depth < 5 else { return [] }  // limit depth
+                    // Group by first caller
+                    var groups: [String: [[String]]] = [:]
+                    for chain in chains where !chain.isEmpty {
+                        let first = chain[0]
+                        groups[first, default: []].append(Array(chain.dropFirst()))
+                    }
+                    return groups.map { callerName, subChains in
+                        let callerNode = SampleNode(name: callerName, count: count, pct: pct)
+                        callerNode.children = mergeChains(subChains, depth: depth + 1)
+                        return callerNode
+                    }.sorted { $0.name < $1.name }
+                }
+                node.children = mergeChains(chains, depth: 0)
+            }
+
+            roots.append(node)
+        }
+
+        // Auto-disclose top items
+        for node in roots where node.pct >= 20 {
+            node.disclosed = true
+        }
+
+        return roots
     }
 
     var isSampleModalOpen: Bool { false }
