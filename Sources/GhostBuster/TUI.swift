@@ -2096,8 +2096,10 @@ final class TUI: EventSink {
                 + String(repeating: " ", count: max(0, dropWidth - 2 - content.count))
 
             let itemAttr: Int32
-            if isHighlighted {
+            if isHighlighted && item.enabled {
                 itemAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+            } else if isHighlighted && !item.enabled {
+                itemAttr = barAttr | ATTR_DIM | ATTR_REVERSE
             } else if !item.enabled {
                 itemAttr = barAttr | ATTR_DIM
             } else {
@@ -2151,41 +2153,41 @@ final class TUI: EventSink {
     private func appendPanelRows(_ row: ProcessRow, depth: Int) {
         // Info box (only if visible)
         if row.infoVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.processHeader(row.pid))
             if row.infoDisclosed {
-                displayRows.append(.infoBorderTop(row.pid, depth))
                 appendProcessDisclosures(row)
-                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Files box (only if visible)
         if row.filesVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.filesHeader(row.pid))
             if row.filesDisclosed {
-                displayRows.append(.infoBorderTop(row.pid, depth))
                 let files = row.recentWrittenFiles
                 for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
-                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Network box (only if visible)
         if row.netVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.netHeader(row.pid))
             if row.netDisclosed {
-                displayRows.append(.infoBorderTop(row.pid, depth))
                 let conns = row.sortedConnections
                 for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
-                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Sample box (only if visible)
         if row.sampleVisible {
+            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.sampleHeader(row.pid))
             if row.sampleDisclosed {
-                displayRows.append(.infoBorderTop(row.pid, depth))
                 if row.isSampling {
                     displayRows.append(.processDetail(row.pid, "Sampling..."))
                 } else if row.sampleTree.isEmpty {
@@ -2202,8 +2204,8 @@ final class TUI: EventSink {
                     }
                     appendSampleNodes(row.sampleTree, path: [])
                 }
-                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
+            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Wait box (only if visible)
