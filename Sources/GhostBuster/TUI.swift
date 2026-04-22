@@ -75,8 +75,24 @@ final class ProcessRow {
     var fileOps: Int = 0
     var cwd: String = ""
     var disclosed: Bool = false
+    var processDisclosed: Bool = false
+    var argsDisclosed: Bool = false
+    var envDisclosed: Bool = false
+    var resourcesDisclosed: Bool = false
     var filesDisclosed: Bool = false
     var netDisclosed: Bool = false
+
+    /// Cached process info (loaded lazily when Process section is disclosed)
+    var fullPath: String = ""
+    var argvArray: [String] = []
+    var envVars: [String] = []
+    var infoLoaded: Bool = false
+
+    /// Resource stats (polled only when Resources is disclosed)
+    var cpuUser: TimeInterval = 0
+    var cpuSys: TimeInterval = 0
+    var rss: UInt64 = 0
+    var fdCount: Int = 0
 
     /// Per-file stats: path -> FileStats
     var files: [String: FileStats] = [:]
@@ -132,6 +148,14 @@ final class ProcessRow {
 
 private enum DisplayRow: Equatable {
     case process(pid_t)
+    case processHeader(pid_t)            // "Process" section
+    case processDetail(pid_t, String)    // pid, label (Path:, CWD:, etc)
+    case argsHeader(pid_t)
+    case argDetail(pid_t, Int)           // pid, arg index
+    case envHeader(pid_t)
+    case envDetail(pid_t, Int)           // pid, env index
+    case resourcesHeader(pid_t)
+    case resourceDetail(pid_t, String)   // pid, label
     case filesHeader(pid_t)
     case fileDetail(pid_t, String)       // pid, path
     case netHeader(pid_t)
@@ -292,7 +316,7 @@ final class TUI: EventSink {
     func disclose() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        toggleRow(row, open: true)
+        setDisclosure(row, open: true)
         lock.unlock()
         render()
     }
@@ -300,48 +324,16 @@ final class TUI: EventSink {
     func collapse() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        switch row {
-        case .process(let pid):
-            // If disclosed, collapse. If already collapsed, no-op.
-            if let r = rows[pid] {
-                r.disclosed = false
-                r.filesDisclosed = false
-                r.netDisclosed = false
-            }
-        case .filesHeader(let pid):
-            // If disclosed, collapse. If already collapsed, jump to process.
-            if let r = rows[pid] {
-                if r.filesDisclosed {
-                    r.filesDisclosed = false
-                } else {
-                    lock.unlock()
-                    jumpToParent(.process(pid))
-                    return
-                }
-            }
-        case .netHeader(let pid):
-            if let r = rows[pid] {
-                if r.netDisclosed {
-                    r.netDisclosed = false
-                } else {
-                    lock.unlock()
-                    jumpToParent(.process(pid))
-                    return
-                }
-            }
-        case .fileDetail(let pid, _):
-            // Jump to files header
+        if isDisclosed(row) {
+            setDisclosure(row, open: false)
             lock.unlock()
-            jumpToParent(.filesHeader(pid))
-            return
-        case .netDetail(let pid, _):
-            // Jump to network header
+            render()
+        } else if let parent = parentRow(row) {
             lock.unlock()
-            jumpToParent(.netHeader(pid))
-            return
+            jumpToParent(parent)
+        } else {
+            lock.unlock()
         }
-        lock.unlock()
-        render()
     }
 
     private func jumpToParent(_ target: DisplayRow) {
@@ -352,123 +344,146 @@ final class TUI: EventSink {
         render()
     }
 
-    /// Shift+Right: open self and all descendants
     func discloseAll() {
         guard let row = displayRows[safe: selectedIndex] else { return }
+        guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         switch row {
-        case .process(let pid):
-            if let r = rows[pid] {
-                r.disclosed = true
-                r.filesDisclosed = true
-                r.netDisclosed = true
-            }
-        case .filesHeader(let pid):
-            if let r = rows[pid] { r.filesDisclosed = true }
-        case .netHeader(let pid):
-            if let r = rows[pid] { r.netDisclosed = true }
-        default: break
+        case .process:
+            openAllDisclosures(pid)
+        case .processHeader:
+            rows[pid]?.processDisclosed = true
+            rows[pid]?.argsDisclosed = true
+            rows[pid]?.envDisclosed = true
+            rows[pid]?.resourcesDisclosed = true
+        default:
+            setDisclosure(row, open: true)
         }
         lock.unlock()
         render()
     }
 
-    /// Shift+Left: if open, close self and all descendants; if closed, close parent and jump to it
     func collapseAll() {
         guard let row = displayRows[safe: selectedIndex] else { return }
+        guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
-        switch row {
-        case .process(let pid):
-            if let r = rows[pid] {
-                if r.disclosed {
-                    r.disclosed = false
-                    r.filesDisclosed = false
-                    r.netDisclosed = false
-                }
-            }
-        case .filesHeader(let pid):
-            if let r = rows[pid] {
-                if r.filesDisclosed {
-                    r.filesDisclosed = false
-                } else {
-                    // Close parent process and jump to it
-                    r.disclosed = false
-                    r.filesDisclosed = false
-                    r.netDisclosed = false
-                    lock.unlock()
-                    jumpToParent(.process(pid))
-                    return
-                }
-            }
-        case .netHeader(let pid):
-            if let r = rows[pid] {
-                if r.netDisclosed {
-                    r.netDisclosed = false
-                } else {
-                    r.disclosed = false
-                    r.filesDisclosed = false
-                    r.netDisclosed = false
-                    lock.unlock()
-                    jumpToParent(.process(pid))
-                    return
-                }
-            }
-        case .fileDetail(let pid, _):
-            // Close files section and parent, jump to process
-            if let r = rows[pid] {
-                r.disclosed = false
-                r.filesDisclosed = false
-                r.netDisclosed = false
+        if isDisclosed(row) {
+            // Close self and all descendants
+            switch row {
+            case .process:
+                closeAllDisclosures(pid)
+            case .processHeader:
+                rows[pid]?.processDisclosed = false
+                rows[pid]?.argsDisclosed = false
+                rows[pid]?.envDisclosed = false
+                rows[pid]?.resourcesDisclosed = false
+            default:
+                setDisclosure(row, open: false)
             }
             lock.unlock()
-            jumpToParent(.process(pid))
-            return
-        case .netDetail(let pid, _):
-            if let r = rows[pid] {
-                r.disclosed = false
-                r.filesDisclosed = false
-                r.netDisclosed = false
-            }
+            render()
+        } else if let parent = parentRow(row) {
+            // Close parent and jump to it
+            setDisclosure(parent, open: false)
             lock.unlock()
-            jumpToParent(.process(pid))
-            return
+            jumpToParent(parent)
+        } else {
+            lock.unlock()
         }
-        lock.unlock()
-        render()
     }
 
     func toggleDisclose() {
         guard let row = displayRows[safe: selectedIndex] else { return }
         lock.lock()
-        switch row {
-        case .process(let pid):
-            if let r = rows[pid] { r.disclosed = !r.disclosed }
-        case .filesHeader(let pid):
-            if let r = rows[pid] { r.filesDisclosed = !r.filesDisclosed }
-        case .netHeader(let pid):
-            if let r = rows[pid] { r.netDisclosed = !r.netDisclosed }
-        default: break
-        }
+        let open = !isDisclosed(row)
+        setDisclosure(row, open: open)
         lock.unlock()
         render()
     }
 
-    private func toggleRow(_ row: DisplayRow, open: Bool) {
+    /// Set a single disclosure flag for a row
+    private func setDisclosure(_ row: DisplayRow, open: Bool) {
         switch row {
-        case .process(let pid):
-            if let r = rows[pid] { r.disclosed = open }
-        case .filesHeader(let pid):
-            if let r = rows[pid] { r.filesDisclosed = open }
-        case .netHeader(let pid):
-            if let r = rows[pid] { r.netDisclosed = open }
+        case .process(let pid):       rows[pid]?.disclosed = open
+        case .processHeader(let pid): rows[pid]?.processDisclosed = open
+        case .argsHeader(let pid):    rows[pid]?.argsDisclosed = open
+        case .envHeader(let pid):     rows[pid]?.envDisclosed = open
+        case .resourcesHeader(let pid): rows[pid]?.resourcesDisclosed = open
+        case .filesHeader(let pid):   rows[pid]?.filesDisclosed = open
+        case .netHeader(let pid):     rows[pid]?.netDisclosed = open
         default: break
+        }
+    }
+
+    /// Is this row currently disclosed?
+    private func isDisclosed(_ row: DisplayRow) -> Bool {
+        switch row {
+        case .process(let pid):       return rows[pid]?.disclosed ?? false
+        case .processHeader(let pid): return rows[pid]?.processDisclosed ?? false
+        case .argsHeader(let pid):    return rows[pid]?.argsDisclosed ?? false
+        case .envHeader(let pid):     return rows[pid]?.envDisclosed ?? false
+        case .resourcesHeader(let pid): return rows[pid]?.resourcesDisclosed ?? false
+        case .filesHeader(let pid):   return rows[pid]?.filesDisclosed ?? false
+        case .netHeader(let pid):     return rows[pid]?.netDisclosed ?? false
+        default: return false
+        }
+    }
+
+    /// Close all disclosure flags for a process
+    private func closeAllDisclosures(_ pid: pid_t) {
+        guard let r = rows[pid] else { return }
+        r.disclosed = false
+        r.processDisclosed = false
+        r.argsDisclosed = false
+        r.envDisclosed = false
+        r.resourcesDisclosed = false
+        r.filesDisclosed = false
+        r.netDisclosed = false
+    }
+
+    /// Open all disclosure flags for a process
+    private func openAllDisclosures(_ pid: pid_t) {
+        guard let r = rows[pid] else { return }
+        r.disclosed = true
+        r.processDisclosed = true
+        r.argsDisclosed = true
+        r.envDisclosed = true
+        r.resourcesDisclosed = true
+        r.filesDisclosed = true
+        r.netDisclosed = true
+    }
+
+    /// Get parent display row for navigation
+    private func parentRow(_ row: DisplayRow) -> DisplayRow? {
+        switch row {
+        case .process: return nil
+        case .processHeader(let pid), .filesHeader(let pid), .netHeader(let pid):
+            return .process(pid)
+        case .argsHeader(let pid), .envHeader(let pid), .resourcesHeader(let pid):
+            return .processHeader(pid)
+        case .processDetail(let pid, _):
+            return .processHeader(pid)
+        case .argDetail(let pid, _):
+            return .argsHeader(pid)
+        case .envDetail(let pid, _):
+            return .envHeader(pid)
+        case .resourceDetail(let pid, _):
+            return .resourcesHeader(pid)
+        case .fileDetail(let pid, _):
+            return .filesHeader(pid)
+        case .netDetail(let pid, _):
+            return .netHeader(pid)
         }
     }
 
     private func pidForRow(_ index: Int) -> pid_t? {
         guard let row = displayRows[safe: index] else { return nil }
         switch row {
-        case .process(let pid), .filesHeader(let pid), .fileDetail(let pid, _),
+        case .process(let pid), .processHeader(let pid), .processDetail(let pid, _),
+             .argsHeader(let pid), .argDetail(let pid, _),
+             .envHeader(let pid), .envDetail(let pid, _),
+             .resourcesHeader(let pid), .resourceDetail(let pid, _),
+             .filesHeader(let pid), .fileDetail(let pid, _),
              .netHeader(let pid), .netDetail(let pid, _):
             return pid
         }
@@ -634,6 +649,46 @@ final class TUI: EventSink {
             }
         }
 
+        // Load process info lazily when Process section is disclosed
+        lock.lock()
+        let needsInfo = rows.values.filter { $0.processDisclosed && !$0.infoLoaded }
+        lock.unlock()
+        for row in needsInfo {
+            let (path, _, argv) = getProcessInfo(row.pid)
+            let envVars = getProcessEnv(row.pid)
+            lock.lock()
+            row.fullPath = path
+            row.argvArray = argv.components(separatedBy: "\0").filter { !$0.isEmpty }
+            if row.argvArray.isEmpty {
+                row.argvArray = argv.components(separatedBy: " ")
+            }
+            row.envVars = envVars
+            row.infoLoaded = true
+            lock.unlock()
+        }
+
+        // Poll resources only for processes with Resources disclosed
+        lock.lock()
+        let needsResources = rows.values.filter { $0.resourcesDisclosed && $0.isRunning }
+        lock.unlock()
+        for row in needsResources {
+            var taskInfo = proc_taskinfo()
+            let size = proc_pidinfo(row.pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(MemoryLayout<proc_taskinfo>.size))
+            if size > 0 {
+                lock.lock()
+                row.cpuUser = TimeInterval(taskInfo.pti_total_user) / 1_000_000_000
+                row.cpuSys = TimeInterval(taskInfo.pti_total_system) / 1_000_000_000
+                row.rss = UInt64(taskInfo.pti_resident_size)
+                lock.unlock()
+            }
+            let fdSize = proc_pidinfo(row.pid, PROC_PIDLISTFDS, 0, nil, 0)
+            if fdSize > 0 {
+                lock.lock()
+                row.fdCount = Int(fdSize) / MemoryLayout<proc_fdinfo>.size
+                lock.unlock()
+            }
+        }
+
         // Resolve DNS for any new IPs
         resolveNewAddresses()
     }
@@ -760,14 +815,42 @@ final class TUI: EventSink {
         for row in allVisible {
             displayRows.append(.process(row.pid))
             if row.disclosed {
+                // Process section
+                displayRows.append(.processHeader(row.pid))
+                if row.processDisclosed {
+                    displayRows.append(.processDetail(row.pid, "Path"))
+                    displayRows.append(.processDetail(row.pid, "CWD"))
+                    displayRows.append(.processDetail(row.pid, "IDs"))
+                    displayRows.append(.processDetail(row.pid, "Started"))
+                    // Args sub-section
+                    displayRows.append(.argsHeader(row.pid))
+                    if row.argsDisclosed {
+                        for i in 0..<row.argvArray.count { displayRows.append(.argDetail(row.pid, i)) }
+                    }
+                    // Env sub-section
+                    displayRows.append(.envHeader(row.pid))
+                    if row.envDisclosed {
+                        for i in 0..<row.envVars.count { displayRows.append(.envDetail(row.pid, i)) }
+                    }
+                    // Resources sub-section
+                    displayRows.append(.resourcesHeader(row.pid))
+                    if row.resourcesDisclosed {
+                        displayRows.append(.resourceDetail(row.pid, "CPU"))
+                        displayRows.append(.resourceDetail(row.pid, "Memory"))
+                        displayRows.append(.resourceDetail(row.pid, "FDs"))
+                        displayRows.append(.resourceDetail(row.pid, "Disk"))
+                    }
+                }
+                // Files section
                 let files = row.recentWrittenFiles
-                let conns = row.sortedConnections
                 if !files.isEmpty {
                     displayRows.append(.filesHeader(row.pid))
                     if row.filesDisclosed {
                         for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
                     }
                 }
+                // Network section
+                let conns = row.sortedConnections
                 if !conns.isEmpty {
                     displayRows.append(.netHeader(row.pid))
                     if row.netDisclosed {
@@ -807,6 +890,96 @@ final class TUI: EventSink {
                     let isHighlighted = isCursor || selectedPids.contains(pid)
                     lock.unlock()
                     y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isHighlighted)
+                } else { lock.unlock() }
+
+            case .processHeader(let pid):
+                let disc = rows[pid]?.processDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                lock.unlock()
+                let label = "  \(disc) Process"
+                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .processDetail(let pid, let key):
+                if let row = rows[pid] {
+                    let value: String
+                    switch key {
+                    case "Path":    value = "Path: \(row.fullPath)"
+                    case "CWD":     value = "CWD:  \(row.cwd)"
+                    case "IDs":     value = "PID: \(row.pid)  PPID: \(row.ppid)  UID: \(getuid())"
+                    case "Started": let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"; value = "Started: \(fmt.string(from: row.startTime))"
+                    default:        value = key
+                    }
+                    lock.unlock()
+                    let label = "      \(value)"
+                    let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
+                    attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .argsHeader(let pid):
+                let count = rows[pid]?.argvArray.count ?? 0
+                let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                lock.unlock()
+                let label = "    \(disc) Args (\(count))"
+                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .argDetail(let pid, let idx):
+                let arg = rows[pid]?.argvArray[safe: idx] ?? ""
+                lock.unlock()
+                let label = "        \(arg)"
+                let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .envHeader(let pid):
+                let count = rows[pid]?.envVars.count ?? 0
+                let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                lock.unlock()
+                let label = "    \(disc) Env (\(count) vars)"
+                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .envDetail(let pid, let idx):
+                let env = rows[pid]?.envVars[safe: idx] ?? ""
+                lock.unlock()
+                let label = "        \(env)"
+                let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .resourcesHeader(let pid):
+                let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
+                lock.unlock()
+                let label = "    \(disc) Resources"
+                let attr = isCursor ? (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE) : (COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+                attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                y += 1
+
+            case .resourceDetail(let pid, let key):
+                if let row = rows[pid] {
+                    let value: String
+                    switch key {
+                    case "CPU":
+                        let uMin = Int(row.cpuUser) / 60; let uSec = Int(row.cpuUser) % 60
+                        let sMin = Int(row.cpuSys) / 60; let sSec = Int(row.cpuSys) % 60
+                        value = "CPU: \(uMin):\(String(format: "%02d", uSec)) user, \(sMin):\(String(format: "%02d", sSec)) sys"
+                    case "Memory":
+                        value = "Memory: \(formatBytes(row.rss)) RSS"
+                    case "FDs":
+                        value = "FDs: \(row.fdCount) open"
+                    case "Disk":
+                        value = "Disk: R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
+                    default: value = key
+                    }
+                    lock.unlock()
+                    let label = "        \(value)"
+                    let attr = isCursor ? ATTR_REVERSE : ATTR_DIM
+                    attron(attr); mvaddstr(y, 0, truncate(label, to: width)); attroff(attr)
+                    y += 1
                 } else { lock.unlock() }
 
             case .filesHeader(let pid):
