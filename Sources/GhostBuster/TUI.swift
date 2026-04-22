@@ -130,7 +130,7 @@ final class ProcessRow {
 
 // MARK: - Display row types for flat cursor navigation
 
-private enum DisplayRow {
+private enum DisplayRow: Equatable {
     case process(pid_t)
     case filesHeader(pid_t)
     case fileDetail(pid_t, String)       // pid, path
@@ -619,6 +619,9 @@ final class TUI: EventSink {
         let availableLines = Int(maxY) - 5
         let width = Int(maxX)
 
+        // Save current selection identity before rebuilding
+        let savedRow = displayRows[safe: selectedIndex]
+
         // Build flat display row list
         let allVisible = running + exited
         displayRows = []
@@ -627,15 +630,12 @@ final class TUI: EventSink {
             if row.disclosed {
                 let files = row.recentWrittenFiles
                 let conns = row.sortedConnections
-                // Files section
                 if !files.isEmpty {
-                    let totalWrites = files.reduce(0) { $0 + $1.stats.writes }
                     displayRows.append(.filesHeader(row.pid))
                     if row.filesDisclosed {
                         for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
                     }
                 }
-                // Network section
                 if !conns.isEmpty {
                     displayRows.append(.netHeader(row.pid))
                     if row.netDisclosed {
@@ -645,7 +645,11 @@ final class TUI: EventSink {
             }
         }
 
-        // Clamp selection
+        // Restore selection by identity
+        if let saved = savedRow, let idx = displayRows.firstIndex(of: saved) {
+            selectedIndex = idx
+        }
+        // Clamp
         if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
 
         // Adjust scroll offset to keep selectedIndex visible
