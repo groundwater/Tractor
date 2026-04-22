@@ -32,6 +32,8 @@ enum TUIColor: Int32 {
     case dim = 5
     case subNet = 6
     case subFile = 7
+    case menuBar = 8
+    case menuHighlight = 9
 }
 
 // MARK: - Sample tree node
@@ -202,6 +204,25 @@ private enum DisplayRow: Equatable {
     case waitLine(pid_t, Int)           // pid, result index
 }
 
+// MARK: - Menu system
+
+enum MenuID { case process, view }
+
+private struct MenuItem {
+    let label: String
+    let shortcut: String    // e.g. "s", "" for none
+    let key: Int32?         // ASCII code for shortcut, nil for none
+    var checked: Bool = false
+    var enabled: Bool = true
+    var isSeparator: Bool = false
+
+    static func sep() -> MenuItem {
+        var m = MenuItem(label: "", shortcut: "", key: nil)
+        m.isSeparator = true
+        return m
+    }
+}
+
 // MARK: - TUI
 
 final class TUI: EventSink {
@@ -213,6 +234,11 @@ final class TUI: EventSink {
     private var paused = false
     private var showHints = true
     private var killMode = false       // waiting for signal number
+    private var showExited = true
+
+    // Menu state
+    private var activeMenu: MenuID? = nil
+    private var menuItemIndex = 0
     private var selectedIndex = -1
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
@@ -299,6 +325,8 @@ final class TUI: EventSink {
         init_pair(Int16(TUIColor.dim.rawValue),     Int16(COLOR_BLACK), -1)  // bright black = gray
         init_pair(Int16(TUIColor.subNet.rawValue),  Int16(COLOR_YELLOW), -1)
         init_pair(Int16(TUIColor.subFile.rawValue), Int16(COLOR_MAGENTA), -1)
+        init_pair(Int16(TUIColor.menuBar.rawValue), Int16(COLOR_BLACK), Int16(COLOR_WHITE))
+        init_pair(Int16(TUIColor.menuHighlight.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLUE))
 
         // Install SIGWINCH handler
         signal(SIGWINCH) { _ in
@@ -388,6 +416,134 @@ final class TUI: EventSink {
 
     func toggleHints() {
         showHints = !showHints
+        forceRender()
+    }
+
+    // MARK: - Menu system
+
+    var isMenuOpen: Bool { activeMenu != nil }
+
+    private func processMenuItems() -> [MenuItem] {
+        let hasPid = pidForRow(selectedIndex) != nil
+        lock.lock()
+        let pid = pidForRow(selectedIndex)
+        let isRunning = pid != nil ? (rows[pid!]?.isRunning ?? false) : false
+        let isStopped = pid != nil ? (rows[pid!]?.isStopped ?? false) : false
+        lock.unlock()
+        return [
+            MenuItem(label: "Info", shortcut: "i", key: 105, enabled: hasPid),
+            MenuItem(label: "Sample", shortcut: "s", key: 115, enabled: hasPid && isRunning),
+            MenuItem(label: "Wait", shortcut: "w", key: 119, enabled: hasPid && isRunning),
+            .sep(),
+            MenuItem(label: "Kill", shortcut: "k", key: 107, enabled: hasPid && isRunning),
+            MenuItem(label: isStopped ? "Resume" : "Pause", shortcut: "z", key: 122, enabled: hasPid && isRunning),
+        ]
+    }
+
+    private func viewMenuItems() -> [MenuItem] {
+        return [
+            MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
+            MenuItem(label: "Columns", shortcut: "▸", key: nil, enabled: false),
+        ]
+    }
+
+    func toggleMenu(_ menu: MenuID) {
+        if activeMenu == menu {
+            activeMenu = nil
+        } else {
+            activeMenu = menu
+            menuItemIndex = 0
+        }
+        forceRender()
+    }
+
+    func closeMenu() {
+        activeMenu = nil
+        forceRender()
+    }
+
+    func menuUp() {
+        guard activeMenu != nil else { return }
+        let items = currentMenuItems()
+        if menuItemIndex > 0 {
+            menuItemIndex -= 1
+            if items[safe: menuItemIndex]?.isSeparator == true && menuItemIndex > 0 {
+                menuItemIndex -= 1
+            }
+        }
+        forceRender()
+    }
+
+    func menuDown() {
+        guard activeMenu != nil else { return }
+        let items = currentMenuItems()
+        if menuItemIndex < items.count - 1 {
+            menuItemIndex += 1
+            if items[safe: menuItemIndex]?.isSeparator == true && menuItemIndex < items.count - 1 {
+                menuItemIndex += 1
+            }
+        }
+        forceRender()
+    }
+
+    func menuSelect() {
+        guard let menu = activeMenu else { return }
+        let items = currentMenuItems()
+        guard let item = items[safe: menuItemIndex], item.enabled, !item.isSeparator else { return }
+        activeMenu = nil
+
+        if menu == .view {
+            if item.label == "Show Exited" {
+                showExited = !showExited
+            }
+            forceRender()
+            return
+        }
+
+        // Process menu — execute via shortcut key
+        if let key = item.key {
+            executeShortcut(key)
+        }
+        forceRender()
+    }
+
+    func executeShortcut(_ key: Int32) {
+        activeMenu = nil  // close menu on shortcut
+        switch key {
+        case 105: toggleInfo()          // i
+        case 115: sampleProcess()       // s
+        case 119: diagnoseWait()        // w
+        case 107: enterKillMode()       // k
+        case 122: togglePauseProcess()  // z
+        default: break
+        }
+    }
+
+    private func currentMenuItems() -> [MenuItem] {
+        switch activeMenu {
+        case .process: return processMenuItems()
+        case .view: return viewMenuItems()
+        case nil: return []
+        }
+    }
+
+    func menuLeft() {
+        guard activeMenu != nil else { return }
+        switch activeMenu {
+        case .view: activeMenu = .process
+        default: activeMenu = .view
+        }
+        menuItemIndex = 0
+        forceRender()
+    }
+
+    func menuRight() {
+        guard activeMenu != nil else { return }
+        switch activeMenu {
+        case .process: activeMenu = .view
+        default: activeMenu = .process
+        }
+        menuItemIndex = 0
         forceRender()
     }
 
@@ -1306,7 +1462,7 @@ final class TUI: EventSink {
         lock.unlock()
 
         // Filter out GhostBuster's own processes and its children
-        let visible = allRows.filter { !isExcluded($0) }
+        let visible = allRows.filter { !isExcluded($0) && (showExited || $0.isRunning) }
 
         // Sort: running first (oldest start first), then exited (most recent exit first)
         let running = visible.filter { $0.isRunning }.sorted { $0.startTime < $1.startTime }
@@ -1327,6 +1483,9 @@ final class TUI: EventSink {
         attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
         mvaddstr(1, 0, truncate(stats, to: Int(maxX)))
         attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+
+        // Menu bar on line 2
+        renderMenuBar(y: 2, width: Int(maxX))
 
         // Column header
         let colHeader = "  " + formatLine(
@@ -1649,10 +1808,104 @@ final class TUI: EventSink {
 
         drawFooter(maxY: maxY, maxX: maxX)
 
+        // Menu dropdown overlay
+        if let menu = activeMenu {
+            renderMenuDropdown(menu: menu, maxY: maxY, maxX: maxX)
+        }
 
         refresh()
     }
 
+
+    private func renderMenuBar(y: Int32, width: Int) {
+        // Light gray background across full width
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let pad = String(repeating: " ", count: width)
+        attron(barAttr)
+        mvaddstr(y, 0, pad)
+        attroff(barAttr)
+
+        // Menu items
+        let menus: [(label: String, shortcut: String, id: MenuID)] = [
+            ("Process", "p", .process),
+            ("View", "v", .view),
+        ]
+
+        var x: Int32 = 1
+        for menu in menus {
+            let label = " \(menu.label) "
+            let isActive = activeMenu == menu.id
+            let attr = isActive ? COLOR_PAIR(TUIColor.menuHighlight.rawValue) : barAttr
+            attron(attr)
+            mvaddstr(y, x, label)
+            attroff(attr)
+            x += Int32(label.count) + 1
+        }
+    }
+
+    private func renderMenuDropdown(menu: MenuID, maxY: Int32, maxX: Int32) {
+        let items: [MenuItem]
+        let dropX: Int32
+
+        switch menu {
+        case .process:
+            items = processMenuItems()
+            dropX = 1
+        case .view:
+            items = viewMenuItems()
+            dropX = 12  // after "Process" + spacing
+        }
+
+        guard !items.isEmpty else { return }
+
+        // Calculate dropdown width
+        let maxLabel = items.map { $0.label.count }.max() ?? 0
+        let maxShortcut = items.map { $0.shortcut.count }.max() ?? 0
+        let dropWidth = maxLabel + maxShortcut + 6  // padding + check + gap
+        let dropY: Int32 = 3  // below menu bar
+
+        // Draw border and items
+        let hLine = String(repeating: "\u{2500}", count: dropWidth - 2)
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+
+        attron(barAttr)
+        mvaddstr(dropY, dropX, "\u{250C}\(hLine)\u{2510}")
+
+        for (idx, item) in items.enumerated() {
+            let lineY = dropY + Int32(idx) + 1
+            if item.isSeparator {
+                mvaddstr(lineY, dropX, "\u{251C}\(String(repeating: "\u{2500}", count: dropWidth - 2))\u{2524}")
+                continue
+            }
+
+            let isHighlighted = idx == menuItemIndex
+            let check = item.checked ? "\u{2713} " : "  "
+            let gap = String(repeating: " ", count: max(1, dropWidth - 4 - item.label.count - item.shortcut.count))
+            let content = "\(check)\(item.label)\(gap)\(item.shortcut)"
+            let padded = String(content.prefix(dropWidth - 2))
+                + String(repeating: " ", count: max(0, dropWidth - 2 - content.count))
+
+            let itemAttr: Int32
+            if isHighlighted {
+                itemAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+            } else if !item.enabled {
+                itemAttr = barAttr | ATTR_DIM
+            } else {
+                itemAttr = barAttr
+            }
+
+            mvaddstr(lineY, dropX, "\u{2502}")
+            attron(itemAttr)
+            addstr(padded)
+            attroff(itemAttr)
+            attron(barAttr)
+            addstr("\u{2502}")
+        }
+
+        let bottomY = dropY + Int32(items.count) + 1
+        mvaddstr(bottomY, dropX, "\u{2514}\(hLine)\u{2518}")
+        attroff(barAttr)
+    }
 
     private func drawFooter(maxY: Int32, maxX: Int32) {
         let width = Int(maxX)

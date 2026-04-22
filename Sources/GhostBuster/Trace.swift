@@ -124,13 +124,31 @@ struct Trace: ParsableCommand {
                     // Kill mode intercepts number keys
                     if t.isKillMode {
                         switch ch {
-                        case 49: t.sendSignal(1)   // 1 = HUP
-                        case 50: t.sendSignal(2)   // 2 = INT
-                        case 51: t.sendSignal(3)   // 3 = QUIT
-                        case 57: t.sendSignal(9)   // 9 = KILL
-                        case 53: t.sendSignal(15)  // 5 = TERM (shown as 15)
-                        case 27, 107: t.enterKillMode() // esc or k = cancel
+                        case 49: t.sendSignal(1)
+                        case 50: t.sendSignal(2)
+                        case 51: t.sendSignal(3)
+                        case 57: t.sendSignal(9)
+                        case 53: t.sendSignal(15)
+                        case 27, 107: t.enterKillMode()
                         default: break
+                        }
+                        continue
+                    }
+
+                    // Menu navigation when open
+                    if t.isMenuOpen {
+                        switch ch {
+                        case 259: t.menuUp()          // UP
+                        case 258: t.menuDown()        // DOWN
+                        case 260: t.menuLeft()        // LEFT
+                        case 261: t.menuRight()       // RIGHT
+                        case 10, 13: t.menuSelect()   // Enter
+                        case 27: t.closeMenu()        // ESC
+                        case 112: t.toggleMenu(.process) // p
+                        case 118: t.toggleMenu(.view)    // v
+                        default:
+                            // Shortcut keys still work while menu is open
+                            t.executeShortcut(ch)
                         }
                         continue
                     }
@@ -146,23 +164,27 @@ struct Trace: ParsableCommand {
                         t.disclose()
                     case 260: // KEY_LEFT
                         t.collapse()
-                    case 10, 13: // Enter - toggle disclosure
+                    case 10, 13: // Enter
                         t.toggleDisclose()
-                    case 105: // 'i' - toggle inline info
+                    case 112: // 'p' - Process menu
+                        t.toggleMenu(.process)
+                    case 118: // 'v' - View menu
+                        t.toggleMenu(.view)
+                    case 105: // 'i'
                         t.toggleInfo()
-                    case 122: // 'z' - pause/unpause process
+                    case 122: // 'z'
                         t.togglePauseProcess()
-                    case 107: // 'k' - kill mode
+                    case 107: // 'k'
                         t.enterKillMode()
-                    case 115: // 's' - sample process
+                    case 115: // 's'
                         t.sampleProcess()
-                    case 119: // 'w' - diagnose wait
+                    case 119: // 'w'
                         t.diagnoseWait()
-                    case 63: // '?' - toggle hints
+                    case 63: // '?'
                         t.toggleHints()
                     case 27: // ESC
                         t.clearSelection()
-                    case 104: // 'h' - toggle view mode
+                    case 104: // 'h'
                         t.toggleViewMode()
                     case 113: // 'q'
                         activeInputSource?.cancel()
