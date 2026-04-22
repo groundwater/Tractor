@@ -65,7 +65,7 @@ final class EventOutput: EventSink {
         ))
     }
 
-    func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t) {
+    func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
         emit(AgentEvent(
             timestamp: now(), type: "exit",
             pid: pid, ppid: ppid, process: process, user: user,

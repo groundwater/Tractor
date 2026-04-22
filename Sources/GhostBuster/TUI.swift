@@ -702,6 +702,10 @@ final class TUI: EventSink {
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
         if !row.sampleRuns.isEmpty { row.sampleRuns.removeLast() }
+        if row.sampleRuns.isEmpty {
+            row.sampleVisible = false
+            row.sampleDisclosed = false
+        }
         lock.unlock()
         forceRender()
     }
@@ -1765,8 +1769,26 @@ final class TUI: EventSink {
         recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
     }
 
-    func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t) {
-        markExited(pid: pid)
+    func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
+        // Parse wait status: WIFEXITED → exit code, WIFSIGNALED → signal
+        let exitCode: Int32
+        if (exitStatus & 0x7f) == 0 {
+            // Normal exit: WEXITSTATUS
+            exitCode = (exitStatus >> 8) & 0xff
+        } else {
+            // Killed by signal: WTERMSIG, encode as negative
+            exitCode = -(exitStatus & 0x7f)
+        }
+        markExited(pid: pid, exitCode: exitCode)
+
+        // Ensure we have process info saved
+        lock.lock()
+        if let row = rows[pid] {
+            if row.name.isEmpty || row.name == "?" {
+                row.name = process
+            }
+        }
+        lock.unlock()
     }
 
     // MARK: - Polling (called during render on main thread)

@@ -135,9 +135,11 @@ final class ESClient {
 
             case ES_EVENT_TYPE_NOTIFY_EXIT:
                 if tree.contains(info.pid) {
+                    let stat = message.pointee.event.exit.stat
                     sink.onExit(
                         pid: info.pid, ppid: info.ppid,
-                        process: info.path, user: info.uid
+                        process: info.path, user: info.uid,
+                        exitStatus: stat
                     )
                     tree.remove(info.pid)
                 }
