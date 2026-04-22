@@ -244,7 +244,7 @@ final class TUI: EventSink {
     private var menuItemIndex = 0
     private var menuFlash: MenuID? = nil
     private var menuFlashTime: Date? = nil
-    private var selectedIndex = -1
+    private var selectedIndex = 0
     /// Selected display row indices for multi-select
     private var selectedIndices: Set<Int> = []
     /// Flat list of all displayable rows for cursor navigation
@@ -627,7 +627,7 @@ final class TUI: EventSink {
         menuFlashTime = Date()
         forceRender()
         // Clear flash after 150ms
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.menuFlash = nil
             self?.forceRender()
         }
@@ -1748,32 +1748,32 @@ final class TUI: EventSink {
                 let count = rows[pid]?.argvArray.count ?? 0
                 let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .argDetail(let pid, let idx):
                 let arg = rows[pid]?.argvArray[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 8, content: arg, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 10, content: arg, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .envHeader(let pid):
                 let count = rows[pid]?.envVars.count ?? 0
                 let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 8, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 10, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .resourcesHeader(let pid):
                 let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .resourceDetail(let pid, let key):
@@ -1790,7 +1790,7 @@ final class TUI: EventSink {
                     default: value = key
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 8, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 10, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1929,10 +1929,10 @@ final class TUI: EventSink {
         let items: [MenuItem]
         // Compute X position based on menu order
         let menuWidths: [(id: MenuID, width: Int)] = [
-            (.file, 8),       // " (F)ile "
-            (.edit, 8),       // " (E)dit "
-            (.process, 12),   // " (P)rocess "
-            (.view, 8),       // " (V)iew "
+            (.file, 6),       // " File "
+            (.edit, 6),       // " Edit "
+            (.process, 10),   // " Process "
+            (.view, 6),       // " View "
         ]
         var dropX: Int32 = 1
         for mw in menuWidths {
