@@ -146,7 +146,7 @@ struct Trace: ParsableCommand {
                         case 27: t.closeMenu()        // ESC
                         case 102: t.toggleMenu(.file)    // f
                         case 101: t.toggleMenu(.edit)    // e
-                        case 112: t.toggleMenu(.process) // p
+                        case 112: t.toggleContextMenu() // p
                         case 118: t.toggleMenu(.view)    // v
                         default:
                             // Shortcut keys still work while menu is open
@@ -172,8 +172,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.file)
                     case 101: // 'e' - Edit menu
                         t.toggleMenu(.edit)
-                    case 112: // 'p' - Process menu
-                        t.toggleMenu(.process)
+                    case 112: // 'p' - Process/context menu
+                        t.toggleContextMenu()
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
                     case 105: // 'i'

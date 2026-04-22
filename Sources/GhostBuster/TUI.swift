@@ -209,7 +209,7 @@ private enum DisplayRow: Equatable {
 
 // MARK: - Menu system
 
-enum MenuID { case file, edit, process, view }
+enum MenuID: Equatable { case file, edit, process, sample, network, files, view }
 
 private struct MenuItem {
     let label: String
@@ -429,7 +429,6 @@ final class TUI: EventSink {
     var isMenuOpen: Bool { activeMenu != nil }
 
     private func processMenuItems() -> [MenuItem] {
-        let dr = displayRows[safe: selectedIndex]
         let hasPid = pidForRow(selectedIndex) != nil
         lock.lock()
         let pid = pidForRow(selectedIndex)
@@ -440,32 +439,6 @@ final class TUI: EventSink {
         let filesVis = row?.filesVisible ?? false
         let netVis = row?.netVisible ?? false
         lock.unlock()
-
-        // Context-sensitive menus based on what's highlighted
-        if let dr = dr {
-            switch dr {
-            case .sampleHeader, .sampleNode:
-                return [
-                    MenuItem(label: "Resample...", shortcut: "", key: nil, enabled: hasPid && isRunning),
-                    MenuItem(label: "Delete...", shortcut: "", key: nil, enabled: hasPid),
-                    MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
-                ]
-            case .filesHeader, .fileDetail:
-                return [
-                    MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: false, enabled: false),
-                    MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: true, enabled: false),
-                ]
-            case .netHeader, .netDetail:
-                return [
-                    MenuItem(label: "Reverse DNS Lookup", shortcut: "", key: nil, checked: true, enabled: false),
-                    MenuItem(label: "SNI Inspection", shortcut: "", key: nil, checked: true, enabled: false),
-                ]
-            default:
-                break
-            }
-        }
-
-        // Default process menu
         return [
             MenuItem(label: "Show Info", shortcut: "i", key: 105, checked: infoVis, enabled: hasPid),
             MenuItem(label: "Show Files", shortcut: "d", key: 100, checked: filesVis, enabled: hasPid),
@@ -476,6 +449,29 @@ final class TUI: EventSink {
             .sep(),
             MenuItem(label: "Kill", shortcut: "k", key: 107, enabled: hasPid && isRunning),
             MenuItem(label: isStopped ? "Resume" : "Pause", shortcut: "z", key: 122, enabled: hasPid && isRunning),
+        ]
+    }
+
+    private func sampleMenuItems() -> [MenuItem] {
+        let hasPid = pidForRow(selectedIndex) != nil
+        return [
+            MenuItem(label: "Resample...", shortcut: "", key: nil, enabled: hasPid),
+            MenuItem(label: "Delete...", shortcut: "", key: nil, enabled: hasPid),
+            MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
+        ]
+    }
+
+    private func networkMenuItems() -> [MenuItem] {
+        return [
+            MenuItem(label: "Reverse DNS Lookup", shortcut: "", key: nil, checked: true),
+            MenuItem(label: "SNI Inspection", shortcut: "", key: nil, checked: true),
+        ]
+    }
+
+    private func filesMenuItems() -> [MenuItem] {
+        return [
+            MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: false),
+            MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: true),
         ]
     }
 
@@ -499,6 +495,10 @@ final class TUI: EventSink {
             MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
             MenuItem(label: "Columns", shortcut: "▸", key: nil, enabled: false),
         ]
+    }
+
+    func toggleContextMenu() {
+        toggleMenu(contextMenuID())
     }
 
     func toggleMenu(_ menu: MenuID) {
@@ -616,6 +616,9 @@ final class TUI: EventSink {
             case .file: items = fileMenuItems()
             case .edit: items = editMenuItems()
             case .process: items = processMenuItems()
+            case .sample: items = sampleMenuItems()
+            case .network: items = networkMenuItems()
+            case .files: items = filesMenuItems()
             case .view: items = viewMenuItems()
             }
             if items.contains(where: { $0.key == key }) { return menuId }
@@ -670,13 +673,31 @@ final class TUI: EventSink {
         menuItemIndex = savedIndex
     }
 
-    private let menuOrder: [MenuID] = [.file, .edit, .process, .view]
+    /// Menu order changes based on what's highlighted
+    private var menuOrder: [MenuID] {
+        let contextMenu = contextMenuID()
+        return [.file, .edit, contextMenu, .view]
+    }
+
+    /// Which context menu to show based on current selection
+    private func contextMenuID() -> MenuID {
+        guard let dr = displayRows[safe: selectedIndex] else { return .process }
+        switch dr {
+        case .sampleHeader, .sampleNode: return .sample
+        case .netHeader, .netDetail: return .network
+        case .filesHeader, .fileDetail: return .files
+        default: return .process
+        }
+    }
 
     private func currentMenuItems() -> [MenuItem] {
         switch activeMenu {
         case .file: return fileMenuItems()
         case .edit: return editMenuItems()
         case .process: return processMenuItems()
+        case .sample: return sampleMenuItems()
+        case .network: return networkMenuItems()
+        case .files: return filesMenuItems()
         case .view: return viewMenuItems()
         case nil: return []
         }
@@ -1975,11 +1996,19 @@ final class TUI: EventSink {
         mvaddstr(y, 0, pad)
         attroff(barAttr)
 
-        let menus: [(before: String, key: String, after: String, id: MenuID)] = [
-            ("", "F", "ile", .file),
-            ("", "E", "dit", .edit),
-            ("", "P", "rocess", .process),
-            ("", "V", "iew", .view),
+        let ctx = contextMenuID()
+        let ctxEntry: (before: String, key: String, after: String, id: MenuID)
+        switch ctx {
+        case .sample:  ctxEntry = ("", "S", "ample", .sample)
+        case .network: ctxEntry = ("", "N", "etwork", .network)
+        case .files:   ctxEntry = ("Fi", "l", "es", .files)
+        default:       ctxEntry = ("", "P", "rocess", .process)
+        }
+        let menus = [
+            (before: "", key: "F", after: "ile", id: MenuID.file),
+            (before: "", key: "E", after: "dit", id: MenuID.edit),
+            ctxEntry,
+            (before: "", key: "V", after: "iew", id: MenuID.view),
         ]
 
         var x: Int32 = 1
@@ -2006,11 +2035,20 @@ final class TUI: EventSink {
     private func renderMenuDropdown(menu: MenuID, maxY: Int32, maxX: Int32) {
         let items: [MenuItem]
         // Compute X position based on menu order
+        // Compute dropdown X from current menu bar layout
+        let ctx = contextMenuID()
+        let ctxWidth: Int
+        switch ctx {
+        case .sample: ctxWidth = 8     // " Sample "
+        case .network: ctxWidth = 10   // " Network "
+        case .files: ctxWidth = 7      // " Files "
+        default: ctxWidth = 10         // " Process "
+        }
         let menuWidths: [(id: MenuID, width: Int)] = [
-            (.file, 6),       // " File "
-            (.edit, 6),       // " Edit "
-            (.process, 10),   // " Process "
-            (.view, 6),       // " View "
+            (.file, 6),
+            (.edit, 6),
+            (ctx, ctxWidth),
+            (.view, 6),
         ]
         var dropX: Int32 = 1
         for mw in menuWidths {
@@ -2022,6 +2060,9 @@ final class TUI: EventSink {
         case .file: items = fileMenuItems()
         case .edit: items = editMenuItems()
         case .process: items = processMenuItems()
+        case .sample: items = sampleMenuItems()
+        case .network: items = networkMenuItems()
+        case .files: items = filesMenuItems()
         case .view: items = viewMenuItems()
         }
 
