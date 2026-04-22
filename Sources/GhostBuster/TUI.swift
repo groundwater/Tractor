@@ -18,6 +18,7 @@ private func NCURSES_BITS(_ mask: Int32, _ shift: Int32) -> Int32 {
     mask << (shift + NCURSES_ATTR_SHIFT)
 }
 private func COLOR_PAIR(_ n: Int32) -> Int32 { NCURSES_BITS(n, 0) }
+private let ATTR_UNDERLINE = NCURSES_BITS(1, 9)  // A_UNDERLINE
 private let ATTR_REVERSE = NCURSES_BITS(1, 10)  // A_REVERSE
 private let ATTR_DIM     = NCURSES_BITS(1, 12)  // A_DIM
 private let ATTR_BOLD    = NCURSES_BITS(1, 13)  // A_BOLD
@@ -1545,14 +1546,16 @@ final class TUI: EventSink {
         // Menu bar on line 2
         renderMenuBar(y: 2, width: Int(maxX))
 
-        // Column header
-        let colHeader = "  " + formatLine(
-            pid: "PID", runtime: "TIME", ops: "OPS",
-            status: "STATUS", process: "PROCESS",
-            maxWidth: Int(maxX) - 2
-        )
+        // Column header — fixed positions matching renderProcessRow
+        var headerLine = [Character](repeating: " ", count: Int(maxX))
+        let headers: [(col: Int, text: String)] = [
+            (2, "PID"), (10, "TIME"), (17, "OPS"), (23, "STATUS"), (29, "PROCESS"),
+        ]
+        for h in headers {
+            for (i, c) in h.text.enumerated() where h.col + i < Int(maxX) { headerLine[h.col + i] = c }
+        }
         attron(ATTR_BOLD)
-        mvaddstr(3, 0, colHeader)
+        mvaddstr(3, 0, String(headerLine))
         attroff(ATTR_BOLD)
 
         let availableLines = Int(maxY) - 5
@@ -1852,13 +1855,11 @@ final class TUI: EventSink {
         mvaddstr(y, 0, pad)
         attroff(barAttr)
 
-        // Menu items: (display, key char index, id)
-        // Display shows shortcut key in parens: (F)ile (E)dit (P)rocess (V)iew
-        let menus: [(prefix: String, key: String, suffix: String, id: MenuID)] = [
-            ("(", "F", ")ile", .file),
-            ("(", "E", ")dit", .edit),
-            ("(", "P", ")rocess", .process),
-            ("(", "V", ")iew", .view),
+        let menus: [(before: String, key: String, after: String, id: MenuID)] = [
+            ("", "F", "ile", .file),
+            ("", "E", "dit", .edit),
+            ("", "P", "rocess", .process),
+            ("", "V", "iew", .view),
         ]
 
         var x: Int32 = 1
@@ -1868,17 +1869,17 @@ final class TUI: EventSink {
             let baseAttr = (isActive || isFlashing) ? COLOR_PAIR(TUIColor.menuHighlight.rawValue) : barAttr
 
             attron(baseAttr)
-            mvaddstr(y, x, " \(menu.prefix)")
+            mvaddstr(y, x, " \(menu.before)")
             attroff(baseAttr)
-            // Underlined key character
-            attron(baseAttr | ATTR_BOLD)
+            // Bold underline on shortcut key
+            attron(baseAttr | ATTR_BOLD | ATTR_UNDERLINE)
             addstr(menu.key)
-            attroff(baseAttr | ATTR_BOLD)
+            attroff(baseAttr | ATTR_BOLD | ATTR_UNDERLINE)
             attron(baseAttr)
-            addstr("\(menu.suffix) ")
+            addstr("\(menu.after) ")
             attroff(baseAttr)
 
-            x += Int32(menu.prefix.count + menu.key.count + menu.suffix.count + 2)
+            x += Int32(menu.before.count + menu.key.count + menu.after.count + 2)
         }
     }
 
@@ -2109,26 +2110,58 @@ final class TUI: EventSink {
         }
 
         let indent = String(repeating: "  ", count: depth)
-        let disc = row.disclosed ? "\u{25BC} " : "\u{25B6} "
+        let disc = row.disclosed ? "\u{25BC}" : "\u{25B6}"
         let processLabel = row.argv.isEmpty ? row.name : row.argv
-        let prefixWidth = indent.count + 2  // indent + disclosure triangle
-        let line = formatLine(
-            pid: "\(row.pid)",
-            runtime: row.runtimeString,
-            ops: "\(row.fileOps)",
-            status: status,
-            process: processLabel,
-            maxWidth: Int(maxX) - prefixWidth
-        )
+
+        // Fixed column positions (matching header: "  PID     TIME   OPS   STATUS PROCESS")
+        // Col 0-1: indent area / disclosure for depth 0
+        // Col 2: PID start
+        let colPid: Int32 = 2
+        let colTime: Int32 = 10
+        let colOps: Int32 = 17
+        let colStatus: Int32 = 23
+        let colProcess: Int32 = 29
+        let width = Int(maxX)
 
         var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
         if highlight { attr |= ATTR_REVERSE }
 
-        mvaddstr(y, 0, indent)
+        // Build the full line with columns at fixed positions
+        var line = [Character](repeating: " ", count: width)
+
+        // Disclosure triangle in indent area
+        let discPos = max(0, depth * 2)
+        for (i, c) in disc.enumerated() where discPos + i < width { line[discPos + i] = c }
+
+        // PID at col 2
+        let pidStr = String(row.pid)
+        for (i, c) in pidStr.enumerated() where Int(colPid) + i < width { line[Int(colPid) + i] = c }
+
+        // TIME at col 10
+        for (i, c) in row.runtimeString.enumerated() where Int(colTime) + i < width { line[Int(colTime) + i] = c }
+
+        // OPS at col 17
+        let opsStr = String(row.fileOps)
+        for (i, c) in opsStr.enumerated() where Int(colOps) + i < width { line[Int(colOps) + i] = c }
+
+        // STATUS at col 23
+        for (i, c) in status.enumerated() where Int(colStatus) + i < width { line[Int(colStatus) + i] = c }
+
+        // PROCESS at col 29 + depth indent
+        let processStart = Int(colProcess) + depth * 2
+        let processWidth = max(5, width - processStart)
+        let truncatedProcess = truncateProcess(processLabel, to: processWidth)
+        for (i, c) in truncatedProcess.enumerated() where processStart + i < width { line[processStart + i] = c }
+
+        let lineStr = String(line)
+
+        // Render: indent without highlight, rest with highlight
+        let highlightStart = discPos
+        mvaddstr(y, 0, String(lineStr.prefix(highlightStart)))
         attron(attr)
-        addstr(disc + line)
+        addstr(String(lineStr.dropFirst(highlightStart)))
         attroff(attr)
         return y + 1
     }
