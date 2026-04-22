@@ -1,0 +1,34 @@
+name: GhostBuster
+options:
+  deploymentTarget:
+    macOS: "15.0"
+  bundleIdPrefix: com.ghostbuster
+
+packages:
+  swift-argument-parser:
+    url: https://github.com/apple/swift-argument-parser
+    from: "1.3.0"
+
+targets:
+  GhostBuster:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/GhostBuster
+    dependencies:
+      - package: swift-argument-parser
+        product: ArgumentParser
+    settings:
+      base:
+        PRODUCT_NAME: GhostBuster
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: Sources/GhostBuster/GhostBuster.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/GhostBuster/BridgingHeader.h
+        OTHER_LDFLAGS:
+          - "-lEndpointSecurity"
+          - "-lbsm"
+    entitlements:
+      path: Sources/GhostBuster/GhostBuster.entitlements
+      properties:
+        com.apple.developer.endpoint-security.client: true

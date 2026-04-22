@@ -1,0 +1,631 @@
+import Darwin.ncurses
+import Foundation
+
+// MARK: - ncurses helpers (macros that don't bridge to Swift)
+
+private func COLOR_PAIR(_ n: Int32) -> Int32 { n << 8 }
+private let ATTR_BOLD  = Int32(1 << 21)  // ATTR_BOLD
+private let ATTR_DIM   = Int32(1 << 20)  // A_DIM
+
+// MARK: - Color scheme
+
+enum TUIColor: Int32 {
+    case running = 1
+    case exited = 2
+    case failed = 3
+    case header = 4
+    case dim = 5
+    case subNet = 6
+    case subFile = 7
+}
+
+// MARK: - Per-file tracking
+
+struct FileStats {
+    var writes: Int = 0
+    var unlinks: Int = 0
+    var renames: Int = 0
+    var lastWrite: Date = Date()
+
+    var total: Int { writes + unlinks + renames }
+}
+
+// MARK: - Per-connection tracking
+
+struct ConnectionStats {
+    let remoteAddr: String
+    let remotePort: UInt16
+    var hostname: String?
+    var count: Int = 1
+    var alive: Bool = true
+    var rxBytes: UInt64 = 0
+    var txBytes: UInt64 = 0
+
+    var label: String {
+        let host = hostname ?? remoteAddr
+        return "\(host):\(remotePort)"
+    }
+}
+
+// MARK: - Process row model
+
+final class ProcessRow {
+    let pid: pid_t
+    var ppid: pid_t
+    var name: String
+    var argv: String
+    var startTime: Date
+    var endTime: Date?
+    var exitCode: Int32?
+    var fileOps: Int = 0
+
+    /// Per-file stats: path -> FileStats
+    var files: [String: FileStats] = [:]
+
+    /// Per-connection stats: "addr:port" -> ConnectionStats
+    var connections: [String: ConnectionStats] = [:]
+
+    /// Disk I/O totals from proc_pid_rusage
+    var diskBytesRead: UInt64 = 0
+    var diskBytesWritten: UInt64 = 0
+
+    var isRunning: Bool { endTime == nil }
+
+    var runtime: TimeInterval {
+        let end = endTime ?? Date()
+        return end.timeIntervalSince(startTime)
+    }
+
+    var runtimeString: String {
+        let t = Int(runtime)
+        let h = t / 3600
+        let m = (t % 3600) / 60
+        let s = t % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    /// Files with writes, sorted by most recent write first
+    var recentWrittenFiles: [(path: String, stats: FileStats)] {
+        files.filter { $0.value.writes > 0 }
+            .map { ($0.key, $0.value) }
+            .sorted { $0.1.lastWrite > $1.1.lastWrite }
+    }
+
+    /// All connections, alive first
+    var sortedConnections: [(key: String, stats: ConnectionStats)] {
+        connections.map { ($0.key, $0.value) }
+            .sorted { ($0.1.alive ? 0 : 1, -$0.1.count) < ($1.1.alive ? 0 : 1, -$1.1.count) }
+    }
+
+    init(pid: pid_t, ppid: pid_t, name: String, argv: String) {
+        self.pid = pid
+        self.ppid = ppid
+        self.name = name
+        self.argv = argv
+        self.startTime = Date()
+    }
+}
+
+// MARK: - TUI
+
+final class TUI: EventSink {
+    private var rows: [pid_t: ProcessRow] = [:]
+    private let lock = NSLock()
+    private var headerText: String = ""
+    private var timer: DispatchSourceTimer?
+    private var stopped = false
+
+    /// PIDs to exclude from display (GhostBuster itself + parents)
+    private var excludedPids: Set<pid_t> = []
+    /// Our own PID for dynamic child exclusion
+    private var selfPid: pid_t = 0
+
+    /// Reverse DNS cache: IP -> hostname (nil = pending, "" = failed)
+    private var dnsCache: [String: String] = [:]
+
+    /// Network stats from private framework
+    private var netStats: NetworkStats?
+
+    func excludeSelf() {
+        selfPid = getpid()
+        lock.lock()
+        excludedPids.insert(selfPid)
+        // Exclude direct parent (sudo) only
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(selfPid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        if size > 0 {
+            excludedPids.insert(pid_t(info.pbi_ppid))
+        }
+        lock.unlock()
+    }
+
+    private func isExcluded(_ row: ProcessRow) -> Bool {
+        if excludedPids.contains(row.pid) { return true }
+        // Exclude any process whose parent is us (e.g. subprocesses we spawn)
+        if row.ppid == selfPid { return true }
+        return false
+    }
+
+    func start(header: String) {
+        headerText = header
+
+        // Start network stats
+        netStats = NetworkStats()
+        netStats?.start()
+
+        setlocale(LC_ALL, "")
+        initscr()
+        cbreak()
+        noecho()
+        curs_set(0)
+        nodelay(stdscr, true)
+        keypad(stdscr, true)
+
+        guard has_colors() else {
+            endwin()
+            fputs("ERROR: Terminal does not support colors\n", stderr)
+            Foundation.exit(1)
+        }
+
+        start_color()
+        use_default_colors()
+
+        init_pair(Int16(TUIColor.running.rawValue), Int16(COLOR_GREEN), -1)
+        init_pair(Int16(TUIColor.exited.rawValue),  Int16(COLOR_WHITE), -1)
+        init_pair(Int16(TUIColor.failed.rawValue),  Int16(COLOR_RED), -1)
+        init_pair(Int16(TUIColor.header.rawValue),  Int16(COLOR_CYAN), -1)
+        init_pair(Int16(TUIColor.dim.rawValue),     Int16(COLOR_BLACK), -1)  // bright black = gray
+        init_pair(Int16(TUIColor.subNet.rawValue),  Int16(COLOR_YELLOW), -1)
+        init_pair(Int16(TUIColor.subFile.rawValue), Int16(COLOR_MAGENTA), -1)
+
+        // Install SIGWINCH handler
+        signal(SIGWINCH) { _ in
+            endwin()
+            refresh()
+        }
+
+        // Refresh loop at 1Hz
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now(), repeating: .seconds(1))
+        source.setEventHandler { [weak self] in
+            self?.render()
+        }
+        source.resume()
+        timer = source
+    }
+
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        timer?.cancel()
+        timer = nil
+        netStats?.stop()
+        endwin()
+    }
+
+    // MARK: - Data updates (called from ES callback thread)
+
+    func addProcess(pid: pid_t, ppid: pid_t, name: String, argv: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        rows[pid] = ProcessRow(pid: pid, ppid: ppid, name: name, argv: argv)
+    }
+
+    func markExited(pid: pid_t, exitCode: Int32 = 0) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let row = rows[pid] {
+            row.endTime = Date()
+            row.exitCode = exitCode
+        }
+    }
+
+    /// Cache stat results to avoid repeated syscalls
+    private var regularFileCache: [String: Bool] = [:]
+
+    private func isRegularFile(_ path: String) -> Bool {
+        if let cached = regularFileCache[path] { return cached }
+        var sb = stat()
+        let result = stat(path, &sb) == 0 && (sb.st_mode & S_IFMT) == S_IFREG
+        regularFileCache[path] = result
+        return result
+    }
+
+    func recordFileOp(type: String, pid: pid_t, path: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[pid] else { return }
+        row.fileOps += 1
+        // Only track writes to regular files
+        guard type != "open" && isRegularFile(path) else { return }
+        var stats = row.files[path, default: FileStats()]
+        switch type {
+        case "write":  stats.writes += 1; stats.lastWrite = Date()
+        case "unlink": stats.unlinks += 1
+        case "rename": stats.renames += 1
+        default: break
+        }
+        row.files[path] = stats
+    }
+
+    func recordConnect(pid: pid_t, remoteAddr: String, remotePort: UInt16) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[pid] else { return }
+        let key = "\(remoteAddr):\(remotePort)"
+        if var existing = row.connections[key] {
+            existing.count += 1
+            row.connections[key] = existing
+        } else {
+            row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
+        }
+    }
+
+    // MARK: - EventSink
+
+    func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
+        addProcess(pid: pid, ppid: ppid, name: process, argv: argv)
+    }
+
+    func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
+        let path = details["path"] ?? details["from"] ?? "?"
+        recordFileOp(type: type, pid: pid, path: path)
+    }
+
+    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
+        recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
+    }
+
+    func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t) {
+        markExited(pid: pid)
+    }
+
+    // MARK: - Polling (called during render on main thread)
+
+    private func pollRunningProcesses() {
+        lock.lock()
+        let running = rows.values.filter { $0.isRunning }
+        let pidSet = Set(running.map { $0.pid })
+        let pids = Array(pidSet)
+        lock.unlock()
+
+        // Refresh network stats from NetworkStatistics.framework
+        netStats?.refresh()
+
+        // Update connections from NetworkStats
+        for pid in pids {
+            let netConns = netStats?.connectionsForPid(pid) ?? []
+            let currentKeys = Set(netConns.map { "\($0.remoteAddr):\($0.remotePort)" })
+
+            lock.lock()
+            if let row = rows[pid] {
+                // Mark stale connections
+                for (key, var conn) in row.connections {
+                    conn.alive = currentKeys.contains(key)
+                    row.connections[key] = conn
+                }
+                // Update or add connections with byte counts
+                for nc in netConns {
+                    let key = "\(nc.remoteAddr):\(nc.remotePort)"
+                    var conn = row.connections[key] ?? ConnectionStats(remoteAddr: nc.remoteAddr, remotePort: nc.remotePort)
+                    conn.rxBytes = nc.rxBytes
+                    conn.txBytes = nc.txBytes
+                    conn.alive = nc.alive
+                    row.connections[key] = conn
+                }
+            }
+            lock.unlock()
+        }
+
+        // Poll disk I/O via proc_pid_rusage
+        for pid in pids {
+            var rusage = rusage_info_v4()
+            let ret = withUnsafeMutablePointer(to: &rusage) { ptr in
+                ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rustPtr in
+                    proc_pid_rusage(pid, RUSAGE_INFO_V4, rustPtr)
+                }
+            }
+            if ret == 0 {
+                lock.lock()
+                if let row = rows[pid] {
+                    row.diskBytesRead = rusage.ri_diskio_bytesread
+                    row.diskBytesWritten = rusage.ri_diskio_byteswritten
+                }
+                lock.unlock()
+            }
+        }
+
+        // Resolve DNS for any new IPs
+        resolveNewAddresses()
+    }
+
+    private func resolveNewAddresses() {
+        lock.lock()
+        var toResolve: Set<String> = []
+        for row in rows.values {
+            for conn in row.connections.values {
+                if conn.hostname == nil && dnsCache[conn.remoteAddr] == nil {
+                    toResolve.insert(conn.remoteAddr)
+                }
+            }
+        }
+        // Mark as pending
+        for addr in toResolve {
+            dnsCache[addr] = ""
+        }
+        lock.unlock()
+
+        // Resolve in background
+        for addr in toResolve {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let hostname = self?.reverseDNS(addr)
+                self?.lock.lock()
+                self?.dnsCache[addr] = hostname ?? ""
+                // Update all connections with this IP
+                if let hostname = hostname, !hostname.isEmpty {
+                    for row in self?.rows.values ?? [:].values {
+                        for (key, var conn) in row.connections {
+                            if conn.remoteAddr == addr {
+                                conn.hostname = hostname
+                                row.connections[key] = conn
+                            }
+                        }
+                    }
+                }
+                self?.lock.unlock()
+            }
+        }
+    }
+
+    private func reverseDNS(_ ip: String) -> String? {
+        var hints = addrinfo()
+        hints.ai_flags = AI_NUMERICHOST
+        hints.ai_family = AF_UNSPEC
+
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(ip, nil, &hints, &res) == 0, let addrInfo = res else { return nil }
+        defer { freeaddrinfo(addrInfo) }
+
+        var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let ret = getnameinfo(
+            addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen,
+            &hostBuf, socklen_t(hostBuf.count),
+            nil, 0, 0
+        )
+        guard ret == 0 else { return nil }
+        let hostname = String(cString: hostBuf)
+        // If getnameinfo just returned the IP back, that's not useful
+        if hostname == ip { return nil }
+        return hostname
+    }
+
+    // MARK: - Rendering
+
+    private func render() {
+        pollRunningProcesses()
+
+        lock.lock()
+        let allRows = Array(rows.values)
+        lock.unlock()
+
+        // Filter out GhostBuster's own processes and its children
+        let visible = allRows.filter { !isExcluded($0) }
+
+        // Sort: running first (oldest start first), then exited (most recent exit first)
+        let running = visible.filter { $0.isRunning }.sorted { $0.startTime < $1.startTime }
+        let exited = visible.filter { !$0.isRunning }.sorted { $0.endTime! > $1.endTime! }
+
+        let maxY = getmaxy(stdscr)
+        let maxX = getmaxx(stdscr)
+
+        erase()
+
+        // Header
+        attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+        mvaddstr(0, 0, truncate(headerText, to: Int(maxX)))
+        attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
+
+        // Stats line
+        let stats = "\(running.count) running, \(exited.count) exited, \(visible.count) total"
+        attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+        mvaddstr(1, 0, truncate(stats, to: Int(maxX)))
+        attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+
+        // Column header
+        let colHeader = formatLine(
+            pid: "PID", runtime: "TIME", ops: "OPS",
+            status: "STATUS", process: "PROCESS",
+            maxWidth: Int(maxX)
+        )
+        attron(ATTR_BOLD)
+        mvaddstr(3, 0, colHeader)
+        attroff(ATTR_BOLD)
+
+        var y: Int32 = 4
+        let lastRow = maxY - 2  // leave room for footer
+
+        // Render running processes with sub-rows — fill as much screen as possible
+        for row in running {
+            guard y <= lastRow else { break }
+            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true)
+        }
+
+        // Fill remaining space with exited processes (no sub-rows)
+        var exitedShown = 0
+        for row in exited {
+            guard y <= lastRow else { break }
+            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false)
+            exitedShown += 1
+        }
+
+        // Show "+N more exited" on the last available line if needed
+        let hiddenExited = exited.count - exitedShown
+        if hiddenExited > 0, y <= lastRow {
+            let moreStr = "  +\(hiddenExited) more exited processes"
+            attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+            mvaddstr(y, 0, truncate(moreStr, to: Int(maxX)))
+            attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+            y += 1
+        }
+
+        // Footer
+        attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+        mvaddstr(maxY - 1, 0, truncate("q: quit", to: Int(maxX)))
+        attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+
+        refresh()
+    }
+
+    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool) -> Int32 {
+        var y = y
+
+        let status: String
+        let color: TUIColor
+        if row.isRunning {
+            status = "RUN"
+            color = .running
+        } else if let code = row.exitCode, code != 0 {
+            status = "ERR \(code)"
+            color = .failed
+        } else {
+            status = "OK"
+            color = .exited
+        }
+
+        let processLabel = row.argv.isEmpty ? row.name : row.argv
+        let line = formatLine(
+            pid: "\(row.pid)",
+            runtime: row.runtimeString,
+            ops: "\(row.fileOps)",
+            status: status,
+            process: processLabel,
+            maxWidth: Int(maxX)
+        )
+
+        let attr = row.isRunning
+            ? COLOR_PAIR(color.rawValue)
+            : COLOR_PAIR(color.rawValue) | ATTR_DIM
+
+        attron(attr)
+        mvaddstr(y, 0, line)
+        attroff(attr)
+        y += 1
+
+        guard showSubRows else { return y }
+
+        // Sub-rows: connections (alive = yellow, dead = gray) with byte counts
+        let conns = row.sortedConnections
+        for (i, conn) in conns.enumerated() {
+            guard y < maxY - 1, i < maxSubRows else { break }
+            var line = "    -> \(conn.stats.label)"
+            if conn.stats.txBytes > 0 || conn.stats.rxBytes > 0 {
+                line += "  \u{2191}\(formatBytes(conn.stats.txBytes)) \u{2193}\(formatBytes(conn.stats.rxBytes))"
+            }
+            let subLine = truncate(line, to: Int(maxX))
+            let connAttr = conn.stats.alive
+                ? COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                : COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM
+            attron(connAttr)
+            mvaddstr(y, 0, subLine)
+            attroff(connAttr)
+            y += 1
+        }
+        if conns.count > maxSubRows, y < maxY - 1 {
+            let moreNet = "    -> ... +\(conns.count - maxSubRows) more"
+            attron(COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM)
+            mvaddstr(y, 0, truncate(moreNet, to: Int(maxX)))
+            attroff(COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM)
+            y += 1
+        }
+
+
+        // Sub-rows: most recently written files (latest first)
+        let writtenFiles = row.recentWrittenFiles
+        let showFiles = Array(writtenFiles.prefix(maxSubRows))
+        for file in showFiles {
+            guard y < maxY - 1 else { break }
+            var parts: [String] = []
+            parts.append("W:\(file.stats.writes)")
+            // Show file size and check if still exists
+            var sb = stat()
+            let fileExists = stat(file.path, &sb) == 0
+            if fileExists && sb.st_size > 0 {
+                parts.append(formatBytes(UInt64(sb.st_size)))
+            }
+            if file.stats.unlinks > 0 { parts.append("D:\(file.stats.unlinks)") }
+            if file.stats.renames > 0 { parts.append("MV:\(file.stats.renames)") }
+            let statsStr = parts.joined(separator: " ")
+            let shortPath = shortenPath(file.path, maxLen: Int(maxX) - 12 - statsStr.count)
+            let subLine = truncate(
+                "    -> \(shortPath)  \(statsStr)",
+                to: Int(maxX)
+            )
+            let fileAttr = fileExists
+                ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
+                : COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM
+            attron(fileAttr)
+            mvaddstr(y, 0, subLine)
+            attroff(fileAttr)
+            y += 1
+        }
+        if writtenFiles.count > maxSubRows, y < maxY - 1 {
+            let moreFile = "  FILE ... +\(writtenFiles.count - maxSubRows) more"
+            attron(COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
+            mvaddstr(y, 0, truncate(moreFile, to: Int(maxX)))
+            attroff(COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM)
+            y += 1
+        }
+
+        return y
+    }
+
+    // MARK: - Formatting helpers
+
+    private func formatLine(pid: String, runtime: String, ops: String, status: String, process: String, maxWidth: Int) -> String {
+        let line = String(format: "%-7s %-6s %-5s %-5s %s",
+                          (pid as NSString).utf8String!,
+                          (runtime as NSString).utf8String!,
+                          (ops as NSString).utf8String!,
+                          (status as NSString).utf8String!,
+                          (process as NSString).utf8String!)
+        return truncate(line, to: maxWidth)
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        if bytes < 1024 { return "\(bytes)B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024)KB" }
+        if bytes < 1024 * 1024 * 1024 { return String(format: "%.1fMB", Double(bytes) / (1024 * 1024)) }
+        return String(format: "%.1fGB", Double(bytes) / (1024 * 1024 * 1024))
+    }
+
+    /// Truncate middle of string, keeping equal start and end
+    private func truncate(_ s: String, to maxLen: Int) -> String {
+        guard s.count > maxLen, maxLen > 5 else { return s }
+        let half = (maxLen - 3) / 2
+        return String(s.prefix(half)) + "..." + String(s.suffix(half))
+    }
+
+    private func shortenPath(_ path: String, maxLen: Int) -> String {
+        guard path.count > maxLen, maxLen > 5 else { return path }
+        // Show last path components that fit
+        let components = path.split(separator: "/")
+        var result = String(components.last ?? Substring(path))
+        if result.count > maxLen {
+            return truncate(result, to: maxLen)
+        }
+        // Try adding parent
+        if components.count >= 2 {
+            let parent = components[components.count - 2]
+            let candidate = "\(parent)/\(result)"
+            if candidate.count <= maxLen {
+                result = candidate
+            } else {
+                return ".../" + result
+            }
+        }
+        return result
+    }
+}
