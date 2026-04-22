@@ -251,6 +251,14 @@ final class TUI: EventSink {
 
     // Sample config modal
     var isSampleConfigOpen = false
+    // Wait config modal
+    var isWaitConfigOpen = false
+    // Track modal
+    var isTrackModalOpen = false
+    private var trackModalIndex = 0
+    private var trackModalItems: [(name: String, pid: pid_t?, isAgent: Bool)] = []
+    private var trackCustomInput = ""
+    private var waitDuration = 1
     private var sampleDuration = 3
     private var sampleThreshold = 5
     private var sampleMaxDepth = 5
@@ -506,6 +514,7 @@ final class TUI: EventSink {
 
     private func fileMenuItems() -> [MenuItem] {
         return [
+            MenuItem(label: "Track...", shortcut: "T", key: nil),
             MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
         ]
     }
@@ -583,6 +592,12 @@ final class TUI: EventSink {
 
         activeMenu = nil
 
+        if menu == .file {
+            if item.label == "Track..." { openTrackModal() }
+            forceRender()
+            return
+        }
+
         if menu == .view {
             if item.label == "Show Exited" {
                 showExited = !showExited
@@ -614,6 +629,7 @@ final class TUI: EventSink {
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
         row.filesVisible = !row.filesVisible
+        if row.filesVisible { row.filesDisclosed = true }
         row.disclosed = true
         lock.unlock()
         ensureDisclosedAndJump(pid, to: row.filesVisible ? .filesHeader(pid) : nil)
@@ -624,6 +640,7 @@ final class TUI: EventSink {
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
         row.netVisible = !row.netVisible
+        if row.netVisible { row.netDisclosed = true }
         row.disclosed = true
         lock.unlock()
         ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
@@ -686,6 +703,104 @@ final class TUI: EventSink {
         guard let row = rows[pid] else { lock.unlock(); return }
         if !row.sampleRuns.isEmpty { row.sampleRuns.removeLast() }
         lock.unlock()
+        forceRender()
+    }
+
+    // MARK: - Track modal
+
+    func openTrackModal() {
+        // Build list: agents first, then running processes
+        trackModalItems = []
+        // Known agents
+        for kind in AgentKind.allCases {
+            let pids = findAgentPIDs(kind)
+            let label = pids.isEmpty ? "\(kind.rawValue) (not running)" : "\(kind.rawValue) (PID \(pids.first!))"
+            trackModalItems.append((name: label, pid: pids.first, isAgent: true))
+        }
+        // All running processes (top by CPU)
+        var allPids = [pid_t](repeating: 0, count: 4096)
+        let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
+        if count > 0 {
+            for i in 0..<min(Int(count), 50) {
+                let p = allPids[i]
+                if p <= 0 { continue }
+                var nameBuf = [CChar](repeating: 0, count: 256)
+                proc_name(p, &nameBuf, UInt32(nameBuf.count))
+                let name = String(cString: nameBuf)
+                if !name.isEmpty && name != "kernel_task" {
+                    trackModalItems.append((name: "\(name) (PID \(p))", pid: p, isAgent: false))
+                }
+            }
+        }
+        // Custom entry at the end
+        trackModalItems.append((name: "Custom: \(trackCustomInput)_", pid: nil, isAgent: false))
+        trackModalIndex = 0
+        isTrackModalOpen = true
+        forceRender()
+    }
+
+    func trackModalUp() {
+        if trackModalIndex > 0 { trackModalIndex -= 1 }
+        forceRender()
+    }
+
+    func trackModalDown() {
+        if trackModalIndex < trackModalItems.count - 1 { trackModalIndex += 1 }
+        forceRender()
+    }
+
+    func trackModalType(_ ch: Int32) {
+        // Only when custom input is selected (last item)
+        guard trackModalIndex == trackModalItems.count - 1 else { return }
+        if ch == 127 || ch == 8 {  // backspace
+            if !trackCustomInput.isEmpty { trackCustomInput.removeLast() }
+        } else if ch >= 32 && ch < 127 {
+            trackCustomInput.append(Character(UnicodeScalar(Int(ch))!))
+        }
+        trackModalItems[trackModalItems.count - 1].name = "Custom: \(trackCustomInput)_"
+        forceRender()
+    }
+
+    func trackModalCancel() {
+        isTrackModalOpen = false
+        forceRender()
+    }
+
+    func trackModalConfirm() {
+        isTrackModalOpen = false
+        guard trackModalIndex < trackModalItems.count else { return }
+        let item = trackModalItems[trackModalIndex]
+
+        if let pid = item.pid {
+            // Track this specific PID
+            let tree = ProcessTree()
+            let expanded = expandProcessTree(roots: [pid])
+            tree.addRoots(expanded)
+            // Add to our rows
+            for trackedPid in expanded {
+                let (path, ppid, argv) = getProcessInfo(trackedPid)
+                addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
+            }
+        } else if trackModalIndex == trackModalItems.count - 1 && !trackCustomInput.isEmpty {
+            // Custom name — search for matching processes
+            let search = trackCustomInput.lowercased()
+            var pids = [pid_t](repeating: 0, count: 4096)
+            let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.size * pids.count))
+            if count > 0 {
+                for i in 0..<Int(count) {
+                    let p = pids[i]
+                    if p <= 0 { continue }
+                    var nameBuf = [CChar](repeating: 0, count: 256)
+                    proc_name(p, &nameBuf, UInt32(nameBuf.count))
+                    let name = String(cString: nameBuf).lowercased()
+                    if name.contains(search) {
+                        let (path, ppid, argv) = getProcessInfo(p)
+                        addProcess(pid: p, ppid: ppid, name: path, argv: argv)
+                    }
+                }
+            }
+        }
+        trackCustomInput = ""
         forceRender()
     }
 
@@ -1201,24 +1316,44 @@ final class TUI: EventSink {
     }
 
     func diagnoseWait() {
+        guard pidForRow(selectedIndex) != nil else { return }
+        isWaitConfigOpen = true
+        forceRender()
+    }
+
+    func waitConfigLeft() {
+        waitDuration = max(1, waitDuration - 1)
+        forceRender()
+    }
+
+    func waitConfigRight() {
+        waitDuration = min(10, waitDuration + 1)
+        forceRender()
+    }
+
+    func waitConfigCancel() {
+        isWaitConfigOpen = false
+        forceRender()
+    }
+
+    func waitConfigStart() {
+        isWaitConfigOpen = false
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
-        row.waitVisible = !row.waitVisible
-        row.waitDisclosed = row.waitVisible
+        row.waitVisible = true
+        row.waitDisclosed = true
         row.disclosed = true
         lock.unlock()
-        if row.waitVisible && row.waitResults.isEmpty {
-            runWaitAsync(pid)
-        }
-        ensureDisclosedAndJump(pid, to: row.waitVisible ? .waitHeader(pid) : nil)
+        runWaitAsync(pid)
+        ensureDisclosedAndJump(pid, to: .waitHeader(pid))
     }
 
     private func runWaitDiagnosis(_ pid: pid_t) -> [String] {
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        proc.arguments = ["\(pid)", "1"]
+        proc.arguments = ["\(pid)", "\(waitDuration)"]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
@@ -2184,6 +2319,12 @@ final class TUI: EventSink {
         if killMode {
             renderKillModal(maxY: maxY, maxX: maxX)
         }
+        if isWaitConfigOpen {
+            renderWaitConfigModal(maxY: maxY, maxX: maxX)
+        }
+        if isTrackModalOpen {
+            renderTrackModal(maxY: maxY, maxX: maxX)
+        }
 
         refresh()
     }
@@ -2465,6 +2606,86 @@ final class TUI: EventSink {
 
         // Footer
         let footer = "Enter: start    Esc: cancel    \u{2191}\u{2193}: field    \u{25C0}\u{25B6}: value"
+        attron(barAttr | ATTR_DIM)
+        mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
+        attroff(barAttr | ATTR_DIM)
+    }
+
+    private func renderTrackModal(maxY: Int32, maxX: Int32) {
+        let mWidth = min(60, Int(maxX) - 4)
+        let visibleItems = min(trackModalItems.count, Int(maxY) - 8)
+        let mHeight = visibleItems + 4
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let hlAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+
+        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        attron(barAttr | ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Track Process \(String(repeating: "\u{2500}", count: max(0, mWidth - 18)))\u{2510}")
+        for row in 1..<(mHeight - 1) {
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: mWidth - 2))\u{2502}")
+        }
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
+        attroff(barAttr | ATTR_BOLD)
+
+        // Scroll offset for long lists
+        let scrollStart = max(0, trackModalIndex - visibleItems + 2)
+        for vi in 0..<visibleItems {
+            let idx = scrollStart + vi
+            guard idx < trackModalItems.count else { break }
+            let item = trackModalItems[idx]
+            let lineY = Int32(mY + 2 + vi)
+            let isSelected = idx == trackModalIndex
+
+            let prefix = item.isAgent ? "\u{2605} " : "  "  // star for agents
+            let label = "\(prefix)\(item.name)"
+            let padded = String(truncate(label, to: mWidth - 4).prefix(mWidth - 4))
+                + String(repeating: " ", count: max(0, mWidth - 4 - label.count))
+
+            let attr = isSelected ? hlAttr : barAttr
+            attron(attr)
+            mvaddstr(lineY, Int32(mX + 1), padded)
+            attroff(attr)
+        }
+
+        let footer = "Enter: track    Esc: cancel    \u{2191}\u{2193}: select"
+        attron(barAttr | ATTR_DIM)
+        mvaddstr(Int32(mY + 1), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
+        attroff(barAttr | ATTR_DIM)
+    }
+
+    private func renderWaitConfigModal(maxY: Int32, maxX: Int32) {
+        let mWidth = 36
+        let mHeight = 6
+        let mX = (Int(maxX) - mWidth) / 2
+        let mY = (Int(maxY) - mHeight) / 2
+
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let hlAttr = COLOR_PAIR(TUIColor.menuHighlight.rawValue)
+
+        let hLine = String(repeating: "\u{2500}", count: mWidth - 2)
+        attron(barAttr | ATTR_BOLD)
+        mvaddstr(Int32(mY), Int32(mX), "\u{250C}\u{2500} Wait Configuration \(String(repeating: "\u{2500}", count: max(0, mWidth - 23)))\u{2510}")
+        for row in 1..<(mHeight - 1) {
+            mvaddstr(Int32(mY + row), Int32(mX), "\u{2502}\(String(repeating: " ", count: mWidth - 2))\u{2502}")
+        }
+        mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
+        attroff(barAttr | ATTR_BOLD)
+
+        // Duration field
+        attron(barAttr)
+        mvaddstr(Int32(mY + 2), Int32(mX + 2), " Duration:  ")
+        attroff(barAttr)
+        attron(hlAttr)
+        addstr("◀ \(waitDuration) ▶")
+        attroff(hlAttr)
+        attron(barAttr)
+        addstr("  seconds")
+        attroff(barAttr)
+
+        let footer = "Enter: start    Esc: cancel    \u{25C0}\u{25B6}: value"
         attron(barAttr | ATTR_DIM)
         mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(mWidth - 4)))
         attroff(barAttr | ATTR_DIM)

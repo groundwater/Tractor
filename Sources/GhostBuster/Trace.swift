@@ -135,6 +135,30 @@ struct Trace: ParsableCommand {
                         continue
                     }
 
+                    // Track modal
+                    if t.isTrackModalOpen {
+                        switch ch {
+                        case 259: t.trackModalUp()
+                        case 258: t.trackModalDown()
+                        case 10, 13: t.trackModalConfirm()
+                        case 27: t.trackModalCancel()
+                        default: t.trackModalType(ch)
+                        }
+                        continue
+                    }
+
+                    // Wait config modal
+                    if t.isWaitConfigOpen {
+                        switch ch {
+                        case 260: t.waitConfigLeft()
+                        case 261: t.waitConfigRight()
+                        case 10, 13: t.waitConfigStart()
+                        case 27: t.waitConfigCancel()
+                        default: break
+                        }
+                        continue
+                    }
+
                     // Kill modal
                     if t.isKillMode {
                         switch ch {
