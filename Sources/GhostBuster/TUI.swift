@@ -2018,16 +2018,18 @@ final class TUI: EventSink {
                 if let row = rows[pid] {
                     let stats = row.files[path]
                     lock.unlock()
-                    var parts: [String] = []
-                    if let s = stats {
-                        parts.append("W:\(s.writes)")
-                        var sb = stat()
-                        if stat(path, &sb) == 0 && sb.st_size > 0 { parts.append(formatBytes(UInt64(sb.st_size))) }
-                    }
-                    let statsStr = parts.joined(separator: " ")
+                    // Columns: WRITES  SIZE  PATH
+                    let writes = stats != nil ? "W:\(stats!.writes)" : ""
+                    let writesPad = String(repeating: " ", count: max(1, 8 - writes.count))
+                    var sizeStr = ""
+                    var sb = stat()
+                    if stat(path, &sb) == 0 && sb.st_size > 0 { sizeStr = formatBytes(UInt64(sb.st_size)) }
+                    let sizePad = String(repeating: " ", count: max(1, 8 - sizeStr.count))
                     let relPath = relativePath(path, cwd: row.cwd)
-                    let shortPath = shortenPath(relPath, maxLen: width - 8 - statsStr.count)
-                    drawLine(y: y, indent: depthIndent + 4, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    let pathWidth = max(5, width - 20)
+                    let shortPath = shortenPath(relPath, maxLen: pathWidth)
+                    let line = "\(writes)\(writesPad)\(sizeStr)\(sizePad)\(shortPath)"
+                    drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -2046,13 +2048,14 @@ final class TUI: EventSink {
             case .netDetail(let pid, let key):
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
-                    // Columnar: HOST:PORT          ↑Up       ↓Down
-                    let host = truncate(conn.label, to: 35)
-                    let hostPad = String(repeating: " ", count: max(1, 36 - host.count))
+                    // Columns: TIME  DOWN  UP  HOST:PORT
+                    let time = row.runtimeString
+                    let timePad = String(repeating: " ", count: max(1, 9 - time.count))
+                    let down = "\u{2193}\(formatBytes(conn.rxBytes))"
+                    let downPad = String(repeating: " ", count: max(1, 10 - down.count))
                     let up = "\u{2191}\(formatBytes(conn.txBytes))"
                     let upPad = String(repeating: " ", count: max(1, 10 - up.count))
-                    let down = "\u{2193}\(formatBytes(conn.rxBytes))"
-                    let line = "\(host)\(hostPad)\(up)\(upPad)\(down)"
+                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(conn.label)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
