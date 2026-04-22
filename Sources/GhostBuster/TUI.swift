@@ -63,6 +63,7 @@ final class ProcessRow {
     var endTime: Date?
     var exitCode: Int32?
     var fileOps: Int = 0
+    var cwd: String = ""
 
     /// Per-file stats: path -> FileStats
     var files: [String: FileStats] = [:]
@@ -123,6 +124,9 @@ final class TUI: EventSink {
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var paused = false
+    private var selectedIndex = 0
+    /// Snapshot of visible process list for cursor navigation
+    private var visiblePids: [pid_t] = []
 
     /// PIDs to exclude from display (GhostBuster itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -216,6 +220,14 @@ final class TUI: EventSink {
         netStats?.stop()
         sniSniffer?.stop()
         endwin()
+    }
+
+    func moveUp() {
+        if selectedIndex > 0 { selectedIndex -= 1 }
+    }
+
+    func moveDown() {
+        if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
     }
 
     func togglePause() {
@@ -341,6 +353,23 @@ final class TUI: EventSink {
                 }
             }
             lock.unlock()
+        }
+
+        // Poll CWD for running processes
+        for pid in pids {
+            var vnodeInfo = proc_vnodepathinfo()
+            let size = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, Int32(MemoryLayout<proc_vnodepathinfo>.size))
+            if size > 0 {
+                lock.lock()
+                if let row = rows[pid], row.cwd.isEmpty {
+                    row.cwd = withUnsafePointer(to: vnodeInfo.pvi_cdir.vip_path) {
+                        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                            String(cString: $0)
+                        }
+                    }
+                }
+                lock.unlock()
+            }
         }
 
         // Poll disk I/O via proc_pid_rusage
@@ -479,26 +508,42 @@ final class TUI: EventSink {
         let lastRow = maxY - 2  // leave room for footer
 
         // Render running processes with sub-rows — fill as much screen as possible
+        // Build visible process list for cursor navigation
+        let allVisible = running + exited
+        visiblePids = allVisible.map { $0.pid }
+        // Clamp selection
+        if selectedIndex >= allVisible.count { selectedIndex = max(0, allVisible.count - 1) }
+        let selectedPid = allVisible.isEmpty ? pid_t(-1) : allVisible[selectedIndex].pid
+
+        // Render running processes
         for row in running {
             guard y <= lastRow else { break }
-            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true)
+            let isSelected = row.pid == selectedPid
+            let subRows = isSelected ? Int(lastRow - y) : 0
+            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: isSelected, highlight: isSelected)
         }
 
         // Fill remaining space with exited processes + summary line
         var exitedShown = 0
         for row in exited {
-            // Need 2 lines: process + summary
-            guard y + 1 <= lastRow else { break }
-            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false)
-            // Summary line with file/network totals
-            if y <= lastRow {
-                let summary = buildExitedSummary(row)
-                if !summary.isEmpty {
-                    let subLine = truncate("    \(summary)", to: Int(maxX))
-                    attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM)
-                    mvaddstr(y, 0, subLine)
-                    attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM)
-                    y += 1
+            guard y <= lastRow else { break }
+            let isSelected = row.pid == selectedPid
+            if isSelected {
+                // Selected exited process: show full sub-rows
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: true)
+            } else {
+                // Unselected exited: process line + summary
+                guard y + 1 <= lastRow else { break }
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: false)
+                if y <= lastRow {
+                    let summary = buildExitedSummary(row)
+                    if !summary.isEmpty {
+                        let subLine = truncate("    \(summary)", to: Int(maxX))
+                        attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+                        mvaddstr(y, 0, subLine)
+                        attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+                        y += 1
+                    }
                 }
             }
             exitedShown += 1
@@ -525,7 +570,7 @@ final class TUI: EventSink {
         if paused {
             label = "PAUSED"
         } else {
-            label = "q: quit  space: pause"
+            label = "q: quit  space: pause  \u{2191}\u{2193}: select"
         }
 
         let text: String
@@ -569,7 +614,7 @@ final class TUI: EventSink {
         return parts.joined(separator: "  ")
     }
 
-    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool) -> Int32 {
+    private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false) -> Int32 {
         var y = y
 
         let status: String
@@ -585,6 +630,7 @@ final class TUI: EventSink {
             color = .exited
         }
 
+        let marker = highlight ? "> " : "  "
         let processLabel = row.argv.isEmpty ? row.name : row.argv
         let line = formatLine(
             pid: "\(row.pid)",
@@ -592,15 +638,16 @@ final class TUI: EventSink {
             ops: "\(row.fileOps)",
             status: status,
             process: processLabel,
-            maxWidth: Int(maxX)
+            maxWidth: Int(maxX) - 2
         )
 
-        let attr = row.isRunning
+        var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
+        if highlight { attr |= ATTR_BOLD }
 
         attron(attr)
-        mvaddstr(y, 0, line)
+        mvaddstr(y, 0, marker + line)
         attroff(attr)
         y += 1
 
@@ -617,7 +664,7 @@ final class TUI: EventSink {
             let subLine = truncate(line, to: Int(maxX))
             let connAttr = conn.stats.alive
                 ? COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
-                : COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM
+                : COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
             attron(connAttr)
             mvaddstr(y, 0, subLine)
             attroff(connAttr)
@@ -648,14 +695,15 @@ final class TUI: EventSink {
             if file.stats.unlinks > 0 { parts.append("D:\(file.stats.unlinks)") }
             if file.stats.renames > 0 { parts.append("MV:\(file.stats.renames)") }
             let statsStr = parts.joined(separator: " ")
-            let shortPath = shortenPath(file.path, maxLen: Int(maxX) - 12 - statsStr.count)
+            let relPath = relativePath(file.path, cwd: row.cwd)
+            let shortPath = shortenPath(relPath, maxLen: Int(maxX) - 12 - statsStr.count)
             let subLine = truncate(
                 "    -> \(shortPath)  \(statsStr)",
                 to: Int(maxX)
             )
             let fileAttr = fileExists
                 ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
-                : COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM
+                : COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
             attron(fileAttr)
             mvaddstr(y, 0, subLine)
             attroff(fileAttr)
@@ -746,6 +794,16 @@ final class TUI: EventSink {
         result += truncate(args, to: argsBudget)
 
         return result
+    }
+
+    /// Make path relative to CWD if it's a descendant, otherwise return absolute
+    private func relativePath(_ path: String, cwd: String) -> String {
+        guard !cwd.isEmpty else { return path }
+        let cwdSlash = cwd.hasSuffix("/") ? cwd : cwd + "/"
+        if path.hasPrefix(cwdSlash) {
+            return String(path.dropFirst(cwdSlash.count))
+        }
+        return path
     }
 
     private func shortenPath(_ path: String, maxLen: Int) -> String {

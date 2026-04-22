@@ -116,13 +116,22 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
-                    if ch == 32 {
+                    switch ch {
+                    case 32:  // space
                         t.togglePause()
-                    } else if ch == 113 {
+                    case 259: // KEY_UP
+                        t.moveUp()
+                    case 258: // KEY_DOWN
+                        t.moveDown()
+                    case 107, 75: // 'k' or 'K'
+                        break // TODO: kill selected
+                    case 113: // 'q'
                         activeInputSource?.cancel()
                         t.stop()
                         esClient.stop()
                         Foundation.exit(0)
+                    default:
+                        break
                     }
                 }
             }
