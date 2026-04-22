@@ -64,6 +64,7 @@ final class ProcessRow {
     var exitCode: Int32?
     var fileOps: Int = 0
     var cwd: String = ""
+    var disclosed: Bool = false
 
     /// Per-file stats: path -> FileStats
     var files: [String: FileStats] = [:]
@@ -224,10 +225,30 @@ final class TUI: EventSink {
 
     func moveUp() {
         if selectedIndex > 0 { selectedIndex -= 1 }
+        render()
     }
 
     func moveDown() {
         if selectedIndex < visiblePids.count - 1 { selectedIndex += 1 }
+        render()
+    }
+
+    func disclose() {
+        guard selectedIndex < visiblePids.count else { return }
+        let pid = visiblePids[selectedIndex]
+        lock.lock()
+        rows[pid]?.disclosed = true
+        lock.unlock()
+        render()
+    }
+
+    func collapse() {
+        guard selectedIndex < visiblePids.count else { return }
+        let pid = visiblePids[selectedIndex]
+        lock.lock()
+        rows[pid]?.disclosed = false
+        lock.unlock()
+        render()
     }
 
     func togglePause() {
@@ -519,8 +540,9 @@ final class TUI: EventSink {
         for row in running {
             guard y <= lastRow else { break }
             let isSelected = row.pid == selectedPid
-            let subRows = isSelected ? Int(lastRow - y) : 0
-            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: isSelected, highlight: isSelected)
+            let showSub = row.disclosed
+            let subRows = showSub ? Int(lastRow - y) : 0
+            y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: subRows, showSubRows: showSub, highlight: isSelected)
         }
 
         // Fill remaining space with exited processes + summary line
@@ -528,13 +550,14 @@ final class TUI: EventSink {
         for row in exited {
             guard y <= lastRow else { break }
             let isSelected = row.pid == selectedPid
-            if isSelected {
-                // Selected exited process: show full sub-rows
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: true)
+            let showSub = row.disclosed
+            if showSub {
+                // Disclosed exited process: show full sub-rows
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true, highlight: isSelected)
             } else {
-                // Unselected exited: process line + summary
+                // Collapsed exited: process line + summary
                 guard y + 1 <= lastRow else { break }
-                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: false)
+                y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false, highlight: isSelected)
                 if y <= lastRow {
                     let summary = buildExitedSummary(row)
                     if !summary.isEmpty {
@@ -572,7 +595,7 @@ final class TUI: EventSink {
         if paused {
             label = "PAUSED"
         } else {
-            label = "q: quit  space: pause  \u{2191}\u{2193}: select"
+            label = "q: quit  space: pause  \u{2191}\u{2193}: select  \u{25B6}\u{25C0}: expand"
         }
 
         let text: String
@@ -632,7 +655,8 @@ final class TUI: EventSink {
             color = .exited
         }
 
-        let marker = highlight ? "> " : "  "
+        let hasDetail = !row.connections.isEmpty || !row.files.isEmpty
+        let disc = !hasDetail ? "  " : (row.disclosed ? "\u{25BC} " : "\u{25B6} ")
         let processLabel = row.argv.isEmpty ? row.name : row.argv
         let line = formatLine(
             pid: "\(row.pid)",
@@ -646,10 +670,10 @@ final class TUI: EventSink {
         var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
-        if highlight { attr |= ATTR_BOLD }
+        if highlight { attr |= ATTR_REVERSE }
 
         attron(attr)
-        mvaddstr(y, 0, marker + line)
+        mvaddstr(y, 0, disc + line)
         attroff(attr)
         y += 1
 

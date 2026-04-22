@@ -123,8 +123,10 @@ struct Trace: ParsableCommand {
                         t.moveUp()
                     case 258: // KEY_DOWN
                         t.moveDown()
-                    case 107, 75: // 'k' or 'K'
-                        break // TODO: kill selected
+                    case 261: // KEY_RIGHT
+                        t.disclose()
+                    case 260: // KEY_LEFT
+                        t.collapse()
                     case 113: // 'q'
                         activeInputSource?.cancel()
                         t.stop()
