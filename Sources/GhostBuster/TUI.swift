@@ -288,9 +288,19 @@ final class TUI: EventSink {
         endwin()
     }
 
+    private func isSelectable(_ index: Int) -> Bool {
+        guard let dr = displayRows[safe: index] else { return false }
+        switch dr {
+        case .infoBorderTop, .infoBorderBottom, .separator: return false
+        default: return true
+        }
+    }
+
     func moveUp() {
         if selectedIndex < 0 { selectedIndex = displayRows.count - 1 }
         else if selectedIndex > 0 { selectedIndex -= 1 }
+        // Skip non-selectable rows
+        while selectedIndex > 0 && !isSelectable(selectedIndex) { selectedIndex -= 1 }
         selectedIndices.removeAll()
         render()
     }
@@ -298,6 +308,8 @@ final class TUI: EventSink {
     func moveDown() {
         if selectedIndex < 0 { selectedIndex = 0 }
         else if selectedIndex < displayRows.count - 1 { selectedIndex += 1 }
+        // Skip non-selectable rows
+        while selectedIndex < displayRows.count - 1 && !isSelectable(selectedIndex) { selectedIndex += 1 }
         selectedIndices.removeAll()
         render()
     }
