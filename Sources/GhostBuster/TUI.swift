@@ -611,11 +611,12 @@ final class TUI: EventSink {
     }
 
     func executeShortcut(_ key: Int32) {
-        activeMenu = nil
         guard let action = shortcutAction(key) else { return }
+        // Flash the parent menu header, then execute
         if let menu = menuForShortcut(key) {
             flashMenu(menu)
         }
+        activeMenu = nil
         action()
     }
 
@@ -645,15 +646,17 @@ final class TUI: EventSink {
         forceRender()
     }
 
-    /// Flash a menu header briefly when a shortcut is used
+    /// Flash a menu header with macOS-style blink (synchronous, blocks briefly)
     private func flashMenu(_ menu: MenuID) {
-        menuFlash = menu
-        menuFlashTime = Date()
-        forceRender()
-        // Clear flash after 150ms
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.menuFlash = nil
-            self?.forceRender()
+        for _ in 0..<2 {
+            menuFlash = menu
+            doRender()
+            refresh()
+            usleep(60_000)  // 60ms on
+            menuFlash = nil
+            doRender()
+            refresh()
+            usleep(60_000)  // 60ms off
         }
     }
 
