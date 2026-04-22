@@ -1839,7 +1839,7 @@ final class TUI: EventSink {
                     default:        value = key
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 6, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 4, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1847,32 +1847,32 @@ final class TUI: EventSink {
                 let count = rows[pid]?.argvArray.count ?? 0
                 let disc = rows[pid]?.argsDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Args (\(count))", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .argDetail(let pid, let idx):
                 let arg = rows[pid]?.argvArray[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 10, content: arg, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 6, content: arg, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .envHeader(let pid):
                 let count = rows[pid]?.envVars.count ?? 0
                 let disc = rows[pid]?.envDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Env (\(count) vars)", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 10, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 6, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .resourcesHeader(let pid):
                 let disc = rows[pid]?.resourcesDisclosed == true ? "\u{25BC}" : "\u{25B6}"
                 lock.unlock()
-                drawLine(y: y, indent: depthIndent + 6, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                drawLine(y: y, indent: depthIndent + 4, content: "\(disc) Resources", color: COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                 y += 1
 
             case .resourceDetail(let pid, let key):
@@ -1889,7 +1889,7 @@ final class TUI: EventSink {
                     default: value = key
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 10, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 6, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1916,7 +1916,7 @@ final class TUI: EventSink {
                     let statsStr = parts.joined(separator: " ")
                     let relPath = relativePath(path, cwd: row.cwd)
                     let shortPath = shortenPath(relPath, maxLen: width - 8 - statsStr.count)
-                    drawLine(y: y, indent: depthIndent + 8, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 4, content: "\(shortPath)  \(statsStr)", color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -1939,7 +1939,7 @@ final class TUI: EventSink {
                         line += "  \u{2191}\(formatBytes(conn.txBytes)) \u{2193}\(formatBytes(conn.rxBytes))"
                     }
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
-                    drawLine(y: y, indent: depthIndent + 8, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -2151,33 +2151,41 @@ final class TUI: EventSink {
     private func appendPanelRows(_ row: ProcessRow, depth: Int) {
         // Info box (only if visible)
         if row.infoVisible {
-            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.processHeader(row.pid))
             if row.infoDisclosed {
+                displayRows.append(.infoBorderTop(row.pid, depth))
                 appendProcessDisclosures(row)
+                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
-            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Files box (only if visible)
         if row.filesVisible {
-            displayRows.append(.infoBorderTop(row.pid, depth))
-            appendFilesDisclosures(row)
-            displayRows.append(.infoBorderBottom(row.pid, depth))
+            displayRows.append(.filesHeader(row.pid))
+            if row.filesDisclosed {
+                displayRows.append(.infoBorderTop(row.pid, depth))
+                let files = row.recentWrittenFiles
+                for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
+                displayRows.append(.infoBorderBottom(row.pid, depth))
+            }
         }
 
         // Network box (only if visible)
         if row.netVisible {
-            displayRows.append(.infoBorderTop(row.pid, depth))
-            appendNetDisclosures(row)
-            displayRows.append(.infoBorderBottom(row.pid, depth))
+            displayRows.append(.netHeader(row.pid))
+            if row.netDisclosed {
+                displayRows.append(.infoBorderTop(row.pid, depth))
+                let conns = row.sortedConnections
+                for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
+                displayRows.append(.infoBorderBottom(row.pid, depth))
+            }
         }
 
         // Sample box (only if visible)
         if row.sampleVisible {
-            displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.sampleHeader(row.pid))
             if row.sampleDisclosed {
+                displayRows.append(.infoBorderTop(row.pid, depth))
                 if row.isSampling {
                     displayRows.append(.processDetail(row.pid, "Sampling..."))
                 } else if row.sampleTree.isEmpty {
@@ -2194,8 +2202,8 @@ final class TUI: EventSink {
                     }
                     appendSampleNodes(row.sampleTree, path: [])
                 }
+                displayRows.append(.infoBorderBottom(row.pid, depth))
             }
-            displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
         // Wait box (only if visible)
@@ -2237,21 +2245,6 @@ final class TUI: EventSink {
         }
     }
 
-    private func appendFilesDisclosures(_ row: ProcessRow) {
-        let files = row.recentWrittenFiles
-        displayRows.append(.filesHeader(row.pid))
-        if row.filesDisclosed {
-            for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
-        }
-    }
-
-    private func appendNetDisclosures(_ row: ProcessRow) {
-        let conns = row.sortedConnections
-        displayRows.append(.netHeader(row.pid))
-        if row.netDisclosed {
-            for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
-        }
-    }
 
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool, highlight: Bool = false, depth: Int = 0) -> Int32 {
         let status: String
@@ -2290,35 +2283,25 @@ final class TUI: EventSink {
         let indentStr = String(repeating: " ", count: discIndent)
         mvaddstr(y, 0, indentStr)
 
-        // Render disclosure + PID + fixed columns (with highlight)
+        // Disclosure + PID (floating, not aligned)
         attron(attr)
-
-        // Disclosure triangle
         addstr(disc)
+        addstr(String(row.pid))
 
-        // PID — fills from current position to colTime
-        let pidStr = String(row.pid)
-        let pidPad = max(0, colTime - discIndent - 2 - pidStr.count)
-        addstr(pidStr + String(repeating: " ", count: pidPad))
+        // TIME at absolute column 10
+        mvaddstr(y, Int32(colTime), String(format: "%-7s", (row.runtimeString as NSString).utf8String!))
 
-        // TIME
-        let timePad = max(0, colOps - colTime - row.runtimeString.count)
-        addstr(row.runtimeString + String(repeating: " ", count: timePad))
+        // OPS at absolute column 17
+        mvaddstr(y, Int32(colOps), String(format: "%-6s", (String(row.fileOps) as NSString).utf8String!))
 
-        // OPS
-        let opsStr = String(row.fileOps)
-        let opsPad = max(0, colStatus - colOps - opsStr.count)
-        addstr(opsStr + String(repeating: " ", count: opsPad))
+        // STATUS at absolute column 23
+        mvaddstr(y, Int32(colStatus), String(format: "%-6s", (status as NSString).utf8String!))
 
-        // STATUS
-        let statusPad = max(0, colProcess - colStatus - status.count)
-        addstr(status + String(repeating: " ", count: statusPad))
-
-        // PROCESS
+        // PROCESS at absolute column 29
         let processWidth = max(5, width - colProcess)
         let truncatedProcess = truncateProcess(processLabel, to: processWidth)
-        let processPad = max(0, width - colProcess - truncatedProcess.count)
-        addstr(truncatedProcess + String(repeating: " ", count: processPad))
+        let processPad = String(repeating: " ", count: max(0, width - colProcess - truncatedProcess.count))
+        mvaddstr(y, Int32(colProcess), truncatedProcess + processPad)
         attroff(attr)
         return y + 1
     }
