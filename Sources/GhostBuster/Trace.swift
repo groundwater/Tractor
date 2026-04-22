@@ -121,26 +121,6 @@ struct Trace: ParsableCommand {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
 
-                    // Wait modal intercepts keys
-                    if t.isWaitModalOpen {
-                        switch ch {
-                        case 27, 113: t.closeWaitModal()  // esc or q
-                        case 119: t.closeWaitModal(); t.diagnoseWait() // w = refresh
-                        default: break
-                        }
-                        continue
-                    }
-
-                    // Sample modal intercepts keys
-                    if t.isSampleModalOpen {
-                        switch ch {
-                        case 27, 113: t.closeSampleModal() // esc or q
-                        case 115: t.closeSampleModal(); t.sampleProcess() // s = resample
-                        default: break
-                        }
-                        continue
-                    }
-
                     // Kill mode intercepts number keys
                     if t.isKillMode {
                         switch ch {
