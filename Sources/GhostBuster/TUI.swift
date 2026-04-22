@@ -257,13 +257,16 @@ final class TUI: EventSink {
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
         row.fileOps += 1
-        // Only track writes to regular files
-        guard type != "open" && isRegularFile(path) else { return }
+        guard type != "open" else { return }
+        // Skip temp files (will be captured via rename destination)
+        if type == "write" && path.contains(".tmp.") { return }
+        // For renames, path is already the destination — check it's a real file
+        if type != "rename" && !isRegularFile(path) { return }
         var stats = row.files[path, default: FileStats()]
         switch type {
         case "write":  stats.writes += 1; stats.lastWrite = Date()
         case "unlink": stats.unlinks += 1
-        case "rename": stats.renames += 1
+        case "rename": stats.renames += 1; stats.writes += 1; stats.lastWrite = Date()
         default: break
         }
         row.files[path] = stats
@@ -496,11 +499,23 @@ final class TUI: EventSink {
             y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: Int(lastRow - y), showSubRows: true)
         }
 
-        // Fill remaining space with exited processes (no sub-rows)
+        // Fill remaining space with exited processes + summary line
         var exitedShown = 0
         for row in exited {
-            guard y <= lastRow else { break }
+            // Need 2 lines: process + summary
+            guard y + 1 <= lastRow else { break }
             y = renderProcessRow(row, y: y, maxX: maxX, maxY: maxY, maxSubRows: 0, showSubRows: false)
+            // Summary line with file/network totals
+            if y <= lastRow {
+                let summary = buildExitedSummary(row)
+                if !summary.isEmpty {
+                    let subLine = truncate("    \(summary)", to: Int(maxX))
+                    attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM)
+                    mvaddstr(y, 0, subLine)
+                    attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_DIM)
+                    y += 1
+                }
+            }
             exitedShown += 1
         }
 
@@ -547,6 +562,26 @@ final class TUI: EventSink {
         attron(attr)
         mvaddstr(maxY - 1, 0, padded)
         attroff(attr)
+    }
+
+    private func buildExitedSummary(_ row: ProcessRow) -> String {
+        var parts: [String] = []
+        let connCount = row.connections.count
+        if connCount > 0 {
+            let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
+            let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
+            if totalTx > 0 || totalRx > 0 {
+                parts.append("\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx))")
+            } else {
+                parts.append("\(connCount) conn")
+            }
+        }
+        let fileCount = row.files.count
+        if fileCount > 0 {
+            let totalWrites = row.files.values.reduce(0) { $0 + $1.writes }
+            parts.append("\(fileCount) files W:\(totalWrites)")
+        }
+        return parts.joined(separator: "  ")
     }
 
     private func renderProcessRow(_ row: ProcessRow, y: Int32, maxX: Int32, maxY: Int32, maxSubRows: Int, showSubRows: Bool) -> Int32 {
