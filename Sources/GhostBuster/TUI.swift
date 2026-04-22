@@ -648,7 +648,7 @@ final class TUI: EventSink {
         if paused {
             label = "PAUSED"
         } else {
-            label = "q: quit  space: pause  \u{2191}\u{2193}: select  tab: multi  enter: expand  esc: clear"
+            label = "q: quit  space: pause  \u{2191}\u{2193}: select  shift+\u{2191}\u{2193}: multi  enter: expand  esc: clear"
         }
 
         let text: String

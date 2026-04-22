@@ -1,4 +1,5 @@
 import ArgumentParser
+import CoreGraphics
 import Darwin.ncurses
 import Foundation
 
@@ -120,13 +121,17 @@ struct Trace: ParsableCommand {
                     case 32:  // space
                         t.togglePause()
                     case 259: // KEY_UP
-                        t.moveUp()
+                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                            t.shiftMoveUp()
+                        } else {
+                            t.moveUp()
+                        }
                     case 258: // KEY_DOWN
-                        t.moveDown()
-                    case 9:   // Tab - extend selection down
-                        t.shiftMoveDown()
-                    case 353: // Shift+Tab (KEY_BTAB) - extend selection up
-                        t.shiftMoveUp()
+                        if CGEventSource.flagsState(.combinedSessionState).contains(.maskShift) {
+                            t.shiftMoveDown()
+                        } else {
+                            t.moveDown()
+                        }
                     case 261: // KEY_RIGHT
                         t.disclose()
                     case 260: // KEY_LEFT
