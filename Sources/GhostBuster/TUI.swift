@@ -606,27 +606,28 @@ final class TUI: EventSink {
         }
     }
 
-    /// Ensure process is disclosed, render, and jump cursor to a target row
+    /// Ensure process is disclosed, jump cursor to target, and render
     private func ensureDisclosedAndJump(_ pid: pid_t, to target: DisplayRow? = nil) {
         lock.lock()
         rows[pid]?.disclosed = true
         lock.unlock()
-        forceRender()
+        // Build displayRows first (render updates them)
+        doRender()
         // Jump to specific target, or fall back to process row
-        let searchTarget = target ?? .process(pid, 0)
         for (i, r) in displayRows.enumerated() {
-            if r == searchTarget {
+            if let t = target, r == t {
                 selectedIndex = i
                 selectedIndices.removeAll()
-                return
+                break
             }
-            // For .process, match any depth
             if target == nil, case .process(let p, _) = r, p == pid {
                 selectedIndex = i
                 selectedIndices.removeAll()
-                return
+                break
             }
         }
+        // Render again with updated cursor position
+        forceRender()
     }
 
     func toggleInfo() {
@@ -1537,16 +1538,10 @@ final class TUI: EventSink {
         mvaddstr(0, 0, truncate(headerText, to: Int(maxX)))
         attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
 
-        // Stats line
-        let stats = "\(running.count) running, \(exited.count) exited, \(visible.count) total"
-        attron(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
-        mvaddstr(1, 0, truncate(stats, to: Int(maxX)))
-        attroff(COLOR_PAIR(TUIColor.dim.rawValue) | ATTR_BOLD)
+        // Menu bar on line 1
+        renderMenuBar(y: 1, width: Int(maxX))
 
-        // Menu bar on line 2
-        renderMenuBar(y: 2, width: Int(maxX))
-
-        // Column header — fixed positions matching renderProcessRow
+        // Column header on line 3 (line 2 is blank spacer)
         var headerLine = [Character](repeating: " ", count: Int(maxX))
         let headers: [(col: Int, text: String)] = [
             (2, "PID"), (10, "TIME"), (17, "OPS"), (23, "STATUS"), (29, "PROCESS"),
@@ -1911,7 +1906,7 @@ final class TUI: EventSink {
         let maxLabel = items.map { $0.label.count }.max() ?? 0
         let maxShortcut = items.map { $0.shortcut.count }.max() ?? 0
         let dropWidth = maxLabel + maxShortcut + 6  // padding + check + gap
-        let dropY: Int32 = 3  // below menu bar
+        let dropY: Int32 = 2  // below menu bar
 
         // Draw border and items
         let hLine = String(repeating: "\u{2500}", count: dropWidth - 2)
