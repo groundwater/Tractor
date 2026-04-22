@@ -251,6 +251,7 @@ final class TUI: EventSink {
         curs_set(0)
         nodelay(stdscr, true)
         keypad(stdscr, true)
+        set_escdelay(25)  // 25ms instead of default 1000ms
 
         // Ensure shifted arrow sequences are registered
         define_key("\u{1b}[1;2D", 393)  // KEY_SLEFT
@@ -1258,7 +1259,7 @@ final class TUI: EventSink {
                 let boxCol = depth * 2 + 2
                 currentBoxIndent = boxCol
                 let indent = String(repeating: " ", count: boxCol)
-                let boxWidth = max(0, width - boxCol - 1)
+                let boxWidth = max(0, width - boxCol - 2)
                 let line = "\(indent)\u{250C}\(String(repeating: "\u{2500}", count: boxWidth))\u{2510}"
                 attron(ATTR_DIM)
                 mvaddstr(y, 0, String(line.prefix(width)))
@@ -1269,7 +1270,7 @@ final class TUI: EventSink {
                 lock.unlock()
                 let boxCol = depth * 2 + 2
                 let indent = String(repeating: " ", count: boxCol)
-                let boxWidth = max(0, width - boxCol - 1)
+                let boxWidth = max(0, width - boxCol - 2)
                 let line = "\(indent)\u{2514}\(String(repeating: "\u{2500}", count: boxWidth))\u{2518}"
                 attron(ATTR_DIM)
                 mvaddstr(y, 0, String(line.prefix(width)))
