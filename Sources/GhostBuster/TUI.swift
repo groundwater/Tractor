@@ -502,6 +502,10 @@ final class TUI: EventSink {
     private func viewMenuItems() -> [MenuItem] {
         return [
             MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
+            .sep(),
+            MenuItem(label: "Expand All", shortcut: "", key: nil),
+            MenuItem(label: "Collapse All", shortcut: "", key: nil),
+            .sep(),
             MenuItem(label: "Columns", shortcut: "▸", key: nil, enabled: false),
         ]
     }
@@ -562,6 +566,10 @@ final class TUI: EventSink {
         if menu == .view {
             if item.label == "Show Exited" {
                 showExited = !showExited
+            } else if item.label == "Expand All" {
+                expandCollapseAll(open: true)
+            } else if item.label == "Collapse All" {
+                expandCollapseAll(open: false)
             }
             forceRender()
             return
@@ -592,6 +600,46 @@ final class TUI: EventSink {
         row.disclosed = true
         lock.unlock()
         ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
+    }
+
+    func expandCollapseAll(open: Bool) {
+        lock.lock()
+        if selectedIndex >= 0, let pid = pidForRow(selectedIndex) {
+            // Scoped to the highlighted process and its descendants
+            func setAll(_ pid: pid_t) {
+                guard let row = rows[pid] else { return }
+                row.disclosed = open
+                row.infoDisclosed = open
+                row.filesDisclosed = open
+                row.netDisclosed = open
+                row.sampleDisclosed = open
+                row.waitDisclosed = open
+                row.processDisclosed = open
+                row.argsDisclosed = open
+                row.envDisclosed = open
+                row.resourcesDisclosed = open
+                // Find children
+                for (childPid, childRow) in rows where childRow.ppid == pid {
+                    setAll(childPid)
+                }
+            }
+            setAll(pid)
+        } else {
+            // Nothing highlighted — expand/collapse everything
+            for row in rows.values {
+                row.disclosed = open
+                row.infoDisclosed = open
+                row.filesDisclosed = open
+                row.netDisclosed = open
+                row.sampleDisclosed = open
+                row.waitDisclosed = open
+                row.processDisclosed = open
+                row.argsDisclosed = open
+                row.envDisclosed = open
+                row.resourcesDisclosed = open
+            }
+        }
+        lock.unlock()
     }
 
     func clearExited() {
@@ -682,10 +730,13 @@ final class TUI: EventSink {
         menuItemIndex = savedIndex
     }
 
-    /// Menu order changes based on what's highlighted
+    /// Menu order — Process always present, contextual menu added when relevant
     private var menuOrder: [MenuID] {
-        let contextMenu = contextMenuID()
-        return [.file, .edit, contextMenu, .view]
+        let ctx = contextMenuID()
+        if ctx == .process {
+            return [.file, .edit, .process, .view]
+        }
+        return [.file, .edit, .process, ctx, .view]
     }
 
     /// Which context menu to show based on current selection
@@ -729,7 +780,7 @@ final class TUI: EventSink {
     /// Flash a menu header with macOS-style blink (synchronous, blocks briefly)
     private func flashMenu(_ menu: MenuID) {
         let width = Int(getmaxx(stdscr))
-        for _ in 0..<2 {
+        for _ in 0..<1 {
             menuFlash = menu
             renderMenuBar(y: 1, width: width)
             refresh()
@@ -1788,7 +1839,7 @@ final class TUI: EventSink {
 
             case .infoBorderTop(_, let depth):
                 lock.unlock()
-                let boxCol = depth * 2 + 2
+                let boxCol = depth * 2 + 4
                 currentBoxIndent = boxCol
                 let indent = String(repeating: " ", count: boxCol)
                 let boxWidth = max(0, width - boxCol - 2)
@@ -1800,7 +1851,7 @@ final class TUI: EventSink {
 
             case .infoBorderBottom(_, let depth):
                 lock.unlock()
-                let boxCol = depth * 2 + 2
+                let boxCol = depth * 2 + 4
                 let indent = String(repeating: " ", count: boxCol)
                 let boxWidth = max(0, width - boxCol - 2)
                 let line = "\(indent)\u{2514}\(String(repeating: "\u{2500}", count: boxWidth))\u{2518}"
@@ -2104,19 +2155,20 @@ final class TUI: EventSink {
         attroff(barAttr)
 
         let ctx = contextMenuID()
-        let ctxEntry: (before: String, key: String, after: String, id: MenuID)
-        switch ctx {
-        case .sample:  ctxEntry = ("", "", "Sample", .sample)
-        case .network: ctxEntry = ("", "", "Network", .network)
-        case .files:   ctxEntry = ("", "", "FileSystem", .files)
-        default:       ctxEntry = ("", "P", "rocess", .process)
-        }
-        let menus = [
-            (before: "", key: "F", after: "ile", id: MenuID.file),
-            (before: "", key: "E", after: "dit", id: MenuID.edit),
-            ctxEntry,
-            (before: "", key: "V", after: "iew", id: MenuID.view),
+        var menus: [(before: String, key: String, after: String, id: MenuID)] = [
+            ("", "F", "ile", .file),
+            ("", "E", "dit", .edit),
+            ("", "P", "rocess", .process),
         ]
+        if ctx != .process {
+            switch ctx {
+            case .sample:  menus.append(("", "", "Sample", .sample))
+            case .network: menus.append(("", "", "Network", .network))
+            case .files:   menus.append(("", "", "FileSystem", .files))
+            default: break
+            }
+        }
+        menus.append(("", "V", "iew", .view))
 
         var x: Int32 = 1
         for menu in menus {
@@ -2142,25 +2194,22 @@ final class TUI: EventSink {
     private func renderMenuDropdown(menu: MenuID, maxY: Int32, maxX: Int32) {
         let items: [MenuItem]
         // Compute X position based on menu order
-        // Compute dropdown X from current menu bar layout
-        let ctx = contextMenuID()
-        let ctxWidth: Int
-        switch ctx {
-        case .sample: ctxWidth = 10   // " Sample "
-        case .network: ctxWidth = 11  // " Network "
-        case .files: ctxWidth = 14    // " FileSystem "
-        default: ctxWidth = 10         // " Process "
+        // Compute dropdown X by measuring actual menu bar items
+        func menuWidth(_ id: MenuID) -> Int {
+            switch id {
+            case .file: return 6
+            case .edit: return 6
+            case .process: return 10
+            case .sample: return 10
+            case .network: return 11
+            case .files: return 14
+            case .view: return 6
+            }
         }
-        let menuWidths: [(id: MenuID, width: Int)] = [
-            (.file, 6),
-            (.edit, 6),
-            (ctx, ctxWidth),
-            (.view, 6),
-        ]
         var dropX: Int32 = 1
-        for mw in menuWidths {
-            if mw.id == menu { break }
-            dropX += Int32(mw.width)
+        for mid in menuOrder {
+            if mid == menu { break }
+            dropX += Int32(menuWidth(mid))
         }
 
         switch menu {
