@@ -85,6 +85,90 @@ struct ConnectionStats {
     }
 }
 
+// MARK: - Auto-expand criteria
+
+enum ExpandParseError: LocalizedError {
+    case invalid(String)
+    var errorDescription: String? {
+        switch self { case .invalid(let msg): return msg }
+    }
+}
+
+struct ExpandCriteria {
+    var fileCreate = false, fileUpdate = false, fileDelete = false  // c, u, d
+    var procCreate = false, procError = false, procExit = false, procSpawn = false  // c, e, x, s
+    var netConnect = false, netRead = false, netWrite = false  // c, r, w
+
+    static let `default` = ExpandCriteria(
+        fileCreate: true, fileUpdate: true, fileDelete: true,
+        procError: true,
+        netConnect: true, netRead: true, netWrite: true
+    )
+
+    /// Parse a spec like "file:cud,proc:e,net:crw"
+    static func parse(_ spec: String) throws -> ExpandCriteria {
+        var c = ExpandCriteria()
+        for token in spec.split(separator: ",") {
+            let parts = token.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else {
+                throw ExpandParseError.invalid("Invalid expand token: \(token) (expected category:ops)")
+            }
+            let category = parts[0].lowercased()
+            let ops = parts[1].lowercased()
+            switch category {
+            case "file":
+                for ch in ops {
+                    switch ch {
+                    case "c": c.fileCreate = true
+                    case "u": c.fileUpdate = true
+                    case "d": c.fileDelete = true
+                    default: throw ExpandParseError.invalid("Unknown file op '\(ch)' (expected c/u/d)")
+                    }
+                }
+            case "proc":
+                for ch in ops {
+                    switch ch {
+                    case "c": c.procCreate = true
+                    case "e": c.procError = true
+                    case "x": c.procExit = true
+                    case "s": c.procSpawn = true
+                    default: throw ExpandParseError.invalid("Unknown proc op '\(ch)' (expected c/e/x/s)")
+                    }
+                }
+            case "net":
+                for ch in ops {
+                    switch ch {
+                    case "c": c.netConnect = true
+                    case "r": c.netRead = true
+                    case "w": c.netWrite = true
+                    default: throw ExpandParseError.invalid("Unknown net op '\(ch)' (expected c/r/w)")
+                    }
+                }
+            default:
+                throw ExpandParseError.invalid("Unknown expand category '\(category)' (expected file/proc/net)")
+            }
+        }
+        return c
+    }
+}
+
+private enum AutoExpandPanel { case tree, files, net }
+
+// MARK: - Tracker group model
+
+enum TrackerKind: Equatable {
+    case name       // substring match on process name/path
+    case pid        // specific PID
+    case path       // exact executable path match
+}
+
+struct TrackerGroup {
+    let id: Int
+    let kind: TrackerKind
+    let value: String           // the name pattern, PID string, or path
+    var disclosed: Bool = true
+}
+
 // MARK: - Process row model
 
 final class ProcessRow {
@@ -100,11 +184,18 @@ final class ProcessRow {
     var isStopped: Bool = false
     var disclosed: Bool = false
 
+    /// Tracks whether user manually collapsed each panel (suppresses auto-expand)
+    var userCollapsedTree: Bool = false
+    var userCollapsedFiles: Bool = false
+    var userCollapsedNet: Bool = false
+
     /// Panel visibility (toggled by i/s/w) and disclosure state
     var infoVisible: Bool = false
     var infoDisclosed: Bool = false
     var filesVisible: Bool = false
+    var filesAuto: Bool = true       // auto-show/hide based on activity
     var netVisible: Bool = false
+    var netAuto: Bool = true         // auto-show/hide based on activity
     var sampleVisible: Bool = false
     var sampleDisclosed: Bool = false
     var waitVisible: Bool = false
@@ -187,6 +278,7 @@ final class ProcessRow {
 // MARK: - Display row types for flat cursor navigation
 
 private enum DisplayRow: Equatable {
+    case trackerGroupHeader(Int)         // group id — collapsible header with (x)
     case process(pid_t, Int)             // pid, depth (for tree indent)
     case processHeader(pid_t)            // "Process" section
     case processDetail(pid_t, String)    // pid, label (Path:, CWD:, etc)
@@ -239,9 +331,14 @@ final class TUI: EventSink {
     private var paused = false
     private var showHints = true
     private var killMode = false       // waiting for signal number
-    private var showExited = true
+    private var showExited = false
     private var showReads = false
     private var showWrites = true
+    private var hideInactiveFiles = true
+
+    // Auto-expand state
+    var autoExpandEnabled = true
+    var expandCriteria = ExpandCriteria.default
 
     // Menu state
     private var activeMenu: MenuID? = nil
@@ -258,6 +355,20 @@ final class TUI: EventSink {
     private var trackModalIndex = 0
     private var trackModalItems: [(name: String, pid: pid_t?, isAgent: Bool)] = []
     private var trackCustomInput = ""
+    private var trackModalMode: TrackerKind = .name
+
+    // Tracker groups
+    var trackerGroups: [TrackerGroup] = []
+    private var nextTrackerGroupId = 0
+    /// Maps each pid to the set of tracker group ids it belongs to
+    private var pidToGroups: [pid_t: Set<Int>] = [:]
+
+    /// Callback to update ESClient patterns when trackers change
+    var onTrackersChanged: (([TrackerGroup]) -> Void)?
+    /// Callback when a new network connection is discovered
+    var onNewConnection: ((pid_t, pid_t, String, uid_t, String, UInt16) -> Void)?
+    /// Reference to the ProcessTree so we can remove PIDs when untracking
+    var processTree: ProcessTree?
     private var waitDuration = 1
     private var sampleDuration = 3
     private var sampleThreshold = 5
@@ -507,16 +618,27 @@ final class TUI: EventSink {
 
     private func filesMenuItems() -> [MenuItem] {
         return [
+            MenuItem(label: "Hide Inactive", shortcut: "", key: nil, checked: hideInactiveFiles),
+            .sep(),
             MenuItem(label: "Show Reads", shortcut: "", key: nil, checked: showReads),
             MenuItem(label: "Show Writes", shortcut: "", key: nil, checked: showWrites),
         ]
     }
 
     private func fileMenuItems() -> [MenuItem] {
+        let onGroup = selectedTrackerGroupId() != nil
         return [
             MenuItem(label: "Track...", shortcut: "T", key: nil),
+            MenuItem(label: "Untrack", shortcut: "x", key: 120, enabled: onGroup),
             MenuItem(label: "Export...", shortcut: "", key: nil, enabled: false),
         ]
+    }
+
+    /// Returns the tracker group id if the current selection is on a tracker group header
+    private func selectedTrackerGroupId() -> Int? {
+        guard let row = displayRows[safe: selectedIndex] else { return nil }
+        if case .trackerGroupHeader(let id) = row { return id }
+        return nil
     }
 
     private func editMenuItems() -> [MenuItem] {
@@ -529,14 +651,44 @@ final class TUI: EventSink {
     }
 
     private func viewMenuItems() -> [MenuItem] {
+        let ae = autoExpandEnabled
         return [
             MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
             .sep(),
             MenuItem(label: "Expand All", shortcut: "", key: nil),
             MenuItem(label: "Collapse All", shortcut: "", key: nil),
             .sep(),
+            MenuItem(label: "Auto Expand", shortcut: "", key: nil, checked: ae),
+            MenuItem(label: "  File: Create", shortcut: "", key: nil, checked: expandCriteria.fileCreate, enabled: ae),
+            MenuItem(label: "  File: Update", shortcut: "", key: nil, checked: expandCriteria.fileUpdate, enabled: ae),
+            MenuItem(label: "  File: Delete", shortcut: "", key: nil, checked: expandCriteria.fileDelete, enabled: ae),
+            MenuItem(label: "  Proc: Create", shortcut: "", key: nil, checked: expandCriteria.procCreate, enabled: ae),
+            MenuItem(label: "  Proc: Error", shortcut: "", key: nil, checked: expandCriteria.procError, enabled: ae),
+            MenuItem(label: "  Proc: Exit", shortcut: "", key: nil, checked: expandCriteria.procExit, enabled: ae),
+            MenuItem(label: "  Proc: Spawn", shortcut: "", key: nil, checked: expandCriteria.procSpawn, enabled: ae),
+            MenuItem(label: "  Net: Connect", shortcut: "", key: nil, checked: expandCriteria.netConnect, enabled: ae),
+            MenuItem(label: "  Net: Read", shortcut: "", key: nil, checked: expandCriteria.netRead, enabled: ae),
+            MenuItem(label: "  Net: Write", shortcut: "", key: nil, checked: expandCriteria.netWrite, enabled: ae),
+            .sep(),
             MenuItem(label: "Columns", shortcut: "▸", key: nil, enabled: false),
         ]
+    }
+
+    private func toggleExpandCriterion(_ label: String) {
+        let trimmed = label.trimmingCharacters(in: .whitespaces)
+        switch trimmed {
+        case "File: Create": expandCriteria.fileCreate.toggle()
+        case "File: Update": expandCriteria.fileUpdate.toggle()
+        case "File: Delete": expandCriteria.fileDelete.toggle()
+        case "Proc: Create": expandCriteria.procCreate.toggle()
+        case "Proc: Error":  expandCriteria.procError.toggle()
+        case "Proc: Exit":   expandCriteria.procExit.toggle()
+        case "Proc: Spawn":  expandCriteria.procSpawn.toggle()
+        case "Net: Connect": expandCriteria.netConnect.toggle()
+        case "Net: Read":    expandCriteria.netRead.toggle()
+        case "Net: Write":   expandCriteria.netWrite.toggle()
+        default: break
+        }
     }
 
     func toggleContextMenu() {
@@ -594,6 +746,9 @@ final class TUI: EventSink {
 
         if menu == .file {
             if item.label == "Track..." { openTrackModal() }
+            if item.label == "Untrack" {
+                if let id = selectedTrackerGroupId() { removeTrackerGroup(id: id) }
+            }
             forceRender()
             return
         }
@@ -605,13 +760,18 @@ final class TUI: EventSink {
                 expandCollapseAll(open: true)
             } else if item.label == "Collapse All" {
                 expandCollapseAll(open: false)
+            } else if item.label == "Auto Expand" {
+                autoExpandEnabled = !autoExpandEnabled
+            } else {
+                toggleExpandCriterion(item.label)
             }
             forceRender()
             return
         }
 
         if menu == .files {
-            if item.label == "Show Reads" { showReads = !showReads }
+            if item.label == "Hide Inactive" { hideInactiveFiles = !hideInactiveFiles }
+            else if item.label == "Show Reads" { showReads = !showReads }
             else if item.label == "Show Writes" { showWrites = !showWrites }
             forceRender()
             return
@@ -628,8 +788,10 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
+        row.filesAuto = false  // manual toggle disables auto
         row.filesVisible = !row.filesVisible
-        if row.filesVisible { row.filesDisclosed = true }
+        if row.filesVisible { row.filesDisclosed = true; row.userCollapsedFiles = false }
+        else { row.userCollapsedFiles = true }
         row.disclosed = true
         lock.unlock()
         ensureDisclosedAndJump(pid, to: row.filesVisible ? .filesHeader(pid) : nil)
@@ -639,11 +801,31 @@ final class TUI: EventSink {
         guard let pid = pidForRow(selectedIndex) else { return }
         lock.lock()
         guard let row = rows[pid] else { lock.unlock(); return }
+        row.netAuto = false  // manual toggle disables auto
         row.netVisible = !row.netVisible
-        if row.netVisible { row.netDisclosed = true }
+        if row.netVisible { row.netDisclosed = true; row.userCollapsedNet = false }
+        else { row.userCollapsedNet = true }
         row.disclosed = true
         lock.unlock()
         ensureDisclosedAndJump(pid, to: row.netVisible ? .netHeader(pid) : nil)
+    }
+
+    func toggleAutoMode() {
+        guard let row = displayRows[safe: selectedIndex] else { return }
+        guard let pid = pid(for: row) else { return }
+        lock.lock()
+        guard let processRow = rows[pid] else { lock.unlock(); return }
+        switch row {
+        case .filesHeader:
+            processRow.filesAuto.toggle()
+        case .netHeader:
+            processRow.netAuto.toggle()
+        default:
+            // If on a process row or other row, toggle files auto for that process
+            processRow.filesAuto.toggle()
+        }
+        lock.unlock()
+        forceRender()
     }
 
     func expandCollapseAll(open: Bool) {
@@ -662,6 +844,9 @@ final class TUI: EventSink {
                 row.argsDisclosed = open
                 row.envDisclosed = open
                 row.resourcesDisclosed = open
+                row.userCollapsedTree = !open
+                row.userCollapsedFiles = !open
+                row.userCollapsedNet = !open
                 // Find children
                 for (childPid, childRow) in rows where childRow.ppid == pid {
                     setAll(childPid)
@@ -681,6 +866,9 @@ final class TUI: EventSink {
                 row.argsDisclosed = open
                 row.envDisclosed = open
                 row.resourcesDisclosed = open
+                row.userCollapsedTree = !open
+                row.userCollapsedFiles = !open
+                row.userCollapsedNet = !open
             }
         }
         lock.unlock()
@@ -710,13 +898,132 @@ final class TUI: EventSink {
         forceRender()
     }
 
+    func handleXKey() {
+        guard let row = displayRows[safe: selectedIndex] else { return }
+        if case .trackerGroupHeader(let id) = row {
+            removeTrackerGroup(id: id)
+        } else {
+            deleteLastSample()
+        }
+    }
+
+    // MARK: - Tracker groups
+
+    @discardableResult
+    func addTrackerGroup(kind: TrackerKind, value: String) -> TrackerGroup {
+        let group = TrackerGroup(id: nextTrackerGroupId, kind: kind, value: value)
+        nextTrackerGroupId += 1
+        trackerGroups.append(group)
+
+        // Discover and add matching processes
+        let pids = findPidsForTracker(group)
+        for rootPid in pids {
+            let expanded = expandProcessTree(roots: [rootPid])
+            for trackedPid in expanded {
+                pidToGroups[trackedPid, default: []].insert(group.id)
+                let (path, ppid, argv) = getProcessInfo(trackedPid)
+                addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
+            }
+        }
+
+        onTrackersChanged?(trackerGroups)
+        return group
+    }
+
+    func removeTrackerGroup(id: Int) {
+        guard let idx = trackerGroups.firstIndex(where: { $0.id == id }) else { return }
+        trackerGroups.remove(at: idx)
+
+        // Remove pids that no longer belong to any group
+        lock.lock()
+        var pidsToRemove: [pid_t] = []
+        for (pid, var groups) in pidToGroups {
+            groups.remove(id)
+            if groups.isEmpty {
+                pidsToRemove.append(pid)
+                pidToGroups.removeValue(forKey: pid)
+            } else {
+                pidToGroups[pid] = groups
+            }
+        }
+        for pid in pidsToRemove {
+            rows.removeValue(forKey: pid)
+            // Also remove from ProcessTree so ESClient stops tracking children
+            processTree?.remove(pid)
+        }
+        lock.unlock()
+
+        onTrackersChanged?(trackerGroups)
+        forceRender()
+    }
+
+    func toggleTrackerGroupDisclosure(id: Int) {
+        guard let idx = trackerGroups.firstIndex(where: { $0.id == id }) else { return }
+        trackerGroups[idx].disclosed.toggle()
+        forceRender()
+    }
+
+    /// Find currently running PIDs that match a tracker
+    private func findPidsForTracker(_ group: TrackerGroup) -> [pid_t] {
+        switch group.kind {
+        case .name:
+            return findProcessesByName(group.value)
+        case .pid:
+            if let p = Int32(group.value), p > 0 {
+                return [p]
+            }
+            return []
+        case .path:
+            return findProcessesByExactPath(group.value)
+        }
+    }
+
+    /// Check if a process (by name and path) matches any tracker group, and register it
+    func matchProcessToGroups(pid: pid_t, name: String, path: String) {
+        for group in trackerGroups {
+            switch group.kind {
+            case .name:
+                let lower = group.value.lowercased()
+                if name.lowercased().contains(lower) || path.lowercased().contains(lower) {
+                    pidToGroups[pid, default: []].insert(group.id)
+                }
+            case .pid:
+                if let targetPid = Int32(group.value), targetPid == pid {
+                    pidToGroups[pid, default: []].insert(group.id)
+                }
+            case .path:
+                if path == group.value {
+                    pidToGroups[pid, default: []].insert(group.id)
+                }
+            }
+        }
+    }
+
+    /// Inherit parent's group membership for child processes
+    func inheritGroupMembership(child: pid_t, parent: pid_t) {
+        if let parentGroups = pidToGroups[parent], !parentGroups.isEmpty {
+            pidToGroups[child, default: []].formUnion(parentGroups)
+        }
+    }
+
+    /// Get processes belonging to a specific tracker group
+    private func pidsForGroup(_ groupId: Int) -> Set<pid_t> {
+        var result = Set<pid_t>()
+        for (pid, groups) in pidToGroups {
+            if groups.contains(groupId) {
+                result.insert(pid)
+            }
+        }
+        return result
+    }
+
     // MARK: - Track modal
 
     private func buildTrackList() {
         trackModalItems = []
         let search = trackCustomInput.lowercased()
 
-        // All running processes, filtered by search
+        // All running processes, filtered by search based on mode
         var allPids = [pid_t](repeating: 0, count: 4096)
         let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
         if count > 0 {
@@ -727,8 +1034,22 @@ final class TUI: EventSink {
                 proc_name(p, &nameBuf, UInt32(nameBuf.count))
                 let name = String(cString: nameBuf)
                 if name.isEmpty || name == "kernel_task" { continue }
-                if !search.isEmpty && !name.lowercased().contains(search) { continue }
-                trackModalItems.append((name: "\(name) (\(p))", pid: p, isAgent: false))
+
+                switch trackModalMode {
+                case .name:
+                    if !search.isEmpty && !name.lowercased().contains(search) { continue }
+                    trackModalItems.append((name: "\(name) (\(p))", pid: p, isAgent: false))
+                case .pid:
+                    let pidStr = "\(p)"
+                    if !search.isEmpty && !pidStr.contains(search) { continue }
+                    trackModalItems.append((name: "\(name) (\(p))", pid: p, isAgent: false))
+                case .path:
+                    var pathBuf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+                    let pathLen = proc_pidpath(p, &pathBuf, UInt32(pathBuf.count))
+                    let path = pathLen > 0 ? String(cString: pathBuf) : name
+                    if !search.isEmpty && !path.lowercased().contains(search.lowercased()) { continue }
+                    trackModalItems.append((name: "\(path) (\(p))", pid: p, isAgent: false))
+                }
             }
         }
     }
@@ -752,6 +1073,18 @@ final class TUI: EventSink {
     }
 
     func trackModalType(_ ch: Int32) {
+        // Tab cycles mode
+        if ch == 9 {
+            switch trackModalMode {
+            case .name: trackModalMode = .pid
+            case .pid:  trackModalMode = .path
+            case .path: trackModalMode = .name
+            }
+            buildTrackList()
+            trackModalIndex = -1
+            forceRender()
+            return
+        }
         if ch == 127 || ch == 8 {  // backspace
             if !trackCustomInput.isEmpty { trackCustomInput.removeLast() }
         } else if ch >= 32 && ch < 127 {
@@ -772,41 +1105,16 @@ final class TUI: EventSink {
 
     func trackModalConfirm() {
         isTrackModalOpen = false
-        let search = trackCustomInput.lowercased()
 
         if trackModalIndex >= 0, trackModalIndex < trackModalItems.count {
-            // Selected a list item — track that PID and add as pattern
+            // Selected a specific process from the list — track by PID
             let item = trackModalItems[trackModalIndex]
             if let pid = item.pid {
-                let expanded = expandProcessTree(roots: [pid])
-                for trackedPid in expanded {
-                    let (path, ppid, argv) = getProcessInfo(trackedPid)
-                    addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
-                }
+                addTrackerGroup(kind: .pid, value: "\(pid)")
             }
-        }
-
-        // Always add the search text as a future match pattern (if non-empty)
-        if !search.isEmpty {
-            // Track all currently matching processes
-            var allPids = [pid_t](repeating: 0, count: 4096)
-            let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
-            if count > 0 {
-                for i in 0..<Int(count) {
-                    let p = allPids[i]
-                    if p <= 0 { continue }
-                    var nameBuf = [CChar](repeating: 0, count: 256)
-                    proc_name(p, &nameBuf, UInt32(nameBuf.count))
-                    let name = String(cString: nameBuf).lowercased()
-                    if name.contains(search) {
-                        let expanded = expandProcessTree(roots: [p])
-                        for trackedPid in expanded {
-                            let (path, ppid, argv) = getProcessInfo(trackedPid)
-                            addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
-                        }
-                    }
-                }
-            }
+        } else if !trackCustomInput.isEmpty {
+            // Track by the typed value using the current mode
+            addTrackerGroup(kind: trackModalMode, value: trackCustomInput)
         }
 
         trackCustomInput = ""
@@ -832,7 +1140,7 @@ final class TUI: EventSink {
         case 107: return enterKillMode       // k
         case 122: return togglePauseProcess  // z
         case 114: return resampleLast        // r
-        case 120: return deleteLastSample    // x
+        case 120: return handleXKey            // x
         case 108: return clearExited         // l
         default: return nil
         }
@@ -1462,6 +1770,9 @@ final class TUI: EventSink {
         lock.lock()
         for dr in effectiveDisplayRows() {
             setDisclosure(dr, open: true)
+            if case .process(let pid, _) = dr {
+                rows[pid]?.userCollapsedTree = false
+            }
         }
         lock.unlock()
         forceRender()
@@ -1473,6 +1784,9 @@ final class TUI: EventSink {
             lock.lock()
             for dr in effectiveDisplayRows() {
                 setDisclosure(dr, open: false)
+                if case .process(let pid, _) = dr {
+                    rows[pid]?.userCollapsedTree = true
+                }
             }
             lock.unlock()
             forceRender()
@@ -1486,6 +1800,9 @@ final class TUI: EventSink {
         let parent = disclosed ? nil : parentRow(row)
         if disclosed {
             setDisclosure(row, open: false)
+            if case .process(let pid, _) = row {
+                rows[pid]?.userCollapsedTree = true
+            }
         }
         lock.unlock()
 
@@ -1606,7 +1923,13 @@ final class TUI: EventSink {
     /// Set a single disclosure flag for a row
     private func setDisclosure(_ row: DisplayRow, open: Bool) {
         switch row {
-        case .process(let pid, _):       rows[pid]?.disclosed = open
+        case .trackerGroupHeader(let id):
+            if let idx = trackerGroups.firstIndex(where: { $0.id == id }) {
+                trackerGroups[idx].disclosed = open
+            }
+        case .process(let pid, _):
+            rows[pid]?.disclosed = open
+            rows[pid]?.userCollapsedTree = !open
         case .processHeader(let pid): rows[pid]?.infoDisclosed = open
         case .argsHeader(let pid):    rows[pid]?.argsDisclosed = open
         case .envHeader(let pid):     rows[pid]?.envDisclosed = open
@@ -1624,6 +1947,8 @@ final class TUI: EventSink {
     /// Is this row currently disclosed?
     private func isDisclosed(_ row: DisplayRow) -> Bool {
         switch row {
+        case .trackerGroupHeader(let id):
+            return trackerGroups.first(where: { $0.id == id })?.disclosed ?? false
         case .process(let pid, _):       return rows[pid]?.disclosed ?? false
         case .processHeader(let pid): return rows[pid]?.infoDisclosed ?? false
         case .argsHeader(let pid):    return rows[pid]?.argsDisclosed ?? false
@@ -1666,6 +1991,8 @@ final class TUI: EventSink {
     /// Get parent display row for navigation
     private func parentRow(_ row: DisplayRow) -> DisplayRow? {
         switch row {
+        case .trackerGroupHeader:
+            return nil
         case .process(let pid, let depth):
             // In tree mode, find the parent process by ppid
             // NOTE: caller must hold lock
@@ -1674,6 +2001,10 @@ final class TUI: EventSink {
                 // Find the parent process row in displayRows
                 for dr in displayRows {
                     if case .process(let p, _) = dr, p == ppid { return dr }
+                }
+                // If no parent process found, navigate up to tracker group header
+                if let groups = pidToGroups[pid], let groupId = groups.first {
+                    return .trackerGroupHeader(groupId)
                 }
             }
             return nil
@@ -1712,6 +2043,8 @@ final class TUI: EventSink {
     private func pidForRow(_ index: Int) -> pid_t? {
         guard let row = displayRows[safe: index] else { return nil }
         switch row {
+        case .trackerGroupHeader:
+            return nil
         case .process(let pid, _), .processHeader(let pid), .processDetail(let pid, _),
              .argsHeader(let pid), .argDetail(let pid, _),
              .envHeader(let pid), .envDetail(let pid, _),
@@ -1732,14 +2065,56 @@ final class TUI: EventSink {
         refresh()
     }
 
+    // MARK: - Auto-expand (called while lock is held)
+
+    /// Expand a process row's panel for auto-expand, respecting user overrides.
+    /// Does NOT move cursor or force render — the next timer tick picks it up.
+    private func autoExpand(_ pid: pid_t, panel: AutoExpandPanel) {
+        guard autoExpandEnabled else { return }
+        guard let row = rows[pid] else { return }
+
+        switch panel {
+        case .tree:
+            guard !row.userCollapsedTree else { return }
+            row.disclosed = true
+        case .files:
+            guard !row.userCollapsedFiles else { return }
+            row.filesVisible = true
+            // Show the panel header but don't expand details
+            if !row.userCollapsedTree { row.disclosed = true }
+        case .net:
+            guard !row.userCollapsedNet else { return }
+            row.netVisible = true
+            // Show the panel header but don't expand details
+            if !row.userCollapsedTree { row.disclosed = true }
+        }
+
+        expandAncestors(of: pid)
+    }
+
+    /// Walk up the parent chain, disclosing each ancestor (unless user-collapsed).
+    private func expandAncestors(of pid: pid_t) {
+        guard let row = rows[pid] else { return }
+        let parentPid = row.ppid
+        guard parentPid != pid, parentPid > 0, let parent = rows[parentPid] else { return }
+        guard !parent.userCollapsedTree else { return }
+        if !parent.disclosed {
+            parent.disclosed = true
+            expandAncestors(of: parentPid)
+        }
+    }
+
     // MARK: - Data updates (called from ES callback thread)
 
     func addProcess(pid: pid_t, ppid: pid_t, name: String, argv: String) {
         lock.lock()
         defer { lock.unlock() }
         let row = ProcessRow(pid: pid, ppid: ppid, name: name, argv: argv)
-        if viewMode == .tree { row.disclosed = true }
+        if viewMode == .tree && !autoExpandEnabled { row.disclosed = true }
         rows[pid] = row
+        if autoExpandEnabled && expandCriteria.procCreate {
+            autoExpand(pid, panel: .tree)
+        }
     }
 
     func markExited(pid: pid_t, exitCode: Int32 = 0) {
@@ -1748,6 +2123,11 @@ final class TUI: EventSink {
         if let row = rows[pid] {
             row.endTime = Date()
             row.exitCode = exitCode
+        }
+        if autoExpandEnabled {
+            if expandCriteria.procExit || (expandCriteria.procError && exitCode != 0) {
+                autoExpand(pid, panel: .tree)
+            }
         }
     }
 
@@ -1765,6 +2145,17 @@ final class TUI: EventSink {
         default: break
         }
         row.files[path] = stats
+
+        // Auto-expand files panel on matching activity
+        if autoExpandEnabled {
+            let shouldExpand: Bool
+            switch type {
+            case "write", "rename": shouldExpand = expandCriteria.fileCreate || expandCriteria.fileUpdate
+            case "unlink": shouldExpand = expandCriteria.fileDelete
+            default: shouldExpand = false
+            }
+            if shouldExpand { autoExpand(pid, panel: .files) }
+        }
     }
 
     func recordConnect(pid: pid_t, remoteAddr: String, remotePort: UInt16) {
@@ -1778,11 +2169,24 @@ final class TUI: EventSink {
         } else {
             row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
         }
+
+        // Auto-expand network panel on connect
+        if autoExpandEnabled && expandCriteria.netConnect {
+            autoExpand(pid, panel: .net)
+        }
     }
 
     // MARK: - EventSink
 
     func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
+        // If tracker groups exist, only add processes that belong to at least one group
+        if !trackerGroups.isEmpty && (pidToGroups[pid] ?? []).isEmpty {
+            // Try to inherit from parent before giving up
+            inheritGroupMembership(child: pid, parent: ppid)
+            if (pidToGroups[pid] ?? []).isEmpty {
+                return
+            }
+        }
         addProcess(pid: pid, ppid: ppid, name: process, argv: argv)
     }
 
@@ -1843,14 +2247,27 @@ final class TUI: EventSink {
                     row.connections[key] = conn
                 }
                 // Update or add connections with byte counts
+                var shouldAutoExpand = false
                 for nc in netConns {
                     let key = "\(nc.remoteAddr):\(nc.remotePort)"
-                    var conn = row.connections[key] ?? ConnectionStats(remoteAddr: nc.remoteAddr, remotePort: nc.remotePort)
+                    let existing = row.connections[key]
+                    let isNew = existing == nil
+                    if isNew, let cb = onNewConnection {
+                        cb(pid, row.ppid, row.name, uid_t(getuid()), nc.remoteAddr, nc.remotePort)
+                    }
+                    var conn = existing ?? ConnectionStats(remoteAddr: nc.remoteAddr, remotePort: nc.remotePort)
+                    let hadRx = conn.rxBytes
+                    let hadTx = conn.txBytes
                     conn.rxBytes = nc.rxBytes
                     conn.txBytes = nc.txBytes
                     conn.alive = nc.alive
                     row.connections[key] = conn
+                    // Check auto-expand criteria
+                    if isNew && expandCriteria.netConnect { shouldAutoExpand = true }
+                    if nc.rxBytes > hadRx && expandCriteria.netRead { shouldAutoExpand = true }
+                    if nc.txBytes > hadTx && expandCriteria.netWrite { shouldAutoExpand = true }
                 }
+                if shouldAutoExpand { autoExpand(pid, panel: .net) }
                 // Prune: keep alive connections + up to 3 most recent dead ones
                 let dead = row.connections.filter { !$0.value.alive }
                 if dead.count > 3 {
@@ -1860,10 +2277,10 @@ final class TUI: EventSink {
                         row.connections.removeValue(forKey: key)
                     }
                 }
-                // Prune: keep only the 20 most recently written files
-                if row.files.count > 20 {
+                // Prune: cap at 200 to bound memory on long-running traces
+                if row.files.count > 200 {
                     let sorted = row.files.sorted { $0.value.lastWrite < $1.value.lastWrite }
-                    for (path, _) in sorted.prefix(row.files.count - 20) {
+                    for (path, _) in sorted.prefix(row.files.count - 200) {
                         row.files.removeValue(forKey: path)
                     }
                 }
@@ -2035,7 +2452,8 @@ final class TUI: EventSink {
         lock.unlock()
 
         // Filter out Tractor's own processes and its children
-        let visible = allRows.filter { !isExcluded($0) && (showExited || $0.isRunning) }
+        let now = Date()
+        let visible = allRows.filter { !isExcluded($0) && (showExited || $0.isRunning || (now.timeIntervalSince($0.endTime ?? now) < 5)) }
 
         // Sort: running first (oldest start first), then exited (most recent exit first)
         let running = visible.filter { $0.isRunning }.sorted { $0.startTime < $1.startTime }
@@ -2065,40 +2483,61 @@ final class TUI: EventSink {
         let allVisible = running + exited
         displayRows = []
 
-        switch viewMode {
-        case .flat:
-            for row in allVisible {
-                displayRows.append(.process(row.pid, 0))
-                if row.disclosed {
-                    appendPanelRows(row, depth: 0)
-                }
-            }
-        case .tree:
-            // Build parent->children map
-            let pidSet = Set(allVisible.map { $0.pid })
+        // Helper: build tree structure from a set of rows
+        func buildChildrenMap(_ rows: [ProcessRow]) -> (roots: [ProcessRow], childrenOf: [pid_t: [ProcessRow]]) {
+            let rowPids = Set(rows.map { $0.pid })
             var childrenOf: [pid_t: [ProcessRow]] = [:]
             var roots: [ProcessRow] = []
-            for row in allVisible {
-                if pidSet.contains(row.ppid) && row.ppid != row.pid {
+            for row in rows {
+                if rowPids.contains(row.ppid) && row.ppid != row.pid {
                     childrenOf[row.ppid, default: []].append(row)
                 } else {
                     roots.append(row)
                 }
             }
-            func appendTree(_ row: ProcessRow, depth: Int) {
-                displayRows.append(.process(row.pid, depth))
-                if row.disclosed {
-                    // Inline panels
-                    appendPanelRows(row, depth: depth)
-                    // Child processes
-                    let children = childrenOf[row.pid] ?? []
-                    for child in children {
-                        appendTree(child, depth: depth + 1)
-                    }
+            return (roots, childrenOf)
+        }
+
+        func appendTree(_ row: ProcessRow, depth: Int, childrenOf: [pid_t: [ProcessRow]]) {
+            displayRows.append(.process(row.pid, depth))
+            if row.disclosed {
+                appendPanelRows(row, depth: depth)
+                let children = childrenOf[row.pid] ?? []
+                for child in children {
+                    appendTree(child, depth: depth + 1, childrenOf: childrenOf)
                 }
             }
-            for root in roots {
-                appendTree(root, depth: 0)
+        }
+
+        if trackerGroups.isEmpty {
+            // No groups — flat ungrouped display (fallback)
+            switch viewMode {
+            case .flat:
+                for row in allVisible {
+                    displayRows.append(.process(row.pid, 0))
+                    if row.disclosed { appendPanelRows(row, depth: 0) }
+                }
+            case .tree:
+                let (roots, childrenOf) = buildChildrenMap(allVisible)
+                for root in roots { appendTree(root, depth: 0, childrenOf: childrenOf) }
+            }
+        } else {
+            // Group processes under tracker headers
+            for group in trackerGroups {
+                displayRows.append(.trackerGroupHeader(group.id))
+                guard group.disclosed else { continue }
+                let groupPids = pidsForGroup(group.id)
+                let groupRows = allVisible.filter { groupPids.contains($0.pid) }
+                switch viewMode {
+                case .flat:
+                    for row in groupRows {
+                        displayRows.append(.process(row.pid, 1))
+                        if row.disclosed { appendPanelRows(row, depth: 1) }
+                    }
+                case .tree:
+                    let (roots, childrenOf) = buildChildrenMap(groupRows)
+                    for root in roots { appendTree(root, depth: 1, childrenOf: childrenOf) }
+                }
             }
         }
 
@@ -2139,6 +2578,10 @@ final class TUI: EventSink {
 
             lock.lock()
             switch dr {
+            case .trackerGroupHeader(let groupId):
+                lock.unlock()
+                y = renderTrackerGroupHeader(groupId: groupId, y: y, width: width, highlighted: isHighlighted)
+
             case .process(let pid, let depth):
                 if let row = rows[pid] {
                     lock.unlock()
@@ -2262,11 +2705,20 @@ final class TUI: EventSink {
             case .filesHeader(let pid):
                 if let row = rows[pid] {
                     let totalWrites = row.files.values.reduce(0) { $0 + $1.writes }
-                    let fileCount = row.recentWrittenFiles.count
+                    var files = row.recentWrittenFiles
+                    if hideInactiveFiles {
+                        let now = Date()
+                        files = files.filter { now.timeIntervalSince($0.stats.lastWrite) < 5 }
+                    }
+                    let fileCount = files.count
                     let disc = row.filesDisclosed ? "\u{25BC}" : "\u{25B6}"
+                    let autoIndicator = row.filesAuto ? "~ " : ""
                     lock.unlock()
                     let triIndent = depthIndent + 2
-                    drawBoxHeader(y: y, disc: disc, title: "Files (\(fileCount) written, W:\(totalWrites))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    let title = hideInactiveFiles
+                        ? "\(autoIndicator)Files (\(fileCount) active, W:\(totalWrites))"
+                        : "\(autoIndicator)Files (\(fileCount) written, W:\(totalWrites))"
+                    drawBoxHeader(y: y, disc: disc, title: title, triIndent: triIndent, color: COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -2295,9 +2747,10 @@ final class TUI: EventSink {
                     let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
                     let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
+                    let autoIndicator = row.netAuto ? "~ " : ""
                     lock.unlock()
                     let triIndent = depthIndent + 2
-                    drawBoxHeader(y: y, disc: disc, title: "Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -2424,6 +2877,8 @@ final class TUI: EventSink {
 
     private func pid(for row: DisplayRow) -> pid_t? {
         switch row {
+        case .trackerGroupHeader:
+            return nil
         case .process(let pid, _),
              .processHeader(let pid),
              .processDetail(let pid, _),
@@ -2452,6 +2907,8 @@ final class TUI: EventSink {
         guard let row = displayRows[safe: index] else { return 0 }
 
         switch row {
+        case .trackerGroupHeader:
+            return 0
         case .process(_, let depth),
              .infoBorderTop(_, let depth),
              .infoBorderBottom(_, let depth):
@@ -2660,10 +3117,33 @@ final class TUI: EventSink {
         attroff(barAttr | ATTR_DIM)
     }
 
+    private func renderTrackerGroupHeader(groupId: Int, y: Int32, width: Int, highlighted: Bool) -> Int32 {
+        guard let group = trackerGroups.first(where: { $0.id == groupId }) else { return y }
+        let disc = group.disclosed ? "\u{25BC}" : "\u{25B6}"
+        let kindLabel: String
+        switch group.kind {
+        case .name: kindLabel = "Name"
+        case .pid:  kindLabel = "PID"
+        case .path: kindLabel = "Path"
+        }
+
+        let processCount = pidsForGroup(groupId).count
+        let countStr = group.disclosed ? "" : "  (\(processCount) processes)"
+        let label = "\(disc) \(kindLabel): \(group.value)\(countStr)"
+        let padding = max(0, width - label.count)
+
+        let headerColor = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
+        let attr = highlighted ? (headerColor | ATTR_REVERSE) : headerColor
+        attron(attr)
+        mvaddstr(y, 0, String((label + String(repeating: " ", count: padding)).prefix(width)))
+        attroff(attr)
+        return y + 1
+    }
+
     private func renderTrackModal(maxY: Int32, maxX: Int32) {
-        let mWidth = min(50, Int(maxX) - 4)
+        let mWidth = min(55, Int(maxX) - 4)
         let listHeight = 10
-        let mHeight = listHeight + 5  // title + input + separator + list + footer
+        let mHeight = listHeight + 7  // title + mode + input + separator + list + footer + bottom
         let mX = (Int(maxX) - mWidth) / 2
         let mY = (Int(maxY) - mHeight) / 2
 
@@ -2681,29 +3161,45 @@ final class TUI: EventSink {
         mvaddstr(Int32(mY + mHeight - 1), Int32(mX), "\u{2514}\(hLine)\u{2518}")
         attroff(barAttr | ATTR_BOLD)
 
-        // Search input (line 1)
-        let inputY = Int32(mY + 1)
+        // Mode selector (line 1)
+        let modeY = Int32(mY + 1)
+        let nameRadio = trackModalMode == .name ? "(\u{2022})" : "( )"
+        let pidRadio  = trackModalMode == .pid  ? "(\u{2022})" : "( )"
+        let pathRadio = trackModalMode == .path ? "(\u{2022})" : "( )"
+        let modeText = " \(nameRadio) Name   \(pidRadio) PID   \(pathRadio) Path"
+        let modePad = String(repeating: " ", count: max(0, innerW - modeText.count))
+        attron(barAttr)
+        mvaddstr(modeY, Int32(mX + 1), String((modeText + modePad).prefix(innerW)))
+        attroff(barAttr)
+
+        // Search input (line 2)
+        let inputY = Int32(mY + 2)
         let isInputFocused = trackModalIndex == -1
         let cursor = isInputFocused ? "_" : ""
-        let inputText = "Search: \(trackCustomInput)\(cursor)"
+        let searchLabel: String
+        switch trackModalMode {
+        case .name: searchLabel = "Name"
+        case .pid:  searchLabel = "PID"
+        case .path: searchLabel = "Path"
+        }
+        let inputText = "\(searchLabel): \(trackCustomInput)\(cursor)"
         let inputAttr = isInputFocused ? hlAttr : barAttr
         attron(inputAttr)
         let inputPad = String(repeating: " ", count: max(0, innerW - inputText.count))
         mvaddstr(inputY, Int32(mX + 1), String((inputText + inputPad).prefix(innerW)))
         attroff(inputAttr)
 
-        // Separator (line 2)
+        // Separator (line 3)
         attron(barAttr)
-        mvaddstr(Int32(mY + 2), Int32(mX), "\u{251C}\(hLine)\u{2524}")
+        mvaddstr(Int32(mY + 3), Int32(mX), "\u{251C}\(hLine)\u{2524}")
         attroff(barAttr)
 
-        // List (lines 3..3+listHeight)
+        // List (lines 4..4+listHeight)
         let listStart = max(0, trackModalIndex - listHeight + 2)
         for vi in 0..<listHeight {
             let idx = listStart + vi
-            let lineY = Int32(mY + 3 + vi)
+            let lineY = Int32(mY + 4 + vi)
             guard idx < trackModalItems.count else {
-                // Empty row
                 attron(barAttr)
                 mvaddstr(lineY, Int32(mX + 1), String(repeating: " ", count: innerW))
                 attroff(barAttr)
@@ -2712,8 +3208,7 @@ final class TUI: EventSink {
             let item = trackModalItems[idx]
             let isSelected = idx == trackModalIndex
 
-            let prefix = item.isAgent ? "\u{2605} " : "  "
-            let label = "\(prefix)\(item.name)"
+            let label = "  \(item.name)"
             let padded = String(truncate(label, to: innerW).prefix(innerW))
                 + String(repeating: " ", count: max(0, innerW - label.count))
 
@@ -2724,7 +3219,7 @@ final class TUI: EventSink {
         }
 
         // Footer
-        let footer = "Enter: track  Esc: cancel  \u{2191}\u{2193}: select"
+        let footer = "Enter: track  Esc: cancel  Tab: mode  \u{2191}\u{2193}: select"
         attron(barAttr | ATTR_DIM)
         mvaddstr(Int32(mY + mHeight - 2), Int32(mX + 2), String(footer.prefix(innerW - 2)))
         attroff(barAttr | ATTR_DIM)
@@ -2841,19 +3336,35 @@ final class TUI: EventSink {
             displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
-        // Files box (only if visible)
-        if row.filesVisible {
+        // Files box — auto-hide when 0 activity (unless manually toggled on)
+        let showFiles: Bool
+        if row.filesAuto {
+            showFiles = !row.files.isEmpty
+        } else {
+            showFiles = row.filesVisible
+        }
+        if showFiles {
             displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.filesHeader(row.pid))
             if row.filesDisclosed {
-                let files = row.recentWrittenFiles
+                var files = row.recentWrittenFiles
+                if hideInactiveFiles {
+                    let now = Date()
+                    files = files.filter { now.timeIntervalSince($0.stats.lastWrite) < 5 }
+                }
                 for file in files { displayRows.append(.fileDetail(row.pid, file.path)) }
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
         }
 
-        // Network box (only if visible)
-        if row.netVisible {
+        // Network box — auto-hide when 0 connections (unless manually toggled on)
+        let showNet: Bool
+        if row.netAuto {
+            showNet = !row.connections.isEmpty
+        } else {
+            showNet = row.netVisible
+        }
+        if showNet {
             displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.netHeader(row.pid))
             if row.netDisclosed {
@@ -2980,7 +3491,20 @@ final class TUI: EventSink {
 
         let processWidth = max(5, width - layout.process)
         let truncatedProcess = truncateProcess(processLabel, to: processWidth)
-        mvaddstr(y, Int32(layout.process), truncatedProcess)
+        // Render the process name with the binary basename in bold
+        let baseName = (row.name as NSString).lastPathComponent
+        if !baseName.isEmpty, let range = truncatedProcess.range(of: baseName) {
+            let before = String(truncatedProcess[truncatedProcess.startIndex..<range.lowerBound])
+            let bold = String(truncatedProcess[range])
+            let after = String(truncatedProcess[range.upperBound...])
+            mvaddstr(y, Int32(layout.process), before)
+            attron(attr | ATTR_BOLD)
+            addstr(bold)
+            attroff(ATTR_BOLD)
+            addstr(after)
+        } else {
+            mvaddstr(y, Int32(layout.process), truncatedProcess)
+        }
         attroff(attr)
         return y + 1
     }

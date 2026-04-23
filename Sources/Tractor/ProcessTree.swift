@@ -87,6 +87,30 @@ func findProcessesByName(_ pattern: String) -> [pid_t] {
     return results
 }
 
+/// Find running PIDs whose executable path exactly matches the given path
+func findProcessesByExactPath(_ targetPath: String) -> [pid_t] {
+    var results: [pid_t] = []
+
+    var pids = [pid_t](repeating: 0, count: 4096)
+    let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.size * pids.count))
+    guard count > 0 else { return [] }
+
+    for i in 0..<Int(count) {
+        let pid = pids[i]
+        if pid <= 0 { continue }
+
+        var pathBuf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let pathLen = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
+        if pathLen > 0 {
+            let path = String(cString: pathBuf)
+            if path == targetPath {
+                results.append(pid)
+            }
+        }
+    }
+    return results
+}
+
 /// Build full descendant tree from a set of root PIDs using current process list
 func expandProcessTree(roots: [pid_t]) -> [pid_t] {
     var tracked = Set(roots)

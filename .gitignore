@@ -24,6 +24,12 @@ Package.resolved
 # CocoaPods
 Pods/
 
+# Trace logs
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
 # macOS
 .DS_Store
 .AppleDouble

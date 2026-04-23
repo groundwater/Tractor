@@ -7,11 +7,13 @@ import Foundation
 private var activeTUI: TUI?
 private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
+private var activeSQLiteLog: SQLiteLog?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
     activeESClient?.stop()
+    activeSQLiteLog?.close()
     if !message.isEmpty {
         fputs("\n\(message)\n", stderr)
         fflush(stderr)
@@ -24,48 +26,40 @@ struct Trace: ParsableCommand {
         abstract: "Trace a process tree and its activity"
     )
 
-    @Option(name: .shortAndLong, help: "Process name to trace (substring match)")
-    var trace: String?
+    @Option(name: .shortAndLong, help: "Process name to trace (substring match, repeatable)")
+    var name: [String] = []
 
-    @Option(name: .shortAndLong, help: "Specific PID to trace (including all descendants)")
-    var pid: Int32?
+    @Option(name: .shortAndLong, help: "Specific PID to trace including all descendants (repeatable)")
+    var pid: [Int32] = []
+
+    @Option(name: .long, help: "Exact executable path to trace (repeatable)")
+    var path: [String] = []
 
     @Flag(help: "Output JSON lines instead of the interactive TUI")
     var json: Bool = false
 
+    @Option(name: .long, help: "Auto-expand criteria (e.g. file:cud,proc:e,net:crw)")
+    var expand: String?
+
+    @Flag(name: .long, help: "Log events to a SQLite database in the current directory")
+    var log: Bool = false
+
+    @Option(name: .long, help: "Path to SQLite database file (implies --log)")
+    var logFile: String?
+
     func run() throws {
-        guard trace != nil || pid != nil else {
-            throw ValidationError("Provide --trace or --pid")
+        guard !name.isEmpty || !pid.isEmpty || !path.isEmpty else {
+            throw ValidationError("Provide at least one --name, --pid, or --path")
         }
 
         let tree = ProcessTree()
 
-        // Resolve root PIDs
-        var roots: [pid_t] = []
-        var agentLabel = "PID \(pid ?? 0)"
-
-        if let pidVal = pid {
-            roots.append(pidVal)
-        }
-
-        if let traceName = trace {
-            agentLabel = traceName
-            let found = findProcessesByName(traceName)
-            if found.isEmpty {
-                fputs("WARNING: No running \(traceName) processes found. Will watch for new ones.\n", stderr)
-            } else {
-                fputs("Found \(found.count) \(traceName) process(es): \(found)\n", stderr)
-                roots.append(contentsOf: found)
-            }
-        }
-
-        // Expand to full tree
-        var expanded: [pid_t] = []
-        if !roots.isEmpty {
-            expanded = expandProcessTree(roots: roots)
-            fputs("Tracking \(expanded.count) processes (including descendants)\n", stderr)
-            tree.addRoots(expanded)
-        }
+        // Build header label from all trackers
+        var labels: [String] = []
+        for n in name { labels.append(n) }
+        for p in pid { labels.append("PID \(p)") }
+        for p in path { labels.append(p) }
+        let agentLabel = labels.joined(separator: ", ")
 
         // Create sink: TUI or JSON
         let primarySink: EventSink
@@ -76,37 +70,112 @@ struct Trace: ParsableCommand {
             primarySink = EventOutput()
         } else {
             let t = TUI()
+            if let expandSpec = expand {
+                t.expandCriteria = try ExpandCriteria.parse(expandSpec)
+            }
             t.excludeSelf()
+            t.processTree = tree
             t.start(header: "Tractor - tracing \(agentLabel)")
             tui = t
             primarySink = t
         }
-        sink = primarySink
 
-        // Seed the sink with already-running processes
-        for trackedPid in expanded {
-            let (path, ppid, argv) = getProcessInfo(trackedPid)
-            sink.onExec(
-                pid: trackedPid, ppid: ppid,
-                process: path, argv: argv,
-                user: uid_t(getuid())
-            )
+        // Optionally add SQLite logging
+        if log || logFile != nil {
+            let dbPath: String
+            if let explicit = logFile {
+                dbPath = explicit
+            } else {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                let stamp = formatter.string(from: Date())
+                    .replacingOccurrences(of: ":", with: "-")
+                dbPath = "trace-\(stamp).db"
+            }
+            let sqliteLog = try SQLiteLog(path: dbPath)
+            activeSQLiteLog = sqliteLog
+            fputs("Tractor: logging to \(sqliteLog.path)\n", stderr)
+            sink = MultiSink([primarySink, sqliteLog])
+        } else {
+            sink = primarySink
+        }
+
+        // Create tracker groups and seed processes
+        if let t = tui {
+            for n in name {
+                t.addTrackerGroup(kind: .name, value: n)
+            }
+            for p in pid {
+                t.addTrackerGroup(kind: .pid, value: "\(p)")
+            }
+            for p in path {
+                t.addTrackerGroup(kind: .path, value: p)
+            }
+        } else {
+            // JSON mode — just resolve roots directly
+            var roots: [pid_t] = []
+            for n in name {
+                roots.append(contentsOf: findProcessesByName(n))
+            }
+            for p in pid {
+                roots.append(p)
+            }
+            for p in path {
+                roots.append(contentsOf: findProcessesByExactPath(p))
+            }
+            if !roots.isEmpty {
+                let expanded = expandProcessTree(roots: roots)
+                tree.addRoots(expanded)
+                for trackedPid in expanded {
+                    let (execPath, ppid, argv) = getProcessInfo(trackedPid)
+                    sink.onExec(pid: trackedPid, ppid: ppid, process: execPath, argv: argv, user: uid_t(getuid()))
+                }
+            }
+        }
+
+        // Seed ProcessTree with all tracked PIDs from TUI groups
+        if let t = tui {
+            for group in t.trackerGroups {
+                let groupPids = findPidsForTrackerGroup(group)
+                if !groupPids.isEmpty {
+                    let expanded = expandProcessTree(roots: groupPids)
+                    tree.addRoots(expanded)
+                }
+            }
         }
 
         // Start ES client
         let esClient = ESClient(tree: tree, sink: sink)
-        // Set patterns for auto-discovery of new matching processes
-        if let traceName = trace {
-            esClient.tracePatterns = [traceName.lowercased()]
+
+        // Build initial patterns from all trackers
+        if let t = tui {
+            esClient.updatePatterns(trackers: t.trackerGroups)
+            // Wire up dynamic pattern updates when trackers change
+            t.onTrackersChanged = { [weak esClient] trackers in
+                esClient?.updatePatterns(trackers: trackers)
+            }
+            // Forward new network connections to the SQLite log
+            if let sqlLog = activeSQLiteLog {
+                t.onNewConnection = { pid, ppid, process, user, addr, port in
+                    sqlLog.onConnect(pid: pid, ppid: ppid, process: process, user: user, remoteAddr: addr, remotePort: port)
+                }
+            }
+        } else {
+            // JSON mode — set patterns directly
+            esClient.tracePatterns = name.map { $0.lowercased() }
+            esClient.pathPatterns = path
         }
 
         // Store refs for signal handler cleanup
         activeTUI = tui
         activeESClient = esClient
 
-        signal(SIGINT) { _ in
+        signal(SIGINT, SIG_IGN)
+        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigintSource.setEventHandler {
             exitAfterRestoringTerminal(message: "", code: 0)
         }
+        sigintSource.resume()
 
         do {
             try esClient.start()
@@ -231,6 +300,8 @@ struct Trace: ParsableCommand {
                     case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120:
                         // i, d, n, z, k, s, w, l, r, x — all routed through executeShortcut for flash
                         t.executeShortcut(ch)
+                    case 126: // '~' - toggle auto mode
+                        t.toggleAutoMode()
                     case 63: // '?'
                         t.toggleHints()
                     case 27: // ESC
@@ -249,5 +320,18 @@ struct Trace: ParsableCommand {
         }
 
         dispatchMain()
+    }
+}
+
+/// Resolve PIDs for a tracker group (used during startup)
+private func findPidsForTrackerGroup(_ group: TrackerGroup) -> [pid_t] {
+    switch group.kind {
+    case .name:
+        return findProcessesByName(group.value)
+    case .pid:
+        if let p = Int32(group.value), p > 0 { return [p] }
+        return []
+    case .path:
+        return findProcessesByExactPath(group.value)
     }
 }

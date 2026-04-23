@@ -29,6 +29,7 @@ targetTemplates:
           - "-lEndpointSecurity"
           - "-lbsm"
           - "-lpcap"
+          - "-lsqlite3"
     entitlements:
       path: Sources/Tractor/Tractor.entitlements
       properties:

@@ -11,20 +11,32 @@ final class ESClient {
     private var client: OpaquePointer?
     private let tree: ProcessTree
     private let sink: EventSink
-    /// Patterns to auto-discover new matching processes
+    /// Patterns to auto-discover new matching processes (name substring, lowercased)
     var tracePatterns: [String] = []
+    /// Exact paths to auto-discover new matching processes
+    var pathPatterns: [String] = []
+    /// Lock for dynamic pattern updates
+    private let patternLock = NSLock()
 
     init(tree: ProcessTree, sink: EventSink) {
         self.tree = tree
         self.sink = sink
     }
 
+    func updatePatterns(trackers: [TrackerGroup]) {
+        patternLock.lock()
+        defer { patternLock.unlock() }
+        tracePatterns = trackers.compactMap { $0.kind == .name ? $0.value.lowercased() : nil }
+        pathPatterns = trackers.compactMap { $0.kind == .path ? $0.value : nil }
+        // PID trackers don't need auto-discovery patterns — they're tracked directly
+    }
+
     func start() throws {
         let tree = self.tree
         let sink = self.sink
-        let patterns = self.tracePatterns
+        let patternLock = self.patternLock
 
-        let result = es_new_client(&client) { esClient, message in
+        let result = es_new_client(&client) { [weak self] esClient, message in
             let proc = message.pointee.process
             let info = esProcessInfo(proc)
 
@@ -39,14 +51,30 @@ final class ESClient {
                 var tracked = tree.contains(targetInfo.ppid) || tree.contains(targetInfo.pid)
                 if tracked {
                     tree.trackIfChild(pid: targetInfo.pid, ppid: targetInfo.ppid)
+                    // Inherit group membership from parent
+                    if let tui = sink as? TUI {
+                        tui.inheritGroupMembership(child: targetInfo.pid, parent: targetInfo.ppid)
+                    }
                 }
 
-                // Auto-discover new agent processes by name/path
-                if !tracked && !patterns.isEmpty {
-                    let path = targetInfo.path.lowercased()
-                    if patterns.contains(where: { path.contains($0) }) {
+                // Auto-discover new processes by name/path patterns
+                if !tracked {
+                    patternLock.lock()
+                    let namePatterns = self?.tracePatterns ?? []
+                    let exactPaths = self?.pathPatterns ?? []
+                    patternLock.unlock()
+
+                    let path = targetInfo.path
+                    let pathLower = path.lowercased()
+                    if namePatterns.contains(where: { pathLower.contains($0) }) ||
+                       exactPaths.contains(where: { path == $0 }) {
                         tree.addRoots([targetInfo.pid])
                         tracked = true
+                        // Register with matching tracker groups
+                        if let tui = sink as? TUI {
+                            let name = (path as NSString).lastPathComponent
+                            tui.matchProcessToGroups(pid: targetInfo.pid, name: name, path: path)
+                        }
                     }
                 }
 
@@ -167,6 +195,15 @@ final class ESClient {
         guard let esClient = client else {
             throw ESError(message: "es_new_client returned success but client is nil")
         }
+
+        // Mute our own process so we never generate recursive events
+        // (e.g. tracing "Tractor" by name while --log writes to SQLite)
+        var selfToken = audit_token_t()
+        var size = mach_msg_type_number_t(MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size)
+        task_info(mach_task_self_, task_flavor_t(TASK_AUDIT_TOKEN), withUnsafeMutablePointer(to: &selfToken) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { $0 }
+        }, &size)
+        es_mute_process(esClient, &selfToken)
 
         let events: [es_event_type_t] = [
             ES_EVENT_TYPE_AUTH_EXEC,
