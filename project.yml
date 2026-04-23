@@ -38,6 +38,9 @@ targetTemplates:
       path: Sources/Tractor/Tractor.entitlements
       properties:
         com.apple.developer.endpoint-security.client: true
+        com.apple.developer.system-extension.install: true
+        com.apple.developer.networking.networkextension:
+          - app-proxy-provider
 
 targets:
   Tractor:
@@ -59,9 +62,10 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         LSMinimumSystemVersion: "15.0"
+        NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
           NEProviderClasses:
-            com.apple.networkextension.transparent-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
+            com.apple.networkextension.app-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
     settings:
       base:
         PRODUCT_NAME: com.jacobgroundwater.Tractor.NE
@@ -83,10 +87,13 @@ targets:
         buildPhase: resources
     dependencies:
       - target: TractorNE
-        embed: true
-        codeSign: true
-        copy:
-          destination: plugins
+        embed: false
+    postBuildScripts:
+      - script: |
+          mkdir -p "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions"
+          ditto "${TARGET_BUILD_DIR}/com.jacobgroundwater.Tractor.NE.systemextension" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension"
+          /usr/bin/codesign --force --sign - --deep --entitlements "${CODE_SIGN_ENTITLEMENTS}" --timestamp=none "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
+        name: "Embed System Extension"
     info:
       path: Sources/Tractor/Info.plist
       properties:
@@ -101,6 +108,7 @@ targets:
         LSMinimumSystemVersion: "15.0"
         LSUIElement: true
         NSHighResolutionCapable: true
+        NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic for security analysis."
     settings:
       base:
         CODE_SIGN_IDENTITY: "-"
