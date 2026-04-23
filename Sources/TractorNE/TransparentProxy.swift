@@ -10,7 +10,41 @@ class TransparentProxy: NETransparentProxyProvider {
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         NSLog("TractorNE: proxy started, connecting to CLI via XPC")
         connectXPC()
-        completionHandler(nil)
+
+        // Tell the OS to route ALL TCP and UDP flows through us
+        let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
+
+        // Match all TCP traffic
+        let tcpRule = NENetworkRule(
+            remoteNetwork: nil,
+            remotePrefix: 0,
+            localNetwork: nil,
+            localPrefix: 0,
+            protocol: .TCP,
+            direction: .outbound
+        )
+
+        // Match all UDP traffic
+        let udpRule = NENetworkRule(
+            remoteNetwork: nil,
+            remotePrefix: 0,
+            localNetwork: nil,
+            localPrefix: 0,
+            protocol: .UDP,
+            direction: .outbound
+        )
+
+        settings.includedNetworkRules = [tcpRule, udpRule]
+
+        setTunnelNetworkSettings(settings) { error in
+            if let error = error {
+                NSLog("TractorNE: failed to set network settings: \(error)")
+                completionHandler(error)
+                return
+            }
+            NSLog("TractorNE: network settings applied — intercepting all TCP/UDP")
+            completionHandler(nil)
+        }
     }
 
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {

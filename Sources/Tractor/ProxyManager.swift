@@ -62,9 +62,19 @@ final class ProxyManager: NSObject {
                     completion(saveError)
                     return
                 }
-                // Load again after save to pick up the config
+                // Load again after save, then start the tunnel
                 manager.loadFromPreferences { loadError in
-                    completion(loadError)
+                    if let loadError = loadError {
+                        completion(loadError)
+                        return
+                    }
+                    do {
+                        try manager.connection.startVPNTunnel()
+                        fputs("Tractor: proxy tunnel started\n", stderr)
+                        completion(nil)
+                    } catch {
+                        completion(error)
+                    }
                 }
             }
         }
