@@ -716,15 +716,6 @@ final class TUI: EventSink {
         trackModalItems = []
         let search = trackCustomInput.lowercased()
 
-        // Known agents first (always shown, filtered)
-        for kind in AgentKind.allCases {
-            let name = kind.rawValue
-            if !search.isEmpty && !name.lowercased().contains(search) { continue }
-            let pids = findAgentPIDs(kind)
-            let label = pids.isEmpty ? "\(name) (not running)" : "\(name) (PID \(pids.first!))"
-            trackModalItems.append((name: label, pid: pids.first, isAgent: true))
-        }
-
         // All running processes, filtered by search
         var allPids = [pid_t](repeating: 0, count: 4096)
         let count = proc_listallpids(&allPids, Int32(MemoryLayout<pid_t>.size * allPids.count))
@@ -737,9 +728,6 @@ final class TUI: EventSink {
                 let name = String(cString: nameBuf)
                 if name.isEmpty || name == "kernel_task" { continue }
                 if !search.isEmpty && !name.lowercased().contains(search) { continue }
-                // Skip if already shown as an agent
-                let isAgent = AgentKind.allCases.contains { name.lowercased().contains($0.rawValue) }
-                if isAgent { continue }
                 trackModalItems.append((name: "\(name) (\(p))", pid: p, isAgent: false))
             }
         }
@@ -2886,7 +2874,7 @@ final class TUI: EventSink {
                     displayRows.append(.processDetail(row.pid, "Press s to sample"))
                 } else {
                     // Show all sample runs
-                    for (runIdx, run) in row.sampleRuns.enumerated() {
+                    for (_, run) in row.sampleRuns.enumerated() {
                         displayRows.append(.processDetail(row.pid, run.label))
                         if run.disclosed {
                             func appendSampleNodes(_ nodes: [SampleNode], path: [Int]) {

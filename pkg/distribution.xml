@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Tractor</title>
+    <welcome mime-type="text/plain"><![CDATA[Tractor — real-time process monitor for AI coding agents on macOS.
+
+This installer will:
+  • Install Tractor.app to /Library/Application Support/Tractor/
+  • Create a symlink at /usr/local/bin/tractor]]></welcome>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    <choice id="default" title="Tractor">
+        <pkg-ref id="com.jacobgroundwater.Tractor"/>
+    </choice>
+    <pkg-ref id="com.jacobgroundwater.Tractor" version="0.1.0" onConclusion="none">Tractor-component.pkg</pkg-ref>
+</installer-gui-script>

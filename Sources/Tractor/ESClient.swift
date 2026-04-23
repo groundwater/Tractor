@@ -11,8 +11,8 @@ final class ESClient {
     private var client: OpaquePointer?
     private let tree: ProcessTree
     private let sink: EventSink
-    /// Patterns to auto-discover new agent processes
-    var agentPatterns: [String] = []
+    /// Patterns to auto-discover new matching processes
+    var tracePatterns: [String] = []
 
     init(tree: ProcessTree, sink: EventSink) {
         self.tree = tree
@@ -22,7 +22,7 @@ final class ESClient {
     func start() throws {
         let tree = self.tree
         let sink = self.sink
-        let patterns = self.agentPatterns
+        let patterns = self.tracePatterns
 
         let result = es_new_client(&client) { esClient, message in
             let proc = message.pointee.process

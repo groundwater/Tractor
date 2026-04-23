@@ -51,27 +51,12 @@ final class ProcessTree {
     }
 }
 
-// MARK: - Agent Discovery
+// MARK: - Process Discovery
 
-enum AgentKind: String, CaseIterable {
-    case claude
-    case codex
-
-    /// Substrings to match against executable paths
-    var processPatterns: [String] {
-        switch self {
-        case .claude:
-            return ["claude"]
-        case .codex:
-            return ["codex"]
-        }
-    }
-}
-
-/// Find running PIDs matching an agent kind
-func findAgentPIDs(_ kind: AgentKind) -> [pid_t] {
+/// Find running PIDs whose executable path or process name contains the given pattern (case-insensitive)
+func findProcessesByName(_ pattern: String) -> [pid_t] {
     var results: [pid_t] = []
-    let patterns = kind.processPatterns
+    let lowerPattern = pattern.lowercased()
 
     var pids = [pid_t](repeating: 0, count: 4096)
     let count = proc_listallpids(&pids, Int32(MemoryLayout<pid_t>.size * pids.count))
@@ -87,13 +72,13 @@ func findAgentPIDs(_ kind: AgentKind) -> [pid_t] {
         let pathLen = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
         if pathLen > 0 {
             let path = String(cString: pathBuf).lowercased()
-            matched = patterns.contains(where: { path.contains($0) })
+            matched = path.contains(lowerPattern)
         }
         if !matched {
             var nameBuf = [CChar](repeating: 0, count: 256)
             proc_name(pid, &nameBuf, UInt32(nameBuf.count))
             let name = String(cString: nameBuf).lowercased()
-            matched = !name.isEmpty && patterns.contains(where: { name.contains($0) })
+            matched = !name.isEmpty && name.contains(lowerPattern)
         }
         if matched {
             results.append(pid)

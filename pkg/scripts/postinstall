@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e
+mkdir -p /usr/local/bin
+ln -sf "/Library/Application Support/Tractor/Tractor.app/Contents/MacOS/Tractor" /usr/local/bin/tractor
+exit 0

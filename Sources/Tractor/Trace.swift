@@ -8,13 +8,24 @@ private var activeTUI: TUI?
 private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
 
+private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
+    activeInputSource?.cancel()
+    activeTUI?.stop()
+    activeESClient?.stop()
+    if !message.isEmpty {
+        fputs("\n\(message)\n", stderr)
+        fflush(stderr)
+    }
+    Foundation.exit(code)
+}
+
 struct Trace: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Trace an AI agent's full process tree and activity"
+        abstract: "Trace a process tree and its activity"
     )
 
-    @Option(name: .shortAndLong, help: "Agent to trace: claude, codex")
-    var agent: String?
+    @Option(name: .shortAndLong, help: "Process name to trace (substring match)")
+    var trace: String?
 
     @Option(name: .shortAndLong, help: "Specific PID to trace (including all descendants)")
     var pid: Int32?
@@ -23,8 +34,8 @@ struct Trace: ParsableCommand {
     var json: Bool = false
 
     func run() throws {
-        guard agent != nil || pid != nil else {
-            throw ValidationError("Provide --agent or --pid")
+        guard trace != nil || pid != nil else {
+            throw ValidationError("Provide --trace or --pid")
         }
 
         let tree = ProcessTree()
@@ -37,16 +48,13 @@ struct Trace: ParsableCommand {
             roots.append(pidVal)
         }
 
-        if let agentName = agent {
-            guard let kind = AgentKind(rawValue: agentName.lowercased()) else {
-                throw ValidationError("Unknown agent: \(agentName). Options: \(AgentKind.allCases.map(\.rawValue).joined(separator: ", "))")
-            }
-            agentLabel = agentName
-            let found = findAgentPIDs(kind)
+        if let traceName = trace {
+            agentLabel = traceName
+            let found = findProcessesByName(traceName)
             if found.isEmpty {
-                fputs("WARNING: No running \(agentName) processes found. Will watch for new ones.\n", stderr)
+                fputs("WARNING: No running \(traceName) processes found. Will watch for new ones.\n", stderr)
             } else {
-                fputs("Found \(found.count) \(agentName) process(es): \(found)\n", stderr)
+                fputs("Found \(found.count) \(traceName) process(es): \(found)\n", stderr)
                 roots.append(contentsOf: found)
             }
         }
@@ -60,18 +68,20 @@ struct Trace: ParsableCommand {
         }
 
         // Create sink: TUI or JSON
+        let primarySink: EventSink
         let sink: EventSink
         var tui: TUI?
 
         if json {
-            sink = EventOutput()
+            primarySink = EventOutput()
         } else {
             let t = TUI()
             t.excludeSelf()
             t.start(header: "Tractor - tracing \(agentLabel)")
             tui = t
-            sink = t
+            primarySink = t
         }
+        sink = primarySink
 
         // Seed the sink with already-running processes
         for trackedPid in expanded {
@@ -85,9 +95,9 @@ struct Trace: ParsableCommand {
 
         // Start ES client
         let esClient = ESClient(tree: tree, sink: sink)
-        // Set agent patterns for auto-discovery of new instances
-        if let agentName = agent, let kind = AgentKind(rawValue: agentName.lowercased()) {
-            esClient.agentPatterns = kind.processPatterns
+        // Set patterns for auto-discovery of new matching processes
+        if let traceName = trace {
+            esClient.tracePatterns = [traceName.lowercased()]
         }
 
         // Store refs for signal handler cleanup
@@ -95,10 +105,7 @@ struct Trace: ParsableCommand {
         activeESClient = esClient
 
         signal(SIGINT) { _ in
-            activeInputSource?.cancel()
-            activeTUI?.stop()
-            activeESClient?.stop()
-            Foundation.exit(0)
+            exitAfterRestoringTerminal(message: "", code: 0)
         }
 
         do {
@@ -231,10 +238,7 @@ struct Trace: ParsableCommand {
                     case 104: // 'h'
                         t.toggleViewMode()
                     case 113: // 'q'
-                        activeInputSource?.cancel()
-                        t.stop()
-                        esClient.stop()
-                        Foundation.exit(0)
+                        exitAfterRestoringTerminal(message: "", code: 0)
                     default:
                         break
                     }
