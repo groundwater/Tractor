@@ -44,6 +44,32 @@ targets:
       base:
         CODE_SIGN_IDENTITY: "-"
 
+  TractorNE:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: Sources/TractorNE
+    dependencies: []
+    info:
+      path: Sources/TractorNE/Info.plist
+      properties:
+        CFBundlePackageType: SYSX
+        LSMinimumSystemVersion: "15.0"
+        NetworkExtension:
+          NEProviderClasses:
+            com.apple.networkextension.transparent-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
+    settings:
+      base:
+        PRODUCT_NAME: com.jacobgroundwater.Tractor.NE
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor.NE
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: Sources/TractorNE/TractorNE.entitlements
+        INFOPLIST_FILE: Sources/TractorNE/Info.plist
+        SKIP_INSTALL: "YES"
+        WRAPPER_EXTENSION: systemextension
+        MACH_O_TYPE: mh_execute
+
   TractorApp:
     templates:
       - TractorCommon
@@ -51,6 +77,12 @@ targets:
     sources:
       - path: icon/Tractor.icns
         buildPhase: resources
+    dependencies:
+      - target: TractorNE
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
     info:
       path: Sources/Tractor/Info.plist
       properties:
