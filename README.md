@@ -33,6 +33,9 @@ sudo .build/Debug/Tractor trace --trace Terminal
 
 Open a new terminal tab and run some commands — you'll see them appear in Tractor's process tree. Press `?` for keyboard shortcuts, `q` to quit.
 
+> [!WARNING]
+> Tractor uses Apple's Endpoint Security framework, which requires SIP to be disabled for unsigned builds. See [Development Setup](#development-setup) for details.
+
 Requires Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and macOS 15+.
 
 ## Features
