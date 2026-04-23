@@ -6,35 +6,116 @@
 
 **Know what your AI agents are up to.**
 
-Tractor is a real-time process monitor for AI coding agents on macOS. It uses the Endpoint Security framework to trace an agent's process tree, file activity, and observed network connections, then presents the activity in an interactive ncurses TUI or as JSON lines.
+Tractor is a real-time process monitor for AI coding agents on macOS. It traces an agent's process tree, file activity, and network connections using the Endpoint Security framework, then presents everything in an interactive TUI.
+
+<p align="center">
+  <img src="screenshots/hero-process-tree.png" width="720" alt="Tractor tracing Claude Code — process tree with network connections and subprocess activity" />
+</p>
 
 ## Why?
 
 AI coding agents spawn dozens of subprocesses, write to files across your filesystem, and make network requests — all in seconds. Tractor gives you visibility into this activity with low overhead.
 
-- **Process tree** — see subprocesses an agent spawns, nested by parent-child relationship
+- **Process tree** — subprocesses nested by parent-child relationship
 - **File tracking** — watch which files are being written in real-time
-- **Network connections** — see observed connections, with per-connection byte counters when available
+- **Network connections** — observed connections with per-connection byte counters
 - **CPU profiling** — sample any process to see where it's spending time
 - **Wait diagnosis** — find out why a process is blocked
 
-## Install
+## Quick Start
 
 ```bash
 git clone https://github.com/groundwater/Tractor.git
 cd Tractor
 make debug
+sudo .build/Debug/Tractor trace --trace Terminal
 ```
+
+Open a new terminal tab and run some commands — you'll see them appear in Tractor's process tree. Press `?` for keyboard shortcuts, `q` to quit.
 
 Requires Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and macOS 15+.
 
-The debug binary is produced under `.build/Debug/Tractor`.
+## Features
 
-### Development Security Setup
+### Process Info, Files, and Network
 
-Tractor uses Apple's Endpoint Security framework. For local development with an unsigned or ad-hoc signed build, the most practical setup is a macOS VM with SIP disabled.
+Select a process and press `i` to inspect it, `d` to see file I/O, or `n` to see network connections. Or use the **Process** menu.
 
-**For development and testing, we recommend running Tractor inside a VM with SIP disabled.** This keeps your host machine secure while giving Tractor full access.
+<p align="center">
+  <img src="screenshots/detail-view.png" width="720" alt="Process info panel showing path, args, env, file writes, and network connections" />
+</p>
+
+<p align="center">
+  <img src="screenshots/process-menu.png" width="420" alt="Process menu with info, files, network, sample, wait, kill, and pause options" />
+</p>
+
+### CPU Sampling
+
+Press `s` to capture a CPU profile. Tractor runs `sample` under the hood and displays a bottom-up call tree. Configure duration, threshold, and depth before sampling.
+
+<p align="center">
+  <img src="screenshots/cpu-sample.png" width="720" alt="CPU sample results with bottom-up call tree and sample configuration modal" />
+</p>
+
+### Signal Delivery
+
+Press `k` to send a signal to the selected process.
+
+<p align="center">
+  <img src="screenshots/send-signal.png" width="320" alt="Send Signal modal with SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGKILL" />
+</p>
+
+## Usage
+
+```bash
+# Trace any process by name (substring match)
+sudo .build/Debug/Tractor trace --trace claude
+
+# Trace a specific PID and its descendants
+sudo .build/Debug/Tractor trace --pid 1234
+
+# JSON output for scripting
+sudo .build/Debug/Tractor trace --trace claude --json
+```
+
+### Keyboard
+
+Press `?` in the TUI to see all keybindings. The essentials:
+
+| Key | Action |
+|-----|--------|
+| `Up`/`Down` | Navigate process list |
+| `Right`/`Left` | Expand/collapse tree nodes |
+| `Enter` | Toggle disclosure |
+| `Space` | Pause/resume display |
+| `i` / `d` / `n` | Toggle info / files / network panels |
+| `s` | CPU sample |
+| `w` | Wait diagnosis |
+| `k` | Send signal |
+| `?` | Show all keybindings |
+| `q` | Quit |
+
+<details>
+<summary>Menu bar keys</summary>
+
+| Key | Menu |
+|-----|------|
+| `f` | **File** — Track, Export |
+| `e` | **Edit** — Clear, Filter, Find, Copy |
+| `p` | **Process** — Info, Files, Network, Sample, Wait, Kill, Pause |
+| `m` | **Sample** — Resample, Delete, Export |
+| `t` | **Network** — Reverse DNS and SNI status |
+| `y` | **FileSystem** — Read/write display toggles |
+| `v` | **View** — Show Exited, Expand/Collapse All, Columns |
+
+</details>
+
+## Development Setup
+
+Tractor uses Apple's Endpoint Security framework, which requires special entitlements. For local development with an unsigned build, the most practical setup is a macOS VM with SIP disabled.
+
+<details>
+<summary>VM setup instructions</summary>
 
 Using [GhostVM](https://github.com/groundwater/GhostVM) or any macOS VM:
 
@@ -47,63 +128,16 @@ csrutil disable
 sudo .build/Debug/Tractor trace --trace Terminal
 ```
 
-> **Note:** Disabling SIP on your primary machine is not recommended for daily use. SIP protects your system from unauthorized modifications. Use a VM for development and testing.
+> **Note:** Disabling SIP on your primary machine is not recommended. Use a VM for development.
 
-On a production machine, the Endpoint Security entitlement is a restricted entitlement that must be authorized by a provisioning profile. For distribution, use an app-like bundle or system extension host so the profile can be embedded, sign with Developer ID and hardened runtime, notarize the distribution artifact, and grant Full Disk Access in System Settings.
+</details>
 
-## Usage
+<details>
+<summary>Production distribution</summary>
 
-```bash
-# Trace any process by name (substring match)
-sudo .build/Debug/Tractor trace --trace claude
+The Endpoint Security entitlement is restricted and must be authorized by a provisioning profile. For distribution: use an app-like bundle or system extension host so the profile can be embedded, sign with Developer ID and hardened runtime, notarize the artifact, and grant Full Disk Access in System Settings.
 
-# Trace Terminal and all its child processes
-sudo .build/Debug/Tractor trace --trace Terminal
-
-# Trace a specific PID and its descendants
-sudo .build/Debug/Tractor trace --pid 1234
-
-# JSON output for scripting
-sudo .build/Debug/Tractor trace --trace claude --json
-```
-
-### Keyboard
-
-| Key | Action |
-|-----|--------|
-| `↑`/`↓` | Navigate process list |
-| `→`/`←` | Expand/collapse (Finder-style) |
-| `Enter` | Toggle disclosure |
-| `Esc` | Clear selection |
-| `Space` | Pause/resume display |
-| `h` | Toggle tree/flat view |
-| `?` | Toggle hints |
-| `q` | Quit |
-
-#### Menus
-
-| Key | Menu |
-|-----|------|
-| `f` | **File** — Track, Export placeholder |
-| `e` | **Edit** — Clear; Filter, Find, Copy placeholders |
-| `p` | **Process** — Info, Files, Network, Sample, Wait, Kill, Pause |
-| `m` | **Sample** — Resample, Delete, Export placeholder |
-| `t` | **Network** — Reverse DNS and SNI status |
-| `y` | **FileSystem** — Read/write display toggles |
-| `v` | **View** — Show Exited, Expand/Collapse All, Columns placeholder |
-
-#### Process Actions
-
-| Key | Action |
-|-----|--------|
-| `i` | Toggle process info (path, args, env, resources) |
-| `d` | Toggle file I/O panel |
-| `n` | Toggle network connections panel |
-| `s` | Sample CPU profile (3 seconds, bottom-up call tree) |
-| `w` | Diagnose wait — show what threads are blocked on |
-| `k` | Kill — pick a signal from the modal |
-| `z` | Pause/resume process (SIGSTOP/SIGCONT) |
-| `l` | Clear exited processes |
+</details>
 
 ## Architecture
 
@@ -117,7 +151,7 @@ Tractor is built on several macOS subsystems:
 
 ### How It Works
 
-1. Tractor registers an ES client with `AUTH_EXEC` to observe and promptly allow new process creation. This helps capture short-lived child processes.
+1. Tractor registers an ES client with `AUTH_EXEC` to observe and promptly allow new process creation. This captures short-lived child processes.
 2. The process tree is built from parent-child relationships. New agent instances are auto-discovered by matching executable names.
 3. File writes are tracked via `NOTIFY_WRITE`, `NOTIFY_CLOSE` (modified), and `NOTIFY_RENAME` (for atomic saves).
 4. Network connections are enumerated via the private `NetworkStatistics.framework`, giving per-connection TX/RX byte counters.
@@ -128,24 +162,18 @@ Tractor is built on several macOS subsystems:
 The `--json` flag outputs newline-delimited JSON events to stdout:
 
 ```json
-{"type":"exec","pid":1234,"ppid":1813,"process":"/usr/bin/grep","timestamp":"2026-04-22T08:00:00.000Z","user":501,"details":{"argv":"grep -r foo"}}
-{"type":"write","pid":1813,"ppid":1753,"process":"claude","timestamp":"2026-04-22T08:00:01.000Z","user":501,"details":{"path":"/Users/you/project/src/main.ts"}}
-{"type":"exit","pid":1234,"ppid":1813,"process":"/usr/bin/grep","timestamp":"2026-04-22T08:00:02.000Z","user":501,"details":{}}
+{"type":"exec","pid":1234,"ppid":1813,"process":"/usr/bin/grep","timestamp":"...","user":501,"details":{"argv":"grep -r foo"}}
+{"type":"write","pid":1813,"ppid":1753,"process":"claude","timestamp":"...","user":501,"details":{"path":"/Users/you/project/src/main.ts"}}
+{"type":"exit","pid":1234,"ppid":1813,"process":"/usr/bin/grep","timestamp":"...","user":501,"details":{}}
 ```
 
 ## Roadmap
 
-- [ ] **TLS interception** — decrypt and display API request/response content using DYLD injection or Network Extension
-- [ ] **JS stack frames** — resolve V8/Bun JIT frames via Node.js inspector protocol (`SIGUSR1` activation)
-- [ ] **Crash detection** — parse `.ips` crash reports, show crash dump inline with faulting thread backtrace
-- [ ] **Flamegraph export** — generate SVG flamegraphs from sample data, open in browser
-- [ ] **Session recording/replay** — save all ES events to a file, replay the TUI from a recording
-- [ ] **Cost estimation** — estimate API costs from network traffic byte counts
-- [ ] **Multi-agent comparison** — trace two agents side-by-side, compare resource usage
-- [ ] **Column configuration** — show/hide and reorder columns via View menu
-- [ ] **Filter/search** — filter process list by name, PID, or status
-- [ ] **Network Extension** — proper system extension for per-connection byte counters without private API
-- [ ] **Alerting** — configurable alerts for unexpected file writes, network connections, or process spawns
+- [ ] TLS interception — decrypt and display API request/response content
+- [ ] JS stack frames — resolve V8/Bun JIT frames via Node.js inspector protocol
+- [ ] Crash detection — parse `.ips` crash reports, show crash dump inline
+- [ ] Session recording/replay — save ES events to a file, replay the TUI
+- [ ] Cost estimation — estimate API costs from network traffic byte counts
 
 ## License
 
