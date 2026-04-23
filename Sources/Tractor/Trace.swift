@@ -8,12 +8,20 @@ private var activeTUI: TUI?
 private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
 private var activeSQLiteLog: SQLiteLog?
+private var activeProxyManager: ProxyManager?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
     activeESClient?.stop()
     activeSQLiteLog?.close()
+    // Synchronously disable proxy on exit
+    if let pm = activeProxyManager {
+        let sem = DispatchSemaphore(value: 0)
+        pm.disableProxy { _ in sem.signal() }
+        _ = sem.wait(timeout: .now() + 3)
+        activeProxyManager = nil
+    }
     if !message.isEmpty {
         fputs("\n\(message)\n", stderr)
         fflush(stderr)
@@ -46,6 +54,9 @@ struct Trace: ParsableCommand {
 
     @Option(name: .long, help: "Path to SQLite database file (implies --log)")
     var logFile: String?
+
+    @Flag(name: .long, help: "Activate network extension to intercept all TCP/UDP flows")
+    var net: Bool = false
 
     func run() throws {
         guard !name.isEmpty || !pid.isEmpty || !path.isEmpty else {
@@ -186,6 +197,20 @@ struct Trace: ParsableCommand {
 
         if json {
             fputs("Tractor: tracing started. JSON output on stdout.\n", stderr)
+        }
+
+        // Activate network extension if requested
+        if net {
+            let pm = ProxyManager()
+            activeProxyManager = pm
+            fputs("Tractor: activating network extension...\n", stderr)
+            pm.activate { error in
+                if let error = error {
+                    fputs("Tractor: network extension error: \(error)\n", stderr)
+                } else {
+                    fputs("Tractor: network extension active — intercepting all flows\n", stderr)
+                }
+            }
         }
 
         // In TUI mode, also check for 'q' keypress to quit

@@ -30,6 +30,10 @@ targetTemplates:
           - "-lbsm"
           - "-lpcap"
           - "-lsqlite3"
+          - "-framework"
+          - "NetworkExtension"
+          - "-framework"
+          - "SystemExtensions"
     entitlements:
       path: Sources/Tractor/Tractor.entitlements
       properties:
