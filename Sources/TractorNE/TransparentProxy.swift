@@ -4,22 +4,49 @@ import NetworkExtension
 /// Transparent proxy provider that intercepts all TCP/UDP flows.
 /// When active, the OS routes every network connection through handleNewFlow().
 class TransparentProxy: NETransparentProxyProvider {
+    private var xpcConnection: NSXPCConnection?
+    private var xpcProxy: TractorXPCProtocol?
 
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
-        NSLog("TractorNE: proxy started")
+        NSLog("TractorNE: proxy started, connecting to CLI via XPC")
+        connectXPC()
         completionHandler(nil)
     }
 
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         NSLog("TractorNE: proxy stopped, reason: \(reason)")
+        xpcConnection?.invalidate()
+        xpcConnection = nil
+        xpcProxy = nil
         completionHandler()
+    }
+
+    private func connectXPC() {
+        let connection = NSXPCConnection(machServiceName: tractorXPCServiceName, options: [])
+        connection.remoteObjectInterface = NSXPCInterface(with: TractorXPCProtocol.self)
+        connection.invalidationHandler = { [weak self] in
+            NSLog("TractorNE: XPC connection invalidated, will reconnect on next flow")
+            self?.xpcProxy = nil
+            self?.xpcConnection = nil
+        }
+        connection.resume()
+        xpcConnection = connection
+        xpcProxy = connection.remoteObjectProxyWithErrorHandler { error in
+            NSLog("TractorNE: XPC proxy error: \(error)")
+        } as? TractorXPCProtocol
     }
 
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         if let tcp = flow as? NEAppProxyTCPFlow {
             let remote = tcp.remoteEndpoint as? NWHostEndpoint
             let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
-            NSLog("TractorNE: TCP flow pid=\(pid) -> \(remote?.hostname ?? "?"):\(remote?.port ?? "0")")
+            let host = remote?.hostname ?? "?"
+            let port = remote?.port ?? "0"
+
+            // Report to CLI via XPC
+            if xpcProxy == nil { connectXPC() }
+            xpcProxy?.reportFlow(pid: pid, process: "", remoteHost: host,
+                                 remotePort: port, proto: "tcp", bytesIn: 0, bytesOut: 0)
 
             // Pass-through: open connection to remote and relay bytes
             let endpoint = remote ?? NWHostEndpoint(hostname: "127.0.0.1", port: "0")
@@ -37,7 +64,11 @@ class TransparentProxy: NETransparentProxyProvider {
 
         if let udp = flow as? NEAppProxyUDPFlow {
             let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
-            NSLog("TractorNE: UDP flow pid=\(pid)")
+
+            // Report to CLI via XPC
+            if xpcProxy == nil { connectXPC() }
+            xpcProxy?.reportFlow(pid: pid, process: "", remoteHost: "",
+                                 remotePort: "0", proto: "udp", bytesIn: 0, bytesOut: 0)
 
             let endpoint = NWHostEndpoint(hostname: "0.0.0.0", port: "0")
             udp.open(withLocalEndpoint: endpoint) { error in

@@ -9,6 +9,7 @@ private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
 private var activeSQLiteLog: SQLiteLog?
 private var activeProxyManager: ProxyManager?
+private var activeXPCListener: XPCFlowListener?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
@@ -201,6 +202,11 @@ struct Trace: ParsableCommand {
 
         // Activate network extension if requested
         if net {
+            // Start XPC listener first so the sysext can connect immediately
+            let xpcListener = XPCFlowListener(sink: sink)
+            activeXPCListener = xpcListener
+            xpcListener.start()
+
             let pm = ProxyManager()
             activeProxyManager = pm
             fputs("Tractor: activating network extension...\n", stderr)
