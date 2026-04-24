@@ -207,6 +207,16 @@ struct Trace: ParsableCommand {
             activeFlowListener = flowListener
             flowListener.start()
 
+            // Push initial PID list from the tree
+            flowListener.updateWatchList(tree.snapshot)
+
+            // When ES is about to allow a new tracked process, push the
+            // updated PID list to the sysext BEFORE the process can run.
+            esClient.onBeforeAllow = { [weak flowListener, weak tree] pid in
+                guard let fl = flowListener, let t = tree else { return }
+                fl.updateWatchList(t.snapshot)
+            }
+
             let pm = ProxyManager()
             activeProxyManager = pm
             fputs("Tractor: activating network extension...\n", stderr)

@@ -18,6 +18,11 @@ final class ESClient {
     /// Lock for dynamic pattern updates
     private let patternLock = NSLock()
 
+    /// Called after a tracked PID is added to the tree but before allowing execution.
+    /// Use this to push the PID to the network extension so it's watched before
+    /// the process can make any network connections.
+    var onBeforeAllow: ((pid_t) -> Void)?
+
     init(tree: ProcessTree, sink: EventSink) {
         self.tree = tree
         self.sink = sink
@@ -76,6 +81,12 @@ final class ESClient {
                             tui.matchProcessToGroups(pid: targetInfo.pid, name: name, path: path)
                         }
                     }
+                }
+
+                // Notify network extension before allowing, so the PID is
+                // watched before the process can make any connections.
+                if tracked, let hook = self?.onBeforeAllow {
+                    hook(targetInfo.pid)
                 }
 
                 // Always allow — we're observing, not blocking

@@ -1,22 +1,25 @@
 import Foundation
 
-/// Well-known socket path for sysext → CLI flow events.
+/// Well-known socket path for sysext ↔ CLI communication.
 let tractorSocketPath = "/tmp/tractor-flow.sock"
 
-/// Listens on a Unix domain socket for flow events from the TractorNE sysext.
-/// Each connected client sends newline-delimited JSON. Events are forwarded to the EventSink.
+/// Bidirectional Unix domain socket bridge to the TractorNE sysext.
+///
+/// - CLI → Sysext: `{"watch": [pid1, pid2, ...]}` — set the PID filter
+/// - Sysext → CLI: `{"flow": {...}}` — report an intercepted flow
 final class FlowSocketListener {
     private let sink: EventSink
     private var listenSocket: Int32 = -1
     private var listenSource: DispatchSourceRead?
-    private var clients: [Int32: DispatchSourceRead] = [:]
+    private var clientFds: [Int32] = []
+    private var clientSources: [Int32: DispatchSourceRead] = [:]
+    private var lastWatchMessage: Data?  // cached so new connections get current state
 
     init(sink: EventSink) {
         self.sink = sink
     }
 
     func start() {
-        // Remove stale socket
         unlink(tractorSocketPath)
 
         listenSocket = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -29,12 +32,11 @@ final class FlowSocketListener {
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = tractorSocketPath.utf8CString
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            let bound = ptr.withMemoryRebound(to: CChar.self, capacity: 104) { dst in
+            ptr.withMemoryRebound(to: CChar.self, capacity: 104) { dst in
                 pathBytes.withUnsafeBufferPointer { src in
                     memcpy(dst, src.baseAddress!, min(src.count, 104))
                 }
             }
-            _ = bound
         }
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
@@ -48,7 +50,6 @@ final class FlowSocketListener {
             return
         }
 
-        // Make socket world-writable so the sysext (running as root) can connect
         chmod(tractorSocketPath, 0o777)
 
         guard Darwin.listen(listenSocket, 5) == 0 else {
@@ -57,7 +58,6 @@ final class FlowSocketListener {
             return
         }
 
-        // Set non-blocking
         fcntl(listenSocket, F_SETFL, O_NONBLOCK)
 
         let source = DispatchSource.makeReadSource(fileDescriptor: listenSocket, queue: .main)
@@ -65,9 +65,7 @@ final class FlowSocketListener {
             self?.acceptClient()
         }
         source.setCancelHandler { [weak self] in
-            if let fd = self?.listenSocket, fd >= 0 {
-                close(fd)
-            }
+            if let fd = self?.listenSocket, fd >= 0 { close(fd) }
         }
         listenSource = source
         source.resume()
@@ -78,12 +76,35 @@ final class FlowSocketListener {
     func stop() {
         listenSource?.cancel()
         listenSource = nil
-        for (fd, source) in clients {
+        for (fd, source) in clientSources {
             source.cancel()
             close(fd)
         }
-        clients.removeAll()
+        clientFds.removeAll()
+        clientSources.removeAll()
         unlink(tractorSocketPath)
+    }
+
+    /// Push updated PID watch list to all connected sysext clients.
+    func updateWatchList(_ pids: Set<pid_t>) {
+        let pidArray = pids.map { Int($0) }
+        guard let data = try? JSONSerialization.data(withJSONObject: ["watch": pidArray]),
+              var msg = String(data: data, encoding: .utf8) else { return }
+        msg += "\n"
+        let msgData = Data(msg.utf8)
+        lastWatchMessage = msgData
+
+        for fd in clientFds {
+            sendToClient(fd, data: msgData)
+        }
+    }
+
+    // MARK: - Private
+
+    private func sendToClient(_ fd: Int32, data: Data) {
+        data.withUnsafeBytes { buf in
+            _ = write(fd, buf.baseAddress!, buf.count)
+        }
     }
 
     private func acceptClient() {
@@ -91,7 +112,13 @@ final class FlowSocketListener {
         guard clientFd >= 0 else { return }
 
         fcntl(clientFd, F_SETFL, O_NONBLOCK)
+        clientFds.append(clientFd)
         fputs("Tractor: sysext connected (fd=\(clientFd))\n", stderr)
+
+        // Send current watch list immediately
+        if let msg = lastWatchMessage {
+            sendToClient(clientFd, data: msg)
+        }
 
         var buffer = Data()
 
@@ -100,16 +127,15 @@ final class FlowSocketListener {
             var buf = [UInt8](repeating: 0, count: 8192)
             let n = read(clientFd, &buf, buf.count)
             if n <= 0 {
-                // EOF or error
                 source.cancel()
                 close(clientFd)
-                self?.clients.removeValue(forKey: clientFd)
+                self?.clientFds.removeAll { $0 == clientFd }
+                self?.clientSources.removeValue(forKey: clientFd)
                 fputs("Tractor: sysext disconnected (fd=\(clientFd))\n", stderr)
                 return
             }
             buffer.append(contentsOf: buf[..<n])
 
-            // Process complete lines
             while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
                 let line = buffer[buffer.startIndex..<newline]
                 buffer = Data(buffer[buffer.index(after: newline)...])
@@ -119,7 +145,7 @@ final class FlowSocketListener {
         source.setCancelHandler {
             close(clientFd)
         }
-        clients[clientFd] = source
+        clientSources[clientFd] = source
         source.resume()
     }
 
@@ -130,7 +156,6 @@ final class FlowSocketListener {
         let process = json["process"] as? String ?? ""
         let host = json["host"] as? String ?? ""
         let port = UInt16(json["port"] as? String ?? "0") ?? 0
-        let proto = json["proto"] as? String ?? ""
 
         sink.onConnect(pid: pid, ppid: 0, process: process, user: 0,
                        remoteAddr: host, remotePort: port)
