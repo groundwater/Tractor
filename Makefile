@@ -36,7 +36,7 @@ pkg: release
 	@echo ""
 	@echo "Package: $(PKG_OUT)"
 
-# Install: copy .app bundle to /Library/Application Support/Tractor and symlink the executable
+# Install: build .app bundle and install to /Applications
 install: release
 	sudo rm -rf "$(INSTALL_APP)"
 	sudo cp -R "$(BUILD_DIR)/Release/Tractor.app" "$(INSTALL_APP)"
