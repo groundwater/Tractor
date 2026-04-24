@@ -9,6 +9,7 @@ final class ProxyManager: NSObject {
 
     private var activationCompletion: ((Error?) -> Void)?
     private var deactivationCompletion: ((Error?) -> Void)?
+    private var skipEnableOnActivation = false
 
     /// Optional callback for status messages (routed to TUI or stderr depending on mode)
     var onStatus: ((String) -> Void)?
@@ -26,8 +27,10 @@ final class ProxyManager: NSObject {
         enableProxy { [weak self] error in
             if error == nil {
                 completion(nil)
-                // Update sysext binary in background
-                self?.activationCompletion = { _ in }
+                // Update sysext binary in background — skip enableProxy on success
+                // since the tunnel is already running
+                self?.activationCompletion = { _ in /* already running */ }
+                self?.skipEnableOnActivation = true
                 let request = OSSystemExtensionRequest.activationRequest(
                     forExtensionWithIdentifier: Self.sysextBundleID,
                     queue: .main
@@ -144,6 +147,13 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        if skipEnableOnActivation {
+            // Background update — tunnel is already running, don't re-enable
+            skipEnableOnActivation = false
+            activationCompletion?(nil)
+            activationCompletion = nil
+            return
+        }
         retryEnableProxy(attemptsLeft: 5)
     }
 
