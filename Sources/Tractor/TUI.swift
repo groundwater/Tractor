@@ -2798,7 +2798,7 @@ final class TUI: EventSink {
                     let autoIndicator = row.netAuto ? "~ " : ""
                     lock.unlock()
                     let triIndent = depthIndent + 2
-                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2193}\(formatBytes(totalRx)) \u{2191}\(formatBytes(totalTx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3428,7 +3428,11 @@ final class TUI: EventSink {
             displayRows.append(.netHeader(row.pid))
             if row.netDisclosed {
                 let conns = row.sortedConnections
-                for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
+                for conn in conns {
+                    if showAllConnections || conn.stats.alive {
+                        displayRows.append(.netDetail(row.pid, conn.key))
+                    }
+                }
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
         }
