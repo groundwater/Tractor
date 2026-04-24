@@ -6,6 +6,8 @@ private let log = OSLog(subsystem: "com.jacobgroundwater.Tractor.NE", category: 
 
 class TransparentProxy: NETransparentProxyProvider {
     private let reporter = FlowReporter()
+    private var activeBridges: [ObjectIdentifier: TCPBridge] = [:]
+    private let bridgeLock = NSLock()
 
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         os_log("startProxy called", log: log, type: .default)
@@ -35,9 +37,45 @@ class TransparentProxy: NETransparentProxyProvider {
         let host = remote?.hostname ?? "?"
         let port = remote?.port ?? "0"
 
-        // Trace-only: report metadata, let OS handle the connection
+        guard let portNum = UInt16(port), portNum > 0 else { return false }
+
         reporter.reportFlow(pid: pid, process: "", host: host, port: port, proto: "tcp")
-        return false
+
+        // Create a TCP connection that bypasses the proxy
+        let endpoint = NWHostEndpoint(hostname: host, port: port)
+        let remoteConnection = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
+
+        class BridgeBox { var bridge: TCPBridge? }
+        let box = BridgeBox()
+
+        let bridge = TCPBridge(flow: tcp, connection: remoteConnection) { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+            if let self = self, let b = box.bridge {
+                self.bridgeLock.lock()
+                self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
+                self.bridgeLock.unlock()
+            }
+        }
+        box.bridge = bridge
+
+        bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+        }
+
+        bridgeLock.lock()
+        activeBridges[ObjectIdentifier(bridge)] = bridge
+        bridgeLock.unlock()
+
+        tcp.open(withLocalFlowEndpoint: nil) { error in
+            if let error = error {
+                os_log("flow open error: %{public}@", log: log, type: .error, error.localizedDescription)
+                tcp.closeReadWithError(error)
+                tcp.closeWriteWithError(error)
+                return
+            }
+            bridge.start()
+        }
+        return true
     }
 
     func updateNetworkRules(hasWatchedPids: Bool) {

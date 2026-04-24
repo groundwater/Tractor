@@ -260,9 +260,10 @@ final class ProcessRow {
             .sorted { $0.1.lastWrite > $1.1.lastWrite }
     }
 
-    /// All connections, alive first
+    /// All connections, alive first. Thread-safe snapshot.
     var sortedConnections: [(key: String, stats: ConnectionStats)] {
-        connections.map { ($0.key, $0.value) }
+        let snapshot = connections
+        return snapshot.map { ($0.key, $0.value) }
             .sorted { ($0.1.alive ? 0 : 1, -$0.1.count) < ($1.1.alive ? 0 : 1, -$1.1.count) }
     }
 
@@ -3368,7 +3369,9 @@ final class TUI: EventSink {
             displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.netHeader(row.pid))
             if row.netDisclosed {
+                lock.lock()
                 let conns = row.sortedConnections
+                lock.unlock()
                 for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
