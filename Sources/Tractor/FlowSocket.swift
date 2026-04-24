@@ -59,7 +59,9 @@ final class FlowXPCClient {
 
     private func pollEvents() {
         proxy?.pollEvents { [weak self] data in
-            self?.handleEvents(data)
+            DispatchQueue.main.async {
+                self?.handleEvents(data)
+            }
         }
     }
 

@@ -78,6 +78,7 @@ struct ConnectionStats {
     var alive: Bool = true
     var rxBytes: UInt64 = 0
     var txBytes: UInt64 = 0
+    var closedAt: Date?
 
     var label: String {
         let host = hostname ?? remoteAddr
@@ -230,6 +231,11 @@ final class ProcessRow {
 
     /// Per-connection stats: "addr:port" -> ConnectionStats
     var connections: [String: ConnectionStats] = [:]
+
+    /// Lifetime network byte totals (survives connection pruning)
+    var lifetimeRxBytes: UInt64 = 0
+    var lifetimeTxBytes: UInt64 = 0
+    var lifetimeConnCount: Int = 0
 
     /// Disk I/O totals from proc_pid_rusage
     var diskBytesRead: UInt64 = 0
@@ -2169,10 +2175,13 @@ final class TUI: EventSink {
         let key = "\(remoteAddr):\(remotePort)"
         if var existing = row.connections[key] {
             existing.count += 1
+            existing.alive = true
+            existing.closedAt = nil
             row.connections[key] = existing
         } else {
             row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
         }
+        row.lifetimeConnCount += 1
 
         // Auto-expand network panel on connect
         if autoExpandEnabled && expandCriteria.netConnect {
@@ -2216,6 +2225,9 @@ final class TUI: EventSink {
             conn.txBytes = txBytes
             conn.rxBytes = rxBytes
             row.connections[key] = conn
+            // Update lifetime totals with the delta
+            row.lifetimeRxBytes += rxBytes - hadRx
+            row.lifetimeTxBytes += txBytes - hadTx
             // Auto-expand on byte activity
             if autoExpandEnabled {
                 if rxBytes > hadRx && expandCriteria.netRead { autoExpand(pid, panel: .net) }
@@ -2260,13 +2272,22 @@ final class TUI: EventSink {
         for pid in pids {
             lock.lock()
             if let row = rows[pid] {
-                let dead = row.connections.filter { !$0.value.alive }
-                if dead.count > 3 {
-                    let toRemove = dead.sorted { $0.value.txBytes < $1.value.txBytes }
-                        .prefix(dead.count - 3)
-                    for (key, _) in toRemove {
-                        row.connections.removeValue(forKey: key)
+                // Mark dead connections with a timestamp, prune after 5s
+                let now = Date()
+                for (key, var conn) in row.connections {
+                    if !conn.alive && conn.closedAt == nil {
+                        conn.closedAt = now
+                        row.connections[key] = conn
                     }
+                }
+                let stale = row.connections.filter {
+                    if let closed = $0.value.closedAt {
+                        return now.timeIntervalSince(closed) > 5
+                    }
+                    return false
+                }
+                for (key, _) in stale {
+                    row.connections.removeValue(forKey: key)
                 }
                 if row.files.count > 200 {
                     let sorted = row.files.sorted { $0.value.lastWrite < $1.value.lastWrite }
@@ -2744,9 +2765,9 @@ final class TUI: EventSink {
 
             case .netHeader(let pid):
                 if let row = rows[pid] {
-                    let connCount = row.connections.count
-                    let totalRx = row.connections.values.reduce(0 as UInt64) { $0 + $1.rxBytes }
-                    let totalTx = row.connections.values.reduce(0 as UInt64) { $0 + $1.txBytes }
+                    let connCount = row.lifetimeConnCount
+                    let totalRx = row.lifetimeRxBytes
+                    let totalTx = row.lifetimeTxBytes
                     let disc = row.netDisclosed ? "\u{25BC}" : "\u{25B6}"
                     let autoIndicator = row.netAuto ? "~ " : ""
                     lock.unlock()
@@ -3369,9 +3390,7 @@ final class TUI: EventSink {
             displayRows.append(.infoBorderTop(row.pid, depth))
             displayRows.append(.netHeader(row.pid))
             if row.netDisclosed {
-                lock.lock()
                 let conns = row.sortedConnections
-                lock.unlock()
                 for conn in conns { displayRows.append(.netDetail(row.pid, conn.key)) }
             }
             displayRows.append(.infoBorderBottom(row.pid, depth))
