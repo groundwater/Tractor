@@ -203,6 +203,9 @@ struct Trace: ParsableCommand {
                     t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
                                             txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn))
                 }
+                flowClient.onConnectionClosed = { pid, host, port in
+                    t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port)
+                }
             }
 
             flowClient.updateWatchList(tree.snapshot)

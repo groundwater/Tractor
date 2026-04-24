@@ -49,7 +49,7 @@ class TransparentProxy: NETransparentProxyProvider {
         let box = BridgeBox()
 
         let bridge = TCPBridge(flow: tcp, connection: remoteConnection) { [weak self] bytesOut, bytesIn in
-            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true)
             if let self = self, let b = box.bridge {
                 self.bridgeLock.lock()
                 self.activeBridges.removeValue(forKey: ObjectIdentifier(b))

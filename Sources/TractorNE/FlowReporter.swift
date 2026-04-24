@@ -102,8 +102,9 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         bufferLock.unlock()
     }
 
-    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64) {
-        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "bytesOut": bytesOut, "bytesIn": bytesIn]
+    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64, closed: Bool = false) {
+        var event: [String: Any] = ["pid": pid, "host": host, "port": port, "bytesOut": bytesOut, "bytesIn": bytesIn]
+        if closed { event["closed"] = true }
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()

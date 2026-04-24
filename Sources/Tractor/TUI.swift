@@ -2222,6 +2222,19 @@ final class TUI: EventSink {
         recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
     }
 
+    /// Mark a connection as closed
+    func markConnectionClosed(pid: pid_t, remoteAddr: String, remotePort: UInt16) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[pid] else { return }
+        let key = "\(remoteAddr):\(remotePort)"
+        if var conn = row.connections[key] {
+            conn.alive = false
+            conn.closedAt = Date()
+            row.connections[key] = conn
+        }
+    }
+
     /// Update byte counts for a connection (called from NE flow reports — live and final)
     func updateConnectionBytes(pid: pid_t, remoteAddr: String, remotePort: UInt16, txBytes: UInt64, rxBytes: UInt64) {
         lock.lock()

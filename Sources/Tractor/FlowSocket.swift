@@ -16,6 +16,7 @@ final class FlowXPCClient {
     private var pollTimer: DispatchSourceTimer?
 
     var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?
+    var onConnectionClosed: ((pid_t, String, UInt16) -> Void)?
 
     init(sink: EventSink) {
         self.sink = sink
@@ -76,6 +77,9 @@ final class FlowXPCClient {
             if let bytesOut = event["bytesOut"] as? Int64,
                let bytesIn = event["bytesIn"] as? Int64 {
                 onBytesUpdate?(pid, host, port, bytesOut, bytesIn)
+                if event["closed"] as? Bool == true {
+                    onConnectionClosed?(pid, host, port)
+                }
                 continue
             }
 
