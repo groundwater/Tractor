@@ -11,19 +11,27 @@ final class ProxyManager: NSObject {
     private var deactivationCompletion: ((Error?) -> Void)?
 
     /// Install and activate the system extension + transparent proxy.
-    /// Tries to enable the proxy directly first (fast path). Falls back to
-    /// full sysext activation only if needed.
+    /// Starts the proxy tunnel immediately (fast path), then submits
+    /// the sysext activation in the background to update the binary.
     func activate(completion: @escaping (Error?) -> Void) {
-        fputs("Tractor: trying fast proxy start...\n", stderr)
+        // Start the tunnel immediately — the existing sysext handles it
         enableProxy { [weak self] error in
-            if error == nil {
-                // Proxy started without re-activating the sysext
-                completion(nil)
+            if let error = error {
+                // No existing config — need full activation first
+                fputs("Tractor: no existing proxy config, activating sysext...\n", stderr)
+                self?.activationCompletion = completion
+                let request = OSSystemExtensionRequest.activationRequest(
+                    forExtensionWithIdentifier: Self.sysextBundleID,
+                    queue: .main
+                )
+                request.delegate = self
+                OSSystemExtensionManager.shared.submitRequest(request)
                 return
             }
-            // Fast path failed — do the full sysext activation
-            fputs("Tractor: fast start failed, activating sysext...\n", stderr)
-            self?.activationCompletion = completion
+            completion(nil)
+
+            // Update the sysext binary in the background (non-blocking)
+            self?.activationCompletion = { _ in /* ignore background result */ }
             let request = OSSystemExtensionRequest.activationRequest(
                 forExtensionWithIdentifier: Self.sysextBundleID,
                 queue: .main
