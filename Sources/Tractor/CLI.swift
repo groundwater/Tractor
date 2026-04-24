@@ -23,16 +23,12 @@ struct Activate: ParsableCommand {
                 fputs("Error: \(error)\n", stderr)
                 Foundation.exit(1)
             }
-            fputs("Network extension running. Press Ctrl-C to stop.\n", stderr)
+            fputs("Network extension activated.\n", stderr)
+            // Give the tunnel a moment to fully connect before exiting
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                Foundation.exit(0)
+            }
         }
-        // Stay alive — the tunnel needs this process to remain running
-        signal(SIGINT, SIG_IGN)
-        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        sigintSource.setEventHandler {
-            fputs("\nStopped. Extension stays running.\n", stderr)
-            Foundation.exit(0)
-        }
-        sigintSource.resume()
         dispatchMain()
     }
 }
