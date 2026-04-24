@@ -13,9 +13,9 @@
 	<key>CFBundlePackageType</key>
 	<string>SYSX</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.5.0</string>
+	<string>0.6.0</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>6</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSSystemExtensionUsageDescription</key>
@@ -23,7 +23,7 @@
 	<key>NetworkExtension</key>
 	<dict>
 		<key>NEMachServiceName</key>
-		<string>group.com.jacobgroundwater.Tractor.xpc</string>
+		<string>3FGZQE8AW3.group.com.jacobgroundwater.Tractor.xpc</string>
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.app-proxy</key>

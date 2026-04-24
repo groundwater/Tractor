@@ -12,20 +12,10 @@ class TransparentProxy: NETransparentProxyProvider {
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         os_log("startProxy called", log: log, type: .default)
         reporter.connect()
-
-        let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
-        let tcpRule = NENetworkRule(remoteNetwork: nil, remotePrefix: 0, localNetwork: nil, localPrefix: 0, protocol: .TCP, direction: .outbound)
-        settings.includedNetworkRules = [tcpRule]
-
-        setTunnelNetworkSettings(settings) { error in
-            if let error = error {
-                os_log("setTunnelNetworkSettings failed: %{public}@", log: log, type: .error, error.localizedDescription)
-                completionHandler(error)
-                return
-            }
-            os_log("proxy ready", log: log, type: .default)
-            completionHandler(nil)
-        }
+        // No network rules yet — don't intercept anything.
+        // Rules are set by updateNetworkRules when CLI sends a watch list.
+        os_log("proxy ready — no interception until CLI connects", log: log, type: .default)
+        completionHandler(nil)
     }
 
     /// Called when watch list changes — enable TCP interception if PIDs are watched

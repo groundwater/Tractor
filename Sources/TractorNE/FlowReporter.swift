@@ -2,7 +2,7 @@ import Foundation
 import os.log
 
 private let xpcLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.NE", category: "xpc")
-private let xpcServiceName = "group.com.jacobgroundwater.Tractor.xpc"
+private let xpcServiceName = "3FGZQE8AW3.group.com.jacobgroundwater.Tractor.xpc"
 
 /// XPC protocol: CLI calls these methods on the sysext
 @objc protocol TractorNEXPC {
