@@ -16,13 +16,12 @@ private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeTUI?.stop()
     activeESClient?.stop()
     activeSQLiteLog?.close()
-    // Synchronously disable proxy on exit
-    if let pm = activeProxyManager {
-        let sem = DispatchSemaphore(value: 0)
-        pm.disableProxy { _ in sem.signal() }
-        _ = sem.wait(timeout: .now() + 3)
-        activeProxyManager = nil
-    }
+    // Close the flow socket — the sysext detects the disconnect within 1s
+    // and clears its watch list, stopping all interception. No need to
+    // remove the proxy config (that's slow and blocks exit).
+    activeFlowListener?.stop()
+    activeFlowListener = nil
+    activeProxyManager = nil
     if !message.isEmpty {
         fputs("\n\(message)\n", stderr)
         fflush(stderr)
