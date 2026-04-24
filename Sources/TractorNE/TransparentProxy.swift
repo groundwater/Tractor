@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NetworkExtension
 import os.log
@@ -9,8 +10,43 @@ class TransparentProxy: NETransparentProxyProvider {
     private var activeBridges: [ObjectIdentifier: TCPBridge] = [:]
     private let bridgeLock = NSLock()
 
+    /// Cached check for global IPv6 connectivity. Refreshed on proxy start.
+    private(set) static var hasGlobalIPv6: Bool = checkGlobalIPv6()
+
+    /// Returns true if any interface has a global-scope IPv6 address
+    /// (not loopback, not link-local fe80::/10, not ULA fc00::/7).
+    private static func checkGlobalIPv6() -> Bool {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0, let first = addrs else { return false }
+        defer { freeifaddrs(first) }
+
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let ifa = cursor {
+            defer { cursor = ifa.pointee.ifa_next }
+            guard let sa = ifa.pointee.ifa_addr, sa.pointee.sa_family == AF_INET6 else { continue }
+            let sin6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+            let b = sin6.sin6_addr.__u6_addr.__u6_addr8
+            // Skip loopback (::1)
+            if b.0 == 0 && b.1 == 0 && b.2 == 0 && b.3 == 0 &&
+               b.4 == 0 && b.5 == 0 && b.6 == 0 && b.7 == 0 &&
+               b.8 == 0 && b.9 == 0 && b.10 == 0 && b.11 == 0 &&
+               b.12 == 0 && b.13 == 0 && b.14 == 0 && b.15 == 1 { continue }
+            // Skip link-local (fe80::/10)
+            if b.0 == 0xfe && (b.1 & 0xc0) == 0x80 { continue }
+            // Skip ULA (fc00::/7)
+            if (b.0 & 0xfe) == 0xfc { continue }
+            // Found a global IPv6 address
+            os_log("global IPv6 found on %{public}@", log: log, type: .default,
+                   String(cString: ifa.pointee.ifa_name))
+            return true
+        }
+        return false
+    }
+
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         os_log("startProxy called", log: log, type: .default)
+        TransparentProxy.hasGlobalIPv6 = TransparentProxy.checkGlobalIPv6()
+        os_log("global IPv6: %{public}@", log: log, type: .default, TransparentProxy.hasGlobalIPv6 ? "yes" : "no")
 
         reporter.onWatchListChanged = { [weak self] hasWatchedPids in
             self?.updateNetworkRules(hasWatchedPids: hasWatchedPids)
@@ -41,11 +77,13 @@ class TransparentProxy: NETransparentProxyProvider {
         // Always report the flow for visibility
         reporter.reportFlow(pid: pid, host: host, port: port, proto: "tcp")
 
-        // IPv6: don't intercept. The sysext can't bridge IPv6 when the host
-        // lacks global IPv6 connectivity, and claiming the flow would make the
-        // app think the connection succeeded. Return false so the kernel
-        // rejects it instantly and happy eyeballs falls through to IPv4.
-        if host.contains(":") {
+        // Skip IPv6 flows when the host lacks global IPv6 connectivity.
+        // createTCPConnection can't reach global IPv6 addresses without a
+        // routable address, and claiming the flow would make the app think
+        // the connection succeeded (stalling until timeout). Returning false
+        // lets the NE framework reject the flow so the app sees the error
+        // immediately.
+        if host.contains(":") && !TransparentProxy.hasGlobalIPv6 {
             return false
         }
 
