@@ -2792,14 +2792,25 @@ final class TUI: EventSink {
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
                     // Columns: TIME  DOWN  UP  HOST:PORT
-                    let time = row.runtimeString
+                    // For closed connections, freeze the time display
+                    let time: String
+                    if conn.alive {
+                        time = row.runtimeString
+                    } else if let closed = conn.closedAt {
+                        let elapsed = closed.timeIntervalSince(row.startTime ?? closed)
+                        let mins = Int(elapsed) / 60
+                        let secs = Int(elapsed) % 60
+                        time = String(format: "%02d:%02d", mins, secs)
+                    } else {
+                        time = row.runtimeString
+                    }
                     let timePad = String(repeating: " ", count: max(1, 9 - time.count))
                     let down = "\u{2193}\(formatBytes(conn.rxBytes))"
                     let downPad = String(repeating: " ", count: max(1, 10 - down.count))
                     let up = "\u{2191}\(formatBytes(conn.txBytes))"
                     let upPad = String(repeating: " ", count: max(1, 10 - up.count))
                     let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(conn.label)"
-                    let connColor = conn.alive ? TUIColor.subNet : TUIColor.exited
+                    let connColor = conn.alive ? TUIColor.subNet : TUIColor.dim
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
