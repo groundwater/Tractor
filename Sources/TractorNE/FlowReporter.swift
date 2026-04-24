@@ -19,7 +19,13 @@ final class FlowReporter {
     var onWatchListChanged: (() -> Void)?
 
     /// Check if a PID is in the watch list.
+    /// Returns false if the CLI socket is disconnected — no CLI means no interception.
     func isWatched(_ pid: Int32) -> Bool {
+        writeLock.lock()
+        let connected = fd >= 0
+        writeLock.unlock()
+        guard connected else { return false }
+
         pidLock.lock()
         defer { pidLock.unlock() }
         return watchedPids.contains(pid)
@@ -119,19 +125,33 @@ final class FlowReporter {
         var buffer = Data()
         var buf = [UInt8](repeating: 0, count: 4096)
 
+        // Use poll() so we can detect socket close within 1 second
         while true {
+            var pfd = pollfd(fd: readFd, events: Int16(POLLIN | POLLHUP), revents: 0)
+            let pollResult = poll(&pfd, 1, 1000)  // 1 second timeout
+
+            if pollResult < 0 {
+                break  // poll error
+            }
+
+            if pollResult == 0 {
+                // Timeout — check if socket is still valid
+                var error: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                let gso = getsockopt(readFd, SOL_SOCKET, SO_ERROR, &error, &len)
+                if gso != 0 || error != 0 {
+                    break  // socket dead
+                }
+                continue  // poll again
+            }
+
+            if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
+                break  // other end closed
+            }
+
             let n = read(readFd, &buf, buf.count)
             if n <= 0 {
-                NSLog("TractorNE: CLI socket disconnected")
-                pidLock.lock()
-                watchedPids.removeAll()
-                pidLock.unlock()
-                onWatchListChanged?()
-
-                writeLock.lock()
-                if fd == readFd { fd = -1 }
-                writeLock.unlock()
-                return
+                break  // EOF or error
             }
 
             buffer.append(contentsOf: buf[..<n])
@@ -142,6 +162,17 @@ final class FlowReporter {
                 handleCommand(line)
             }
         }
+
+        NSLog("TractorNE: CLI socket disconnected — clearing watch list")
+        pidLock.lock()
+        watchedPids.removeAll()
+        pidLock.unlock()
+
+        writeLock.lock()
+        if fd == readFd { fd = -1 }
+        writeLock.unlock()
+
+        onWatchListChanged?()
     }
 
     private func handleCommand(_ data: Data) {
