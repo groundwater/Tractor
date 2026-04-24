@@ -1,11 +1,15 @@
 import Foundation
 import NetworkExtension
 
-/// Transparent proxy provider that intercepts TCP flows.
+/// Transparent proxy provider that traces TCP connections.
 ///
-/// Starts with TCP interception enabled but only accepts flows from PIDs
-/// in the watch list (pushed by the CLI over the Unix socket). If no PIDs
-/// are watched, all flows pass through untouched.
+/// Operates in trace-only mode: logs connection metadata (PID, remote host,
+/// port) for watched PIDs, then returns false to let the OS handle the
+/// actual connection natively. No bytes are proxied, no connections are
+/// owned, no relay code needed.
+///
+/// When Tractor exits, all connections continue unaffected because we
+/// never took ownership of them.
 class TransparentProxy: NETransparentProxyProvider {
     private let reporter = FlowReporter()
 
@@ -32,7 +36,7 @@ class TransparentProxy: NETransparentProxyProvider {
                 completionHandler(error)
                 return
             }
-            NSLog("TractorNE: network settings applied — filtering by watched PIDs")
+            NSLog("TractorNE: network settings applied — trace mode, filtering by watched PIDs")
             completionHandler(nil)
         }
     }
@@ -45,36 +49,28 @@ class TransparentProxy: NETransparentProxyProvider {
 
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         guard let tcp = flow as? NEAppProxyTCPFlow else {
-            return false  // Only handle TCP
+            return false
         }
 
         let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
 
-        // Only intercept flows from watched PIDs
+        // Only trace flows from watched PIDs
         guard reporter.isWatched(pid) else {
-            return false  // Pass through — OS handles it normally
+            return false
         }
 
+        // Extract connection metadata
         let remote = tcp.remoteEndpoint as? NWHostEndpoint
         let host = remote?.hostname ?? "?"
         let port = remote?.port ?? "0"
 
+        // Report to CLI
         reporter.reportFlow(pid: pid, process: "", host: host, port: port, proto: "tcp")
 
-        // Open the flow. For transparent proxies, the local endpoint parameter
-        // is used by the framework to establish the remote connection.
-        tcp.open(withLocalFlowEndpoint: nil) { error in
-            if let error = error {
-                NSLog("TractorNE: TCP open error for \(host):\(port): \(error)")
-                tcp.closeReadWithError(error)
-                tcp.closeWriteWithError(error)
-            }
-            // For transparent proxies, the kernel handles bidirectional
-            // relay after open(). No readData/write loops needed.
-        }
-        return true
+        // Return false: we logged the metadata, now let the OS handle
+        // the connection natively. No proxying, no relay, no ownership.
+        return false
     }
-
 }
 
 /// Extract PID from an audit token
