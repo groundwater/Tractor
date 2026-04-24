@@ -61,71 +61,25 @@ class TransparentProxy: NETransparentProxyProvider {
 
         reporter.reportFlow(pid: pid, process: "", host: host, port: port, proto: "tcp")
 
-        // Transparent relay
-        let endpoint = remote ?? NWHostEndpoint(hostname: "127.0.0.1", port: "0")
-        tcp.open(withLocalEndpoint: endpoint) { error in
+        // Open the flow. For transparent proxies, the local endpoint parameter
+        // is used by the framework to establish the remote connection.
+        tcp.open(withLocalFlowEndpoint: nil) { error in
             if let error = error {
-                NSLog("TractorNE: TCP open error: \(error)")
+                NSLog("TractorNE: TCP open error for \(host):\(port): \(error)")
                 tcp.closeReadWithError(error)
                 tcp.closeWriteWithError(error)
-                return
             }
-            self.relayTCP(tcp)
+            // For transparent proxies, the kernel handles bidirectional
+            // relay after open(). No readData/write loops needed.
         }
         return true
     }
 
-    // MARK: - TCP relay
-
-    private func relayTCP(_ flow: NEAppProxyTCPFlow) {
-        readTCPLoop(flow)
-        writeTCPLoop(flow)
-    }
-
-    private func readTCPLoop(_ flow: NEAppProxyTCPFlow) {
-        flow.readData { data, error in
-            if let error = error {
-                flow.closeReadWithError(error)
-                return
-            }
-            guard let data = data, !data.isEmpty else {
-                flow.closeWriteWithError(nil)
-                return
-            }
-            flow.write(data) { writeError in
-                if let writeError = writeError {
-                    flow.closeWriteWithError(writeError)
-                    return
-                }
-                self.readTCPLoop(flow)
-            }
-        }
-    }
-
-    private func writeTCPLoop(_ flow: NEAppProxyTCPFlow) {
-        flow.readData { data, error in
-            if let error = error {
-                flow.closeReadWithError(error)
-                return
-            }
-            guard let data = data, !data.isEmpty else {
-                flow.closeReadWithError(nil)
-                return
-            }
-            flow.write(data) { writeError in
-                if let writeError = writeError {
-                    flow.closeWriteWithError(writeError)
-                    return
-                }
-                self.writeTCPLoop(flow)
-            }
-        }
-    }
 }
 
 /// Extract PID from an audit token
 private func auditTokenPID(_ token: Data) -> pid_t {
-    guard token.count >= 20 else { return -1 }
+    guard token.count >= 24 else { return -1 }
     return token.withUnsafeBytes { buf in
         buf.load(fromByteOffset: 20, as: Int32.self)
     }

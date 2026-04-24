@@ -103,19 +103,24 @@ final class FlowReporter {
         writeLock.lock()
         defer { writeLock.unlock() }
 
-        if fd < 0 {
-            writeLock.unlock()
-            connect()
-            writeLock.lock()
-        }
-
+        // If disconnected, drop the message. The read loop will detect
+        // the disconnect and the CLI will reconnect. Trying to call
+        // connect() here would deadlock because connect() also acquires
+        // writeLock and NSLock is not reentrant.
         guard fd >= 0 else { return }
 
-        let data = [UInt8](json.utf8)
-        let written = write(fd, data, data.count)
-        if written <= 0 {
-            close(fd)
-            fd = -1
+        var data = Array(json.utf8)
+        var total = 0
+        while total < data.count {
+            let written = data.withUnsafeBytes { buf in
+                write(fd, buf.baseAddress! + total, data.count - total)
+            }
+            if written <= 0 {
+                close(fd)
+                fd = -1
+                return
+            }
+            total += written
         }
     }
 
