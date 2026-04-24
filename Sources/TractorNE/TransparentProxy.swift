@@ -39,7 +39,7 @@ class TransparentProxy: NETransparentProxyProvider {
 
         guard let portNum = UInt16(port), portNum > 0 else { return false }
 
-        reporter.reportFlow(pid: pid, process: "", host: host, port: port, proto: "tcp")
+        reporter.reportFlow(pid: pid, host: host, port: port, proto: "tcp")
 
         // Create a TCP connection that bypasses the proxy
         let endpoint = NWHostEndpoint(hostname: host, port: port)

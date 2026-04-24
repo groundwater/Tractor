@@ -41,7 +41,7 @@ targetTemplates:
         com.apple.developer.networking.networkextension:
           - app-proxy-provider
         com.apple.security.temporary-exception.mach-lookup.global-name:
-          - group.com.jacobgroundwater.Tractor.xpc
+          - group.com.jacobgroundwater.Tractor
 
 targets:
   Tractor:

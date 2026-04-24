@@ -95,7 +95,7 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
 
     // MARK: - Event buffering (called from handleNewFlow/TCPBridge)
 
-    func reportFlow(pid: Int32, process: String, host: String, port: String, proto: String) {
+    func reportFlow(pid: Int32, host: String, port: String, proto: String) {
         let event: [String: Any] = ["pid": pid, "host": host, "port": port, "proto": proto]
         bufferLock.lock()
         eventBuffer.append(event)

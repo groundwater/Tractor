@@ -420,7 +420,7 @@ final class TUI: EventSink {
     private var dnsCache: [String: String] = [:]
 
     /// Network stats from private framework
-    // NetworkStats removed — NE proxy provides byte counts directly
+    // (no polling — network data comes from NE proxy via XPC)
 
     /// SNI sniffer for hostname resolution
     // SNISniffer removed — reverse DNS handles hostname resolution
@@ -448,7 +448,7 @@ final class TUI: EventSink {
     func start(header: String) {
         headerText = header
 
-        // NetworkStats and SNISniffer removed — NE proxy provides connections and byte counts
+        // Network data provided by NE proxy via XPC
 
         setlocale(LC_ALL, "")
         initscr()
@@ -511,7 +511,7 @@ final class TUI: EventSink {
         stopped = true
         timer?.cancel()
         timer = nil
-        // cleanup handled by flow socket disconnect
+        // no cleanup needed — sysext runs independently
         endwin()
     }
 

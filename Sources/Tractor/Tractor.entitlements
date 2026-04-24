@@ -12,7 +12,7 @@
 	<true/>
 	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
 	<array>
-		<string>group.com.jacobgroundwater.Tractor.xpc</string>
+		<string>group.com.jacobgroundwater.Tractor</string>
 	</array>
 </dict>
 </plist>
