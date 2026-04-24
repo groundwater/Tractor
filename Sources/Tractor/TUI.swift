@@ -366,7 +366,7 @@ final class TUI: EventSink {
     /// Callback to update ESClient patterns when trackers change
     var onTrackersChanged: (([TrackerGroup]) -> Void)?
     /// Callback when a new network connection is discovered
-    var onNewConnection: ((pid_t, pid_t, String, uid_t, String, UInt16) -> Void)?
+    // onNewConnection removed — NE provides connect events directly via EventSink.onConnect
     /// Reference to the ProcessTree so we can remove PIDs when untracking
     var processTree: ProcessTree?
     private var waitDuration = 1
@@ -404,7 +404,7 @@ final class TUI: EventSink {
     private var dnsCache: [String: String] = [:]
 
     /// Network stats from private framework
-    private var netStats: NetworkStats?
+    // NetworkStats removed — NE proxy provides byte counts directly
 
     /// SNI sniffer for hostname resolution
     private var sniSniffer: SNISniffer?
@@ -432,9 +432,7 @@ final class TUI: EventSink {
     func start(header: String) {
         headerText = header
 
-        // Start network stats and SNI sniffer
-        netStats = NetworkStats()
-        netStats?.start()
+        // Start SNI sniffer (NetworkStats removed — NE provides byte counts)
         sniSniffer = SNISniffer()
         sniSniffer?.start()
 
@@ -499,7 +497,6 @@ final class TUI: EventSink {
         stopped = true
         timer?.cancel()
         timer = nil
-        netStats?.stop()
         sniSniffer?.stop()
         endwin()
     }
@@ -2200,6 +2197,20 @@ final class TUI: EventSink {
         recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
     }
 
+    /// Update byte counts for a connection (called from NE flow reports)
+    func updateConnectionBytes(pid: pid_t, remoteAddr: String, remotePort: UInt16, txBytes: UInt64, rxBytes: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[pid] else { return }
+        let key = "\(remoteAddr):\(remotePort)"
+        if var conn = row.connections[key] {
+            conn.txBytes = txBytes
+            conn.rxBytes = rxBytes
+            conn.alive = false  // byte report comes when connection closes
+            row.connections[key] = conn
+        }
+    }
+
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
         // Parse wait status: WIFEXITED → exit code, WIFSIGNALED → signal
         let exitCode: Int32
@@ -2231,44 +2242,11 @@ final class TUI: EventSink {
         let pids = Array(pidSet)
         lock.unlock()
 
-        // Refresh network stats from NetworkStatistics.framework
-        netStats?.refresh()
-
-        // Update connections from NetworkStats
+        // Connection data now comes from the NE proxy via onConnect/updateConnectionBytes.
+        // Prune dead connections and cap file counts to bound memory.
         for pid in pids {
-            let netConns = netStats?.connectionsForPid(pid) ?? []
-            let currentKeys = Set(netConns.map { "\($0.remoteAddr):\($0.remotePort)" })
-
             lock.lock()
             if let row = rows[pid] {
-                // Mark stale connections
-                for (key, var conn) in row.connections {
-                    conn.alive = currentKeys.contains(key)
-                    row.connections[key] = conn
-                }
-                // Update or add connections with byte counts
-                var shouldAutoExpand = false
-                for nc in netConns {
-                    let key = "\(nc.remoteAddr):\(nc.remotePort)"
-                    let existing = row.connections[key]
-                    let isNew = existing == nil
-                    if isNew, let cb = onNewConnection {
-                        cb(pid, row.ppid, row.name, uid_t(getuid()), nc.remoteAddr, nc.remotePort)
-                    }
-                    var conn = existing ?? ConnectionStats(remoteAddr: nc.remoteAddr, remotePort: nc.remotePort)
-                    let hadRx = conn.rxBytes
-                    let hadTx = conn.txBytes
-                    conn.rxBytes = nc.rxBytes
-                    conn.txBytes = nc.txBytes
-                    conn.alive = nc.alive
-                    row.connections[key] = conn
-                    // Check auto-expand criteria
-                    if isNew && expandCriteria.netConnect { shouldAutoExpand = true }
-                    if nc.rxBytes > hadRx && expandCriteria.netRead { shouldAutoExpand = true }
-                    if nc.txBytes > hadTx && expandCriteria.netWrite { shouldAutoExpand = true }
-                }
-                if shouldAutoExpand { autoExpand(pid, panel: .net) }
-                // Prune: keep alive connections + up to 3 most recent dead ones
                 let dead = row.connections.filter { !$0.value.alive }
                 if dead.count > 3 {
                     let toRemove = dead.sorted { $0.value.txBytes < $1.value.txBytes }
@@ -2277,7 +2255,6 @@ final class TUI: EventSink {
                         row.connections.removeValue(forKey: key)
                     }
                 }
-                // Prune: cap at 200 to bound memory on long-running traces
                 if row.files.count > 200 {
                     let sorted = row.files.sorted { $0.value.lastWrite < $1.value.lastWrite }
                     for (path, _) in sorted.prefix(row.files.count - 200) {

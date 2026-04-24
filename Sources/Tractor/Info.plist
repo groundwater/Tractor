@@ -28,5 +28,7 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Tractor uses a network extension to monitor and intercept network traffic for security analysis.</string>
 </dict>
 </plist>

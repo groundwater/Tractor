@@ -166,12 +166,8 @@ struct Trace: ParsableCommand {
             t.onTrackersChanged = { [weak esClient] trackers in
                 esClient?.updatePatterns(trackers: trackers)
             }
-            // Forward new network connections to the SQLite log
-            if let sqlLog = activeSQLiteLog {
-                t.onNewConnection = { pid, ppid, process, user, addr, port in
-                    sqlLog.onConnect(pid: pid, ppid: ppid, process: process, user: user, remoteAddr: addr, remotePort: port)
-                }
-            }
+            // Network connections are now reported via the NE proxy through
+            // FlowSocket → EventSink.onConnect, which reaches both TUI and SQLiteLog
         } else {
             // JSON mode — set patterns directly
             esClient.tracePatterns = name.map { $0.lowercased() }
@@ -206,6 +202,14 @@ struct Trace: ParsableCommand {
             let flowListener = FlowSocketListener(sink: sink)
             activeFlowListener = flowListener
             flowListener.start()
+
+            // Wire up byte count updates to the TUI
+            if let t = tui {
+                flowListener.onBytesUpdate = { pid, host, port, bytesOut, bytesIn in
+                    t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
+                                            txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn))
+                }
+            }
 
             // Push initial PID list from the tree
             flowListener.updateWatchList(tree.snapshot)

@@ -15,6 +15,9 @@ final class FlowSocketListener {
     private var clientSources: [Int32: DispatchSourceRead] = [:]
     private var lastWatchMessage: Data?  // cached so new connections get current state
 
+    /// Called when the sysext reports final byte counts for a closed connection.
+    var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?  // (pid, host, port, out, in)
+
     init(sink: EventSink) {
         self.sink = sink
     }
@@ -159,8 +162,7 @@ final class FlowSocketListener {
         // Byte count update (connection closed)
         if let bytesOut = json["bytesOut"] as? Int64,
            let bytesIn = json["bytesIn"] as? Int64 {
-            // TODO: update TUI connection stats with final byte counts
-            _ = (bytesOut, bytesIn)
+            onBytesUpdate?(pid, host, port, bytesOut, bytesIn)
             return
         }
 

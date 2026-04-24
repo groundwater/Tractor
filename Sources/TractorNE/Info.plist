@@ -18,11 +18,13 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Tractor uses a network extension to monitor and intercept network traffic.</string>
 	<key>NetworkExtension</key>
 	<dict>
 		<key>NEProviderClasses</key>
 		<dict>
-			<key>com.apple.networkextension.transparent-proxy</key>
+			<key>com.apple.networkextension.app-proxy</key>
 			<string>$(PRODUCT_MODULE_NAME).TransparentProxy</string>
 		</dict>
 	</dict>
