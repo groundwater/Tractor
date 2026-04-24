@@ -2225,9 +2225,9 @@ final class TUI: EventSink {
             conn.txBytes = txBytes
             conn.rxBytes = rxBytes
             row.connections[key] = conn
-            // Update lifetime totals with the delta
-            row.lifetimeRxBytes += rxBytes - hadRx
-            row.lifetimeTxBytes += txBytes - hadTx
+            // Update lifetime totals with the delta (guard against underflow from reconnects)
+            if rxBytes > hadRx { row.lifetimeRxBytes += rxBytes - hadRx }
+            if txBytes > hadTx { row.lifetimeTxBytes += txBytes - hadTx }
             // Auto-expand on byte activity
             if autoExpandEnabled {
                 if rxBytes > hadRx && expandCriteria.netRead { autoExpand(pid, panel: .net) }
