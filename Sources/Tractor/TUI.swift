@@ -344,6 +344,7 @@ final class TUI: EventSink {
     private var showReads = false
     private var showWrites = true
     private var hideInactiveFiles = true
+    private var showAllConnections = false
 
     // Auto-expand state
     var autoExpandEnabled = true
@@ -621,6 +622,8 @@ final class TUI: EventSink {
 
     private func networkMenuItems() -> [MenuItem] {
         return [
+            MenuItem(label: "Show All Connections", shortcut: "A", key: 97, checked: showAllConnections),
+            .sep(),
             MenuItem(label: "Reverse DNS Lookup", shortcut: "", key: nil, checked: true),
             MenuItem(label: "SNI Inspection", shortcut: "", key: nil, checked: true),
         ]
@@ -783,6 +786,12 @@ final class TUI: EventSink {
             if item.label == "Hide Inactive" { hideInactiveFiles = !hideInactiveFiles }
             else if item.label == "Show Reads" { showReads = !showReads }
             else if item.label == "Show Writes" { showWrites = !showWrites }
+            forceRender()
+            return
+        }
+
+        if menu == .network {
+            if item.label == "Show All Connections" { showAllConnections = !showAllConnections }
             forceRender()
             return
         }
@@ -2272,7 +2281,7 @@ final class TUI: EventSink {
         for pid in pids {
             lock.lock()
             if let row = rows[pid] {
-                // Mark dead connections with a timestamp, prune after 5s
+                // Mark dead connections with a timestamp
                 let now = Date()
                 for (key, var conn) in row.connections {
                     if !conn.alive && conn.closedAt == nil {
@@ -2280,14 +2289,17 @@ final class TUI: EventSink {
                         row.connections[key] = conn
                     }
                 }
-                let stale = row.connections.filter {
-                    if let closed = $0.value.closedAt {
-                        return now.timeIntervalSince(closed) > 5
+                // Prune closed connections after 5s (unless showing all)
+                if !showAllConnections {
+                    let stale = row.connections.filter {
+                        if let closed = $0.value.closedAt {
+                            return now.timeIntervalSince(closed) > 5
+                        }
+                        return false
                     }
-                    return false
-                }
-                for (key, _) in stale {
-                    row.connections.removeValue(forKey: key)
+                    for (key, _) in stale {
+                        row.connections.removeValue(forKey: key)
+                    }
                 }
                 if row.files.count > 200 {
                     let sorted = row.files.sorted { $0.value.lastWrite < $1.value.lastWrite }
