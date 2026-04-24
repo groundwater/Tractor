@@ -36,6 +36,17 @@ enum TUIColor: Int32 {
     case menuBar = 8
     case menuHighlight = 9
     case menuDisabled = 10
+    // Sparkline gradient: 11..20 (10 steps from green → yellow → red)
+    case spark0 = 11
+    case spark1 = 12
+    case spark2 = 13
+    case spark3 = 14
+    case spark4 = 15
+    case spark5 = 16
+    case spark6 = 17
+    case spark7 = 18
+    case spark8 = 19
+    case spark9 = 20
 }
 
 // MARK: - Sample tree node
@@ -241,6 +252,13 @@ final class ProcessRow {
     var diskBytesRead: UInt64 = 0
     var diskBytesWritten: UInt64 = 0
 
+    /// Inline stats (polled for all running processes)
+    var prevCpuNs: UInt64 = 0          // previous total CPU nanoseconds
+    var prevCpuSampleTime: Date?       // when prevCpuNs was taken
+    var cpuLoad: Double = 0            // CPU load (1.0 = one full core)
+    var cpuHistory: [Double] = []      // last N load samples for sparkline
+    static let cpuHistoryLen = 5
+
     var isRunning: Bool { endTime == nil }
 
     var runtime: TimeInterval {
@@ -406,10 +424,13 @@ final class TUI: EventSink {
         let time: Int
         let ops: Int
         let status: Int
+        let load: Int
+        let mem: Int
         let process: Int
     }
 
-    private static let baseColumnLayout = ColumnLayout(pid: 2, time: 10, ops: 17, status: 23, process: 29)
+    // PID(2) TIME(10) OPS(17) STATUS(23) LOAD(30) MEM(36) PROCESS(42)
+    private static let baseColumnLayout = ColumnLayout(pid: 2, time: 10, ops: 17, status: 23, load: 30, mem: 36, process: 42)
 
     /// PIDs to exclude from display (Tractor itself + parents)
     private var excludedPids: Set<pid_t> = []
@@ -485,8 +506,20 @@ final class TUI: EventSink {
         init_pair(Int16(TUIColor.menuHighlight.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLUE))
         // Custom gray for disabled menu highlight (256-color terminal)
         if COLORS >= 256 {
+            // Sparkline gradient: green(46) → yellow(226) → red(196) using 256-color
+            let sparkColors: [Int16] = [46, 40, 34, 28, 148, 184, 220, 214, 208, 196]
+            for (i, c) in sparkColors.enumerated() {
+                init_pair(Int16(TUIColor.spark0.rawValue) + Int16(i), c, -1)
+            }
             init_pair(Int16(TUIColor.menuDisabled.rawValue), 245, 240)  // gray on dark gray
         } else {
+            // Fallback: 3-color gradient across 10 slots
+            let fallback: [Int16] = [Int16(COLOR_GREEN), Int16(COLOR_GREEN), Int16(COLOR_GREEN), Int16(COLOR_GREEN),
+                                     Int16(COLOR_YELLOW), Int16(COLOR_YELLOW), Int16(COLOR_YELLOW),
+                                     Int16(COLOR_RED), Int16(COLOR_RED), Int16(COLOR_RED)]
+            for (i, c) in fallback.enumerated() {
+                init_pair(Int16(TUIColor.spark0.rawValue) + Int16(i), c, -1)
+            }
             init_pair(Int16(TUIColor.menuDisabled.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLACK))
         }
 
@@ -2360,6 +2393,38 @@ final class TUI: EventSink {
             }
         }
 
+        // Poll CPU load and RSS for all running processes via proc_pidinfo
+        for pid in pids {
+            var taskInfo = proc_taskinfo()
+            let size = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(MemoryLayout<proc_taskinfo>.size))
+            if size > 0 {
+                let now = Date()
+                let totalNs = UInt64(taskInfo.pti_total_user) + UInt64(taskInfo.pti_total_system)
+                lock.lock()
+                if let row = rows[pid] {
+                    row.rss = UInt64(taskInfo.pti_resident_size)
+                    // CPU load: diff total CPU ns / wall clock ns
+                    if let prevTime = row.prevCpuSampleTime, row.prevCpuNs > 0 {
+                        let dt = now.timeIntervalSince(prevTime)
+                        if dt > 0.5 {
+                            let deltaCpu = Double(totalNs &- row.prevCpuNs) / 1_000_000_000
+                            row.cpuLoad = deltaCpu / dt
+                            row.cpuHistory.append(row.cpuLoad)
+                            if row.cpuHistory.count > ProcessRow.cpuHistoryLen {
+                                row.cpuHistory.removeFirst()
+                            }
+                            row.prevCpuNs = totalNs
+                            row.prevCpuSampleTime = now
+                        }
+                    } else {
+                        row.prevCpuNs = totalNs
+                        row.prevCpuSampleTime = now
+                    }
+                }
+                lock.unlock()
+            }
+        }
+
         // Load process info lazily when Process section is disclosed
         lock.lock()
         let needsInfo = rows.values.filter { $0.processDisclosed && !$0.infoLoaded }
@@ -2376,18 +2441,18 @@ final class TUI: EventSink {
             lock.unlock()
         }
 
-        // Poll resources only for processes with Resources disclosed
+        // Poll extra resources only for processes with Resources disclosed
         lock.lock()
         let needsResources = rows.values.filter { $0.resourcesDisclosed && $0.isRunning }
         lock.unlock()
         for row in needsResources {
+            // Cumulative CPU times for the detail view
             var taskInfo = proc_taskinfo()
             let size = proc_pidinfo(row.pid, PROC_PIDTASKINFO, 0, &taskInfo, Int32(MemoryLayout<proc_taskinfo>.size))
             if size > 0 {
                 lock.lock()
                 row.cpuUser = TimeInterval(taskInfo.pti_total_user) / 1_000_000_000
                 row.cpuSys = TimeInterval(taskInfo.pti_total_system) / 1_000_000_000
-                row.rss = UInt64(taskInfo.pti_resident_size)
                 lock.unlock()
             }
             let fdSize = proc_pidinfo(row.pid, PROC_PIDLISTFDS, 0, nil, 0)
@@ -2911,6 +2976,8 @@ final class TUI: EventSink {
             time: Self.baseColumnLayout.time + shift,
             ops: Self.baseColumnLayout.ops + shift,
             status: Self.baseColumnLayout.status + shift,
+            load: Self.baseColumnLayout.load + shift,
+            mem: Self.baseColumnLayout.mem + shift,
             process: Self.baseColumnLayout.process + shift
         )
     }
@@ -2922,6 +2989,8 @@ final class TUI: EventSink {
             (layout.time, "TIME"),
             (layout.ops, "OPS"),
             (layout.status, "STATUS"),
+            (layout.load, "LOAD"),
+            (layout.mem, "MEM"),
             (layout.process, "PROCESS"),
         ]
         for h in headers {
@@ -3552,6 +3621,36 @@ final class TUI: EventSink {
         mvaddstr(y, Int32(layout.ops), String(row.fileOps))
         mvaddstr(y, Int32(layout.status), status)
 
+        // Inline stats: Load sparkline (colored by area), MEM
+        if row.isRunning {
+            let spark = sparkline(row.cpuHistory)
+            if !spark.isEmpty {
+                let avg = row.cpuHistory.reduce(0, +) / max(1, Double(row.cpuHistory.count))
+                if avg < 0.001 {
+                    // Near-zero: gray
+                    let dimAttr = COLOR_PAIR(TUIColor.dim.rawValue)
+                    attroff(attr)
+                    attron(dimAttr)
+                    mvaddstr(y, Int32(layout.load), spark)
+                    attroff(dimAttr)
+                    attron(attr)
+                } else {
+                    // Map avg load to gradient index 0..9
+                    // 0=idle, 9=very hot. Log scale so low loads still show color variation.
+                    let t = min(1.0, log2(1 + avg * 2) / log2(1 + 8)) // 0..1, saturates around load 4
+                    let idx = min(9, Int(t * 9))
+                    let sparkAttr = COLOR_PAIR(TUIColor.spark0.rawValue + Int32(idx))
+                    attroff(attr)
+                    attron(sparkAttr)
+                    mvaddstr(y, Int32(layout.load), spark)
+                    attroff(sparkAttr)
+                    attron(attr)
+                }
+            }
+            let memStr = formatBytesCompact(row.rss)
+            mvaddstr(y, Int32(layout.mem), memStr)
+        }
+
         let processWidth = max(5, width - layout.process)
         let truncatedProcess = truncateProcess(processLabel, to: processWidth)
         // Render the process name with the binary basename in bold
@@ -3640,6 +3739,30 @@ final class TUI: EventSink {
             addstr(padded)
             attroff(attr)
         }
+    }
+
+    private static let sparkBlocks: [Character] = ["▁","▂","▃","▄","▅","▆","▇","█"]
+
+    private func sparkline(_ values: [Double]) -> String {
+        guard !values.isEmpty else { return "" }
+        let peak = max(values.max() ?? 0, 0.01) // avoid /0
+        return String(values.map { v in
+            let idx = min(7, Int((v / peak) * 7))
+            return Self.sparkBlocks[idx]
+        })
+    }
+
+    /// Compact byte format for inline columns: "240M", "1.2G", "18K"
+    private func formatBytesCompact(_ bytes: UInt64) -> String {
+        if bytes == 0 { return "-" }
+        let kb = Double(bytes) / 1024
+        let mb = kb / 1024
+        let gb = mb / 1024
+        if gb >= 10 { return String(format: "%.0fG", gb) }
+        if gb >= 1 { return String(format: "%.1fG", gb) }
+        if mb >= 10 { return String(format: "%.0fM", mb) }
+        if mb >= 1 { return String(format: "%.1fM", mb) }
+        return String(format: "%.0fK", kb)
     }
 
     private func formatBytes(_ bytes: UInt64) -> String {
