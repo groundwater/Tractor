@@ -153,10 +153,19 @@ final class FlowSocketListener {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         let pid = json["pid"] as? Int32 ?? -1
-        let process = json["process"] as? String ?? ""
         let host = json["host"] as? String ?? ""
         let port = UInt16(json["port"] as? String ?? "0") ?? 0
 
+        // Byte count update (connection closed)
+        if let bytesOut = json["bytesOut"] as? Int64,
+           let bytesIn = json["bytesIn"] as? Int64 {
+            // TODO: update TUI connection stats with final byte counts
+            _ = (bytesOut, bytesIn)
+            return
+        }
+
+        // New connection event
+        let process = json["process"] as? String ?? ""
         sink.onConnect(pid: pid, ppid: 0, process: process, user: 0,
                        remoteAddr: host, remotePort: port)
     }

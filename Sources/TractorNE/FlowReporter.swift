@@ -97,16 +97,20 @@ final class FlowReporter {
         pidLock.unlock()
     }
 
+    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64) {
+        let json = "{\"pid\":\(pid),\"host\":\"\(escapeJSON(host))\",\"port\":\"\(escapeJSON(port))\",\"bytesOut\":\(bytesOut),\"bytesIn\":\(bytesIn)}\n"
+        sendJSON(json)
+    }
+
     func reportFlow(pid: Int32, process: String, host: String, port: String, proto: String) {
         let json = "{\"pid\":\(pid),\"process\":\"\(escapeJSON(process))\",\"host\":\"\(escapeJSON(host))\",\"port\":\"\(escapeJSON(port))\",\"proto\":\"\(proto)\"}\n"
+        sendJSON(json)
+    }
 
+    private func sendJSON(_ json: String) {
         writeLock.lock()
         defer { writeLock.unlock() }
 
-        // If disconnected, drop the message. The read loop will detect
-        // the disconnect and the CLI will reconnect. Trying to call
-        // connect() here would deadlock because connect() also acquires
-        // writeLock and NSLock is not reentrant.
         guard fd >= 0 else { return }
 
         var data = Array(json.utf8)

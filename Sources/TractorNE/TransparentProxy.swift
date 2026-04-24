@@ -1,17 +1,18 @@
 import Foundation
 import NetworkExtension
 
-/// Transparent proxy provider that traces TCP connections.
+/// Transparent proxy provider that intercepts and relays TCP connections
+/// for watched PIDs.
 ///
-/// Operates in trace-only mode: logs connection metadata (PID, remote host,
-/// port) for watched PIDs, then returns false to let the OS handle the
-/// actual connection natively. No bytes are proxied, no connections are
-/// owned, no relay code needed.
-///
-/// When Tractor exits, all connections continue unaffected because we
-/// never took ownership of them.
+/// Each accepted flow is bridged to the remote via an NWConnection.
+/// Bytes are counted in both directions and reported to the CLI.
+/// Unwatched PIDs return false (OS handles natively, zero overhead).
 class TransparentProxy: NETransparentProxyProvider {
     private let reporter = FlowReporter()
+
+    /// Keep strong references to active bridges so they don't get deallocated
+    private var activeBridges: [ObjectIdentifier: TCPBridge] = [:]
+    private let bridgeLock = NSLock()
 
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         NSLog("TractorNE: proxy started, connecting to CLI via socket")
@@ -36,7 +37,7 @@ class TransparentProxy: NETransparentProxyProvider {
                 completionHandler(error)
                 return
             }
-            NSLog("TractorNE: network settings applied — trace mode, filtering by watched PIDs")
+            NSLog("TractorNE: network settings applied — proxy mode, filtering by watched PIDs")
             completionHandler(nil)
         }
     }
@@ -54,22 +55,57 @@ class TransparentProxy: NETransparentProxyProvider {
 
         let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
 
-        // Only trace flows from watched PIDs
         guard reporter.isWatched(pid) else {
             return false
         }
 
-        // Extract connection metadata
         let remote = tcp.remoteEndpoint as? NWHostEndpoint
         let host = remote?.hostname ?? "?"
         let port = remote?.port ?? "0"
+        let portNum = UInt16(port) ?? 0
 
-        // Report to CLI
+        guard portNum > 0 else {
+            return false  // Can't bridge without a valid port
+        }
+
+        // Report connection start
         reporter.reportFlow(pid: pid, process: "", host: host, port: port, proto: "tcp")
 
-        // Return false: we logged the metadata, now let the OS handle
-        // the connection natively. No proxying, no relay, no ownership.
-        return false
+        // Create a TCP connection that bypasses the proxy (via NETunnelProvider)
+        let endpoint = NWHostEndpoint(hostname: host, port: port)
+        let remoteConnection = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
+
+        // Create bridge: flow ↔ remoteConnection
+        class BridgeBox { var bridge: TCPBridge? }
+        let box = BridgeBox()
+
+        let bridge = TCPBridge(flow: tcp, connection: remoteConnection) { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+
+            if let self = self, let b = box.bridge {
+                self.bridgeLock.lock()
+                self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
+                self.bridgeLock.unlock()
+            }
+        }
+        box.bridge = bridge
+
+        bridgeLock.lock()
+        activeBridges[ObjectIdentifier(bridge)] = bridge
+        bridgeLock.unlock()
+
+        // Open the flow, then start the bridge
+        tcp.open(withLocalFlowEndpoint: nil) { error in
+            if let error = error {
+                NSLog("TractorNE: flow open error for \(host):\(port): \(error)")
+                tcp.closeReadWithError(error)
+                tcp.closeWriteWithError(error)
+                return
+            }
+            bridge.start()
+        }
+
+        return true
     }
 }
 
