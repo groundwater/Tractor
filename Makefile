@@ -1,7 +1,6 @@
 PROJECT   = Tractor
 BUILD_DIR = $(CURDIR)/.build
-INSTALL_BASE = /Library/Application Support/Tractor
-INSTALL_APP  = $(INSTALL_BASE)/Tractor.app
+INSTALL_APP  = /Applications/Tractor.app
 SYMLINK      = /usr/local/bin/tractor
 PKG_DIR      = $(BUILD_DIR)/pkg
 PKG_OUT      = $(BUILD_DIR)/Tractor.pkg
@@ -39,7 +38,6 @@ pkg: release
 
 # Install: copy .app bundle to /Library/Application Support/Tractor and symlink the executable
 install: release
-	sudo mkdir -p "$(INSTALL_BASE)"
 	sudo rm -rf "$(INSTALL_APP)"
 	sudo cp -R "$(BUILD_DIR)/Release/Tractor.app" "$(INSTALL_APP)"
 	sudo mkdir -p $(dir $(SYMLINK))
@@ -51,7 +49,6 @@ install: release
 uninstall:
 	sudo rm -f "$(SYMLINK)"
 	sudo rm -rf "$(INSTALL_APP)"
-	sudo rmdir "$(INSTALL_BASE)" 2>/dev/null || true
 	@echo "Uninstalled."
 
 clean:

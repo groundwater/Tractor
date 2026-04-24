@@ -222,12 +222,17 @@ struct Trace: ParsableCommand {
 
             let pm = ProxyManager()
             activeProxyManager = pm
-            fputs("Tractor: activating network extension...\n", stderr)
-            pm.activate { error in
+            // Route status messages to TUI or stderr depending on mode
+            if let t = tui {
+                pm.onStatus = { msg in t.showStatus(msg) }
+            }
+            pm.activate { [weak tui] error in
                 if let error = error {
-                    fputs("Tractor: network extension error: \(error)\n", stderr)
-                } else {
-                    fputs("Tractor: network extension active — intercepting all flows\n", stderr)
+                    if let t = tui {
+                        t.showStatus("net error: \(error.localizedDescription)")
+                    } else {
+                        fputs("Tractor: network extension error: \(error)\n", stderr)
+                    }
                 }
             }
         }

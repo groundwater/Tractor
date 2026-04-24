@@ -73,7 +73,7 @@ final class FlowSocketListener {
         listenSource = source
         source.resume()
 
-        fputs("Tractor: flow socket listening on \(tractorSocketPath)\n", stderr)
+        // Don't log to stderr in TUI mode — it clobbers ncurses
     }
 
     func stop() {
@@ -116,7 +116,7 @@ final class FlowSocketListener {
 
         fcntl(clientFd, F_SETFL, O_NONBLOCK)
         clientFds.append(clientFd)
-        fputs("Tractor: sysext connected (fd=\(clientFd))\n", stderr)
+        // sysext connected
 
         // Send current watch list immediately
         if let msg = lastWatchMessage {
@@ -134,7 +134,7 @@ final class FlowSocketListener {
                 close(clientFd)
                 self?.clientFds.removeAll { $0 == clientFd }
                 self?.clientSources.removeValue(forKey: clientFd)
-                fputs("Tractor: sysext disconnected (fd=\(clientFd))\n", stderr)
+                // sysext disconnected
                 return
             }
             buffer.append(contentsOf: buf[..<n])

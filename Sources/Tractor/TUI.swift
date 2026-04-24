@@ -326,6 +326,8 @@ final class TUI: EventSink {
     private var rows: [pid_t: ProcessRow] = [:]
     private let lock = NSLock()
     private var headerText: String = ""
+    private var statusMessage: String?
+    private var statusClearTime: Date?
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var paused = false
@@ -366,7 +368,13 @@ final class TUI: EventSink {
     /// Callback to update ESClient patterns when trackers change
     var onTrackersChanged: (([TrackerGroup]) -> Void)?
     /// Callback when a new network connection is discovered
-    // onNewConnection removed — NE provides connect events directly via EventSink.onConnect
+    /// Show a status message on the header line. Auto-clears after `duration` seconds.
+    func showStatus(_ message: String, duration: TimeInterval = 5) {
+        lock.lock()
+        statusMessage = message
+        statusClearTime = Date().addingTimeInterval(duration)
+        lock.unlock()
+    }
     /// Reference to the ProcessTree so we can remove PIDs when untracking
     var processTree: ProcessTree?
     private var waitDuration = 1
@@ -2444,6 +2452,20 @@ final class TUI: EventSink {
         // Header
         attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
         mvaddstr(0, 0, truncate(headerText, to: Int(maxX)))
+        // Status message (right-aligned, auto-clearing)
+        lock.lock()
+        if let msg = statusMessage {
+            if let clearTime = statusClearTime, Date() > clearTime {
+                statusMessage = nil
+                statusClearTime = nil
+            } else {
+                let col = Int(maxX) - msg.count - 1
+                if col > headerText.count + 2 {
+                    mvaddstr(0, Int32(col), msg)
+                }
+            }
+        }
+        lock.unlock()
         attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD)
 
         // Menu bar on line 1
