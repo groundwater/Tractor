@@ -259,6 +259,12 @@ final class ProcessRow {
     var cpuHistory: [Double] = []      // last N load samples for sparkline
     static let cpuHistoryLen = 5
 
+    /// Subtree aggregates (self + all descendants)
+    var subtreeLoad: Double = 0
+    var subtreeRss: UInt64 = 0
+    var subtreeLoadHistory: [Double] = []
+    var subtreeFileOps: Int = 0
+
     var isRunning: Bool { endTime == nil }
 
     var runtime: TimeInterval {
@@ -2425,6 +2431,46 @@ final class TUI: EventSink {
             }
         }
 
+        // Aggregate subtree stats (self + all descendants)
+        lock.lock()
+        // Build children map
+        var childrenOf: [pid_t: [pid_t]] = [:]
+        for row in rows.values {
+            childrenOf[row.ppid, default: []].append(row.pid)
+        }
+        // Recursive subtree sum
+        func subtreeSum(_ pid: pid_t) -> (load: Double, rss: UInt64, loadHistory: [Double]) {
+            guard let row = rows[pid] else { return (0, 0, []) }
+            var totalLoad = row.cpuLoad
+            var totalRss = row.rss
+            // Start with this process's history, padded to cpuHistoryLen
+            var totalHistory = row.cpuHistory
+            let histLen = ProcessRow.cpuHistoryLen
+            while totalHistory.count < histLen { totalHistory.insert(0, at: 0) }
+
+            for child in childrenOf[pid] ?? [] {
+                let (cLoad, cRss, cHist) = subtreeSum(child)
+                totalLoad += cLoad
+                totalRss += cRss
+                // Element-wise add histories
+                let padded = cHist.count >= histLen ? cHist : Array(repeating: 0.0, count: histLen - cHist.count) + cHist
+                for i in 0..<histLen {
+                    totalHistory[i] += padded[i]
+                }
+            }
+            row.subtreeLoad = totalLoad
+            row.subtreeRss = totalRss
+            row.subtreeLoadHistory = totalHistory
+            return (totalLoad, totalRss, totalHistory)
+        }
+        // Find roots (processes whose parent is not in our rows)
+        let allPids = Set(rows.keys)
+        let roots = rows.values.filter { !allPids.contains($0.ppid) }
+        for root in roots {
+            _ = subtreeSum(root.pid)
+        }
+        lock.unlock()
+
         // Load process info lazily when Process section is disclosed
         lock.lock()
         let needsInfo = rows.values.filter { $0.processDisclosed && !$0.infoLoaded }
@@ -3622,12 +3668,13 @@ final class TUI: EventSink {
         mvaddstr(y, Int32(layout.status), status)
 
         // Inline stats: Load sparkline (colored by area), MEM
+        // Show subtree totals (self + all descendants)
         if row.isRunning {
-            let spark = sparkline(row.cpuHistory)
+            let history = row.subtreeLoadHistory.isEmpty ? row.cpuHistory : row.subtreeLoadHistory
+            let spark = sparkline(history)
             if !spark.isEmpty {
-                let avg = row.cpuHistory.reduce(0, +) / max(1, Double(row.cpuHistory.count))
+                let avg = history.reduce(0, +) / max(1, Double(history.count))
                 if avg < 0.001 {
-                    // Near-zero: gray
                     let dimAttr = COLOR_PAIR(TUIColor.dim.rawValue)
                     attroff(attr)
                     attron(dimAttr)
@@ -3635,9 +3682,7 @@ final class TUI: EventSink {
                     attroff(dimAttr)
                     attron(attr)
                 } else {
-                    // Map avg load to gradient index 0..9
-                    // 0=idle, 9=very hot. Log scale so low loads still show color variation.
-                    let t = min(1.0, log2(1 + avg * 2) / log2(1 + 8)) // 0..1, saturates around load 4
+                    let t = min(1.0, log2(1 + avg * 2) / log2(1 + 8))
                     let idx = min(9, Int(t * 9))
                     let sparkAttr = COLOR_PAIR(TUIColor.spark0.rawValue + Int32(idx))
                     attroff(attr)
@@ -3647,7 +3692,8 @@ final class TUI: EventSink {
                     attron(attr)
                 }
             }
-            let memStr = formatBytesCompact(row.rss)
+            let memTotal = row.subtreeRss > 0 ? row.subtreeRss : row.rss
+            let memStr = formatBytesCompact(memTotal)
             mvaddstr(y, Int32(layout.mem), memStr)
         }
 
