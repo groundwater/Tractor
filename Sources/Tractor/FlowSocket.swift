@@ -1,6 +1,6 @@
 import Foundation
 
-private let xpcServiceName = "3FGZQE8AW3.group.com.jacobgroundwater.Tractor.xpc"
+private let xpcServiceName = "group.3FGZQE8AW3..com.jacobgroundwater.Tractor.xpc"
 
 /// XPC protocol matching the sysext's exported interface
 @objc protocol TractorNEXPC {

@@ -69,7 +69,7 @@ targets:
         NetworkExtension:
           NEProviderClasses:
             com.apple.networkextension.app-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
-          NEMachServiceName: 3FGZQE8AW3.group.com.jacobgroundwater.Tractor.xpc
+          NEMachServiceName: group.3FGZQE8AW3..com.jacobgroundwater.Tractor.xpc
     settings:
       base:
         PRODUCT_NAME: com.jacobgroundwater.Tractor.NE

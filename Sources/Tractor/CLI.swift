@@ -29,16 +29,8 @@ struct Activate: ParsableCommand {
         signal(SIGINT, SIG_IGN)
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigintSource.setEventHandler {
-            fputs("\nRemoving proxy config...\n", stderr)
-            NETransparentProxyManager.loadAllFromPreferences { managers, _ in
-                for m in managers ?? [] {
-                    m.removeFromPreferences { _ in }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                    fputs("Done.\n", stderr)
-                    Foundation.exit(0)
-                }
-            }
+            fputs("\nStopped. Extension stays running.\n", stderr)
+            Foundation.exit(0)
         }
         sigintSource.resume()
         dispatchMain()
