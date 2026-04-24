@@ -33,9 +33,7 @@ final class ProxyManager: NSObject {
             if let existing = managers?.first, existing.protocolConfiguration != nil {
                 fputs("Tractor: existing config found, updating...\n", stderr)
                 existing.isEnabled = true
-                let alwaysOn = NEOnDemandRuleConnect()
-                existing.onDemandRules = [alwaysOn]
-                existing.isOnDemandEnabled = true
+                existing.isOnDemandEnabled = false
                 existing.saveToPreferences { saveError in
                     if let saveError = saveError {
                         fputs("Tractor: save error: \(saveError)\n", stderr)
@@ -76,10 +74,7 @@ final class ProxyManager: NSObject {
         manager.localizedDescription = "Tractor Network Monitor"
         manager.isEnabled = true
 
-        // Auto-start: nesessionmanager keeps the tunnel alive permanently
-        let alwaysOn = NEOnDemandRuleConnect()
-        manager.onDemandRules = [alwaysOn]
-        manager.isOnDemandEnabled = true
+        manager.isOnDemandEnabled = false
 
         manager.saveToPreferences { saveError in
             if let saveError = saveError {

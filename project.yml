@@ -62,14 +62,14 @@ targets:
       path: Sources/TractorNE/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.7.0"
-        CFBundleVersion: "7"
+        CFBundleShortVersionString: "0.8.0"
+        CFBundleVersion: "8"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
           NEProviderClasses:
             com.apple.networkextension.app-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
-          NEMachServiceName: group.3FGZQE8AW3..com.jacobgroundwater.Tractor.xpc
+          NEMachServiceName: group.com.jacobgroundwater.Tractor
     settings:
       base:
         PRODUCT_NAME: com.jacobgroundwater.Tractor.NE
