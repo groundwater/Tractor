@@ -159,7 +159,7 @@ final class FlowSocketListener {
         let host = json["host"] as? String ?? ""
         let port = UInt16(json["port"] as? String ?? "0") ?? 0
 
-        // Byte count update (connection closed)
+        // Byte count update (live or final)
         if let bytesOut = json["bytesOut"] as? Int64,
            let bytesIn = json["bytesIn"] as? Int64 {
             onBytesUpdate?(pid, host, port, bytesOut, bytesIn)

@@ -415,7 +415,7 @@ final class TUI: EventSink {
     // NetworkStats removed — NE proxy provides byte counts directly
 
     /// SNI sniffer for hostname resolution
-    private var sniSniffer: SNISniffer?
+    // SNISniffer removed — reverse DNS handles hostname resolution
 
     func excludeSelf() {
         selfPid = getpid()
@@ -440,9 +440,7 @@ final class TUI: EventSink {
     func start(header: String) {
         headerText = header
 
-        // Start SNI sniffer (NetworkStats removed — NE provides byte counts)
-        sniSniffer = SNISniffer()
-        sniSniffer?.start()
+        // NetworkStats and SNISniffer removed — NE proxy provides connections and byte counts
 
         setlocale(LC_ALL, "")
         initscr()
@@ -505,7 +503,7 @@ final class TUI: EventSink {
         stopped = true
         timer?.cancel()
         timer = nil
-        sniSniffer?.stop()
+        // cleanup handled by flow socket disconnect
         endwin()
     }
 
@@ -2205,17 +2203,23 @@ final class TUI: EventSink {
         recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
     }
 
-    /// Update byte counts for a connection (called from NE flow reports)
+    /// Update byte counts for a connection (called from NE flow reports — live and final)
     func updateConnectionBytes(pid: pid_t, remoteAddr: String, remotePort: UInt16, txBytes: UInt64, rxBytes: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
         let key = "\(remoteAddr):\(remotePort)"
         if var conn = row.connections[key] {
+            let hadRx = conn.rxBytes
+            let hadTx = conn.txBytes
             conn.txBytes = txBytes
             conn.rxBytes = rxBytes
-            conn.alive = false  // byte report comes when connection closes
             row.connections[key] = conn
+            // Auto-expand on byte activity
+            if autoExpandEnabled {
+                if rxBytes > hadRx && expandCriteria.netRead { autoExpand(pid, panel: .net) }
+                if txBytes > hadTx && expandCriteria.netWrite { autoExpand(pid, panel: .net) }
+            }
         }
     }
 
@@ -2386,9 +2390,6 @@ final class TUI: EventSink {
     }
 
     private func resolveHost(_ ip: String, port: UInt16) -> String? {
-        // Try SNI sniffer first — has the hostname from the ClientHello
-        if let name = sniSniffer?.hostname(for: ip) { return name }
-        // Fall back to reverse DNS
         if let name = reverseDNS(ip) { return name }
         return nil
     }

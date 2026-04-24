@@ -16,6 +16,9 @@ final class TCPBridge: NSObject {
     private let connection: NWTCPConnection
     private let onComplete: (Int64, Int64) -> Void
 
+    /// Called on each chunk with cumulative byte counts
+    var onBytesUpdated: ((Int64, Int64) -> Void)?
+
     private var bytesOut: Int64 = 0
     private var bytesIn: Int64 = 0
     private var tornDown = false
@@ -61,6 +64,7 @@ final class TCPBridge: NSObject {
             }
             let chunk = data!
             self.bytesOut += Int64(chunk.count)
+            self.onBytesUpdated?(self.bytesOut, self.bytesIn)
             self.connection.write(chunk) { sendError in
                 if let sendError = sendError {
                     NSLog("TractorNE: bridge send error: \(sendError)")
@@ -87,6 +91,7 @@ final class TCPBridge: NSObject {
                 return
             }
             self.bytesIn += Int64(data.count)
+            self.onBytesUpdated?(self.bytesOut, self.bytesIn)
             self.flow.write(data) { writeError in
                 if let writeError = writeError {
                     self.teardown()

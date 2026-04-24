@@ -90,6 +90,11 @@ class TransparentProxy: NETransparentProxyProvider {
         }
         box.bridge = bridge
 
+        // Live byte count updates
+        bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+        }
+
         bridgeLock.lock()
         activeBridges[ObjectIdentifier(bridge)] = bridge
         bridgeLock.unlock()

@@ -28,7 +28,6 @@ targetTemplates:
         OTHER_LDFLAGS:
           - "-lEndpointSecurity"
           - "-lbsm"
-          - "-lpcap"
           - "-lsqlite3"
           - "-framework"
           - "NetworkExtension"
