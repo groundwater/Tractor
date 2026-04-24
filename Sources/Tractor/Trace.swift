@@ -8,20 +8,17 @@ private var activeTUI: TUI?
 private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
 private var activeSQLiteLog: SQLiteLog?
-private var activeProxyManager: ProxyManager?
-private var activeFlowListener: FlowSocketListener?
+private var activeFlowClient: FlowXPCClient?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
     activeESClient?.stop()
     activeSQLiteLog?.close()
-    // Close the flow socket — the sysext detects the disconnect within 1s
-    // and clears its watch list, stopping all interception. No need to
-    // remove the proxy config (that's slow and blocks exit).
-    activeFlowListener?.stop()
-    activeFlowListener = nil
-    activeProxyManager = nil
+    // Close the XPC connection — the sysext detects the disconnect
+    // and clears its watch list, stopping all interception.
+    activeFlowClient?.stop()
+    activeFlowClient = nil
     if !message.isEmpty {
         fputs("\n\(message)\n", stderr)
         fflush(stderr)
@@ -197,43 +194,22 @@ struct Trace: ParsableCommand {
 
         // Activate network extension if requested
         if net {
-            // Start socket listener first so the sysext can connect immediately
-            let flowListener = FlowSocketListener(sink: sink)
-            activeFlowListener = flowListener
-            flowListener.start()
+            let flowClient = FlowXPCClient(sink: sink)
+            activeFlowClient = flowClient
+            flowClient.start()
 
-            // Wire up byte count updates to the TUI
             if let t = tui {
-                flowListener.onBytesUpdate = { pid, host, port, bytesOut, bytesIn in
+                flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn in
                     t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
                                             txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn))
                 }
             }
 
-            // Push initial PID list from the tree
-            flowListener.updateWatchList(tree.snapshot)
+            flowClient.updateWatchList(tree.snapshot)
 
-            // When ES is about to allow a new tracked process, push the
-            // updated PID list to the sysext BEFORE the process can run.
-            esClient.onBeforeAllow = { [weak flowListener, weak tree] pid in
-                guard let fl = flowListener, let t = tree else { return }
-                fl.updateWatchList(t.snapshot)
-            }
-
-            let pm = ProxyManager()
-            activeProxyManager = pm
-            // Route status messages to TUI or stderr depending on mode
-            if let t = tui {
-                pm.onStatus = { msg in t.showStatus(msg) }
-            }
-            pm.activate { [weak tui] error in
-                if let error = error {
-                    if let t = tui {
-                        t.showStatus("net error: \(error.localizedDescription)")
-                    } else {
-                        fputs("Tractor: network extension error: \(error)\n", stderr)
-                    }
-                }
+            esClient.onBeforeAllow = { [weak flowClient, weak tree] pid in
+                guard let fc = flowClient, let t = tree else { return }
+                fc.updateWatchList(t.snapshot)
             }
         }
 

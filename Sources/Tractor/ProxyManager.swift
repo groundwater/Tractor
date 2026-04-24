@@ -3,57 +3,16 @@ import NetworkExtension
 import SystemExtensions
 
 /// Manages the TractorNE system extension lifecycle.
-/// Activates the transparent proxy on start, deactivates on stop.
+/// Used by the `activate` subcommand to install and start the sysext.
 final class ProxyManager: NSObject {
     static let sysextBundleID = "com.jacobgroundwater.Tractor.NE"
 
     private var activationCompletion: ((Error?) -> Void)?
-    private var deactivationCompletion: ((Error?) -> Void)?
-    private var skipEnableOnActivation = false
 
-    /// Optional callback for status messages (routed to TUI or stderr depending on mode)
-    var onStatus: ((String) -> Void)?
-
-    private func log(_ msg: String) {
-        if let cb = onStatus {
-            cb(msg)
-        } else {
-            fputs("Tractor: \(msg)\n", stderr)
-        }
-    }
-
-    /// Install and activate the system extension + transparent proxy.
+    /// Activate the system extension and start the proxy tunnel.
     func activate(completion: @escaping (Error?) -> Void) {
-        enableProxy { [weak self] error in
-            if error == nil {
-                completion(nil)
-                // Update sysext binary in background — skip enableProxy on success
-                // since the tunnel is already running
-                self?.activationCompletion = { _ in /* already running */ }
-                self?.skipEnableOnActivation = true
-                let request = OSSystemExtensionRequest.activationRequest(
-                    forExtensionWithIdentifier: Self.sysextBundleID,
-                    queue: .main
-                )
-                request.delegate = self
-                OSSystemExtensionManager.shared.submitRequest(request)
-                return
-            }
-            self?.log("activating network extension...")
-            self?.activationCompletion = completion
-            let request = OSSystemExtensionRequest.activationRequest(
-                forExtensionWithIdentifier: Self.sysextBundleID,
-                queue: .main
-            )
-            request.delegate = self
-            OSSystemExtensionManager.shared.submitRequest(request)
-        }
-    }
-
-    /// Deactivate the system extension.
-    func deactivate(completion: @escaping (Error?) -> Void) {
-        deactivationCompletion = completion
-        let request = OSSystemExtensionRequest.deactivationRequest(
+        activationCompletion = completion
+        let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: Self.sysextBundleID,
             queue: .main
         )
@@ -62,27 +21,37 @@ final class ProxyManager: NSObject {
     }
 
     private func enableProxy(completion: @escaping (Error?) -> Void) {
+        fputs("Tractor: enableProxy called\n", stderr)
         NETransparentProxyManager.loadAllFromPreferences { managers, error in
             if let error = error {
+                fputs("Tractor: loadAll error: \(error)\n", stderr)
                 completion(error)
                 return
             }
+            fputs("Tractor: found \(managers?.count ?? 0) configs\n", stderr)
 
             if let existing = managers?.first, existing.protocolConfiguration != nil {
+                fputs("Tractor: existing config found, updating...\n", stderr)
                 existing.isEnabled = true
+                let alwaysOn = NEOnDemandRuleConnect()
+                existing.onDemandRules = [alwaysOn]
+                existing.isOnDemandEnabled = true
                 existing.saveToPreferences { saveError in
-                    if saveError != nil {
+                    if let saveError = saveError {
+                        fputs("Tractor: save error: \(saveError)\n", stderr)
                         existing.removeFromPreferences { _ in
                             self.createFreshProxy(completion: completion)
                         }
                         return
                     }
                     existing.loadFromPreferences { _ in
+                        fputs("Tractor: starting tunnel...\n", stderr)
                         do {
-                            try existing.connection.startVPNTunnel()
-                            self.log("network extension active")
+                            try (existing.connection as? NETunnelProviderSession)?.startTunnel()
+                            fputs("Tractor: tunnel started\n", stderr)
                             completion(nil)
                         } catch {
+                            fputs("Tractor: startTunnel error: \(error)\n", stderr)
                             completion(error)
                         }
                     }
@@ -90,11 +59,13 @@ final class ProxyManager: NSObject {
                 return
             }
 
+            fputs("Tractor: no existing config, creating fresh\n", stderr)
             self.createFreshProxy(completion: completion)
         }
     }
 
     private func createFreshProxy(completion: @escaping (Error?) -> Void) {
+        fputs("Tractor: createFreshProxy\n", stderr)
         let manager = NETransparentProxyManager()
 
         let proto = NETunnelProviderProtocol()
@@ -105,55 +76,43 @@ final class ProxyManager: NSObject {
         manager.localizedDescription = "Tractor Network Monitor"
         manager.isEnabled = true
 
+        // Auto-start: nesessionmanager keeps the tunnel alive permanently
+        let alwaysOn = NEOnDemandRuleConnect()
+        manager.onDemandRules = [alwaysOn]
+        manager.isOnDemandEnabled = true
+
         manager.saveToPreferences { saveError in
             if let saveError = saveError {
+                fputs("Tractor: save error: \(saveError)\n", stderr)
                 completion(saveError)
                 return
             }
+            fputs("Tractor: config saved, loading...\n", stderr)
             manager.loadFromPreferences { loadError in
                 if let loadError = loadError {
+                    fputs("Tractor: load error: \(loadError)\n", stderr)
                     completion(loadError)
                     return
                 }
+                fputs("Tractor: starting tunnel...\n", stderr)
                 do {
-                    try manager.connection.startVPNTunnel()
-                    self.log("network extension active")
+                    try (manager.connection as? NETunnelProviderSession)?.startTunnel()
+                    fputs("Tractor: tunnel started\n", stderr)
                     completion(nil)
                 } catch {
+                    fputs("Tractor: startTunnel error: \(error)\n", stderr)
                     completion(error)
                 }
             }
         }
     }
 
-    func disableProxy(completion: @escaping (Error?) -> Void) {
-        NETransparentProxyManager.loadAllFromPreferences { managers, error in
-            if let error = error {
-                completion(error)
-                return
-            }
-            guard let manager = managers?.first else {
-                completion(nil)
-                return
-            }
-            manager.removeFromPreferences { removeError in
-                completion(removeError)
-            }
-        }
-    }
 }
 
 extension ProxyManager: OSSystemExtensionRequestDelegate {
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        if skipEnableOnActivation {
-            // Background update — tunnel is already running, don't re-enable
-            skipEnableOnActivation = false
-            activationCompletion?(nil)
-            activationCompletion = nil
-            return
-        }
         retryEnableProxy(attemptsLeft: 5)
     }
 
@@ -165,7 +124,7 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
                 return
             }
             if attemptsLeft <= 0 {
-                self?.log("network extension failed: \(error!.localizedDescription)")
+                fputs("Tractor: network extension failed: \(error!.localizedDescription)\n", stderr)
                 self?.activationCompletion?(error)
                 self?.activationCompletion = nil
                 return
@@ -177,15 +136,13 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        log("sysext failed: \(error.localizedDescription)")
+        fputs("Tractor: sysext failed: \(error.localizedDescription)\n", stderr)
         activationCompletion?(error)
         activationCompletion = nil
-        deactivationCompletion?(error)
-        deactivationCompletion = nil
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        log("approve network extension in System Settings")
+        fputs("Tractor: approve network extension in System Settings\n", stderr)
     }
 
     func request(_ request: OSSystemExtensionRequest,

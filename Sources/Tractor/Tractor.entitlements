@@ -10,5 +10,9 @@
 	</array>
 	<key>com.apple.developer.system-extension.install</key>
 	<true/>
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>group.com.jacobgroundwater.Tractor.xpc</string>
+	</array>
 </dict>
 </plist>

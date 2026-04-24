@@ -1,11 +1,10 @@
 PROJECT   = Tractor
 BUILD_DIR = $(CURDIR)/.build
 INSTALL_APP  = /Applications/Tractor.app
-SYMLINK      = /usr/local/bin/tractor
 PKG_DIR      = $(BUILD_DIR)/pkg
 PKG_OUT      = $(BUILD_DIR)/Tractor.pkg
 
-.PHONY: debug release pkg install uninstall clean
+.PHONY: debug release pkg install uninstall clean activate
 
 # Debug: bare tool binary, works with SIP disabled (development/testing)
 debug:
@@ -16,8 +15,11 @@ debug:
 # Release: .app bundle suitable for signing, notarization, and provisioning profiles
 release:
 	xcodegen generate
+	@# Fix: XcodeGen creates a bundle for TractorNE, but sysexts need system-extension product type
+	@sed -i '' '/TractorNE/,/productType/{s/productType = "com.apple.product-type.bundle";/productType = "com.apple.product-type.system-extension";/;}' $(PROJECT).xcodeproj/project.pbxproj
 	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Release \
-		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) build
+		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) \
+		-allowProvisioningUpdates -allowProvisioningDeviceRegistration build
 
 # Pkg: build a .pkg installer
 pkg: release
@@ -38,16 +40,18 @@ pkg: release
 
 # Install: build .app bundle and install to /Applications
 install: release
+	sudo systemextensionsctl reset 2>/dev/null || true
+	sudo find /Library/SystemExtensions -name "com.jacobgroundwater*" -exec rm -rf {} + 2>/dev/null || true
 	sudo rm -rf "$(INSTALL_APP)"
 	sudo cp -R "$(BUILD_DIR)/Release/Tractor.app" "$(INSTALL_APP)"
-	sudo mkdir -p $(dir $(SYMLINK))
-	sudo ln -sf "$(INSTALL_APP)/Contents/MacOS/Tractor" "$(SYMLINK)"
 	@echo ""
 	@echo "Installed: $(INSTALL_APP)"
-	@echo "Symlink:   $(SYMLINK) -> $(INSTALL_APP)/Contents/MacOS/Tractor"
+
+activate:
+	@test -d "$(INSTALL_APP)" || $(MAKE) install
+	sudo "$(INSTALL_APP)/Contents/MacOS/Tractor" activate
 
 uninstall:
-	sudo rm -f "$(SYMLINK)"
 	sudo rm -rf "$(INSTALL_APP)"
 	@echo "Uninstalled."
 

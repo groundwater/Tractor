@@ -1,174 +1,86 @@
 import Foundation
 
-/// Well-known socket path for sysext ↔ CLI communication.
-let tractorSocketPath = "/tmp/tractor-flow.sock"
+private let xpcServiceName = "group.com.jacobgroundwater.Tractor.xpc"
 
-/// Bidirectional Unix domain socket bridge to the TractorNE sysext.
-///
-/// - CLI → Sysext: `{"watch": [pid1, pid2, ...]}` — set the PID filter
-/// - Sysext → CLI: `{"flow": {...}}` — report an intercepted flow
-final class FlowSocketListener {
+/// XPC protocol matching the sysext's exported interface
+@objc protocol TractorNEXPC {
+    func updateWatchList(_ pids: [Int32])
+    func pollEvents(reply: @escaping (Data) -> Void)
+}
+
+/// Connects to the TractorNE sysext via XPC and polls for flow events.
+final class FlowXPCClient {
     private let sink: EventSink
-    private var listenSocket: Int32 = -1
-    private var listenSource: DispatchSourceRead?
-    private var clientFds: [Int32] = []
-    private var clientSources: [Int32: DispatchSourceRead] = [:]
-    private var lastWatchMessage: Data?  // cached so new connections get current state
+    private var connection: NSXPCConnection?
+    private var proxy: TractorNEXPC?
+    private var pollTimer: DispatchSourceTimer?
 
-    /// Called when the sysext reports final byte counts for a closed connection.
-    var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?  // (pid, host, port, out, in)
+    var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?
 
     init(sink: EventSink) {
         self.sink = sink
     }
 
     func start() {
-        unlink(tractorSocketPath)
-
-        listenSocket = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard listenSocket >= 0 else {
-            fputs("Tractor: failed to create socket: \(errno)\n", stderr)
-            return
+        let conn = NSXPCConnection(machServiceName: xpcServiceName, options: .privileged)
+        conn.remoteObjectInterface = NSXPCInterface(with: TractorNEXPC.self)
+        conn.invalidationHandler = {
+            NSLog("Tractor: XPC connection to sysext invalidated")
         }
+        conn.resume()
+        connection = conn
+        proxy = conn.remoteObjectProxyWithErrorHandler { error in
+            // Silently retry on next poll
+        } as? TractorNEXPC
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = tractorSocketPath.utf8CString
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: 104) { dst in
-                pathBytes.withUnsafeBufferPointer { src in
-                    memcpy(dst, src.baseAddress!, min(src.count, 104))
-                }
-            }
+        // Start polling
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.5, repeating: .milliseconds(200))
+        timer.setEventHandler { [weak self] in
+            self?.pollEvents()
         }
-
-        let bindResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.bind(listenSocket, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            fputs("Tractor: bind failed: \(errno)\n", stderr)
-            close(listenSocket)
-            return
-        }
-
-        chmod(tractorSocketPath, 0o777)
-
-        guard Darwin.listen(listenSocket, 5) == 0 else {
-            fputs("Tractor: listen failed: \(errno)\n", stderr)
-            close(listenSocket)
-            return
-        }
-
-        fcntl(listenSocket, F_SETFL, O_NONBLOCK)
-
-        let source = DispatchSource.makeReadSource(fileDescriptor: listenSocket, queue: .main)
-        source.setEventHandler { [weak self] in
-            self?.acceptClient()
-        }
-        source.setCancelHandler { [weak self] in
-            if let fd = self?.listenSocket, fd >= 0 { close(fd) }
-        }
-        listenSource = source
-        source.resume()
-
-        // Don't log to stderr in TUI mode — it clobbers ncurses
+        pollTimer = timer
+        timer.resume()
     }
 
     func stop() {
-        listenSource?.cancel()
-        listenSource = nil
-        for (fd, source) in clientSources {
-            source.cancel()
-            close(fd)
-        }
-        clientFds.removeAll()
-        clientSources.removeAll()
-        unlink(tractorSocketPath)
+        pollTimer?.cancel()
+        pollTimer = nil
+        connection?.invalidate()
+        connection = nil
+        proxy = nil
     }
 
-    /// Push updated PID watch list to all connected sysext clients.
     func updateWatchList(_ pids: Set<pid_t>) {
-        let pidArray = pids.map { Int($0) }
-        guard let data = try? JSONSerialization.data(withJSONObject: ["watch": pidArray]),
-              var msg = String(data: data, encoding: .utf8) else { return }
-        msg += "\n"
-        let msgData = Data(msg.utf8)
-        lastWatchMessage = msgData
-
-        for fd in clientFds {
-            sendToClient(fd, data: msgData)
-        }
+        proxy?.updateWatchList(Array(pids))
     }
 
     // MARK: - Private
 
-    private func sendToClient(_ fd: Int32, data: Data) {
-        data.withUnsafeBytes { buf in
-            _ = write(fd, buf.baseAddress!, buf.count)
+    private func pollEvents() {
+        proxy?.pollEvents { [weak self] data in
+            self?.handleEvents(data)
         }
     }
 
-    private func acceptClient() {
-        let clientFd = Darwin.accept(listenSocket, nil, nil)
-        guard clientFd >= 0 else { return }
+    private func handleEvents(_ data: Data) {
+        guard let events = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
 
-        fcntl(clientFd, F_SETFL, O_NONBLOCK)
-        clientFds.append(clientFd)
-        // sysext connected
+        for event in events {
+            let pid = (event["pid"] as? Int).map { Int32($0) } ?? -1
+            let host = event["host"] as? String ?? ""
+            let port = UInt16(event["port"] as? String ?? "0") ?? 0
 
-        // Send current watch list immediately
-        if let msg = lastWatchMessage {
-            sendToClient(clientFd, data: msg)
-        }
-
-        var buffer = Data()
-
-        let source = DispatchSource.makeReadSource(fileDescriptor: clientFd, queue: .main)
-        source.setEventHandler { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 8192)
-            let n = read(clientFd, &buf, buf.count)
-            if n <= 0 {
-                source.cancel()
-                close(clientFd)
-                self?.clientFds.removeAll { $0 == clientFd }
-                self?.clientSources.removeValue(forKey: clientFd)
-                // sysext disconnected
-                return
+            if let bytesOut = event["bytesOut"] as? Int64,
+               let bytesIn = event["bytesIn"] as? Int64 {
+                onBytesUpdate?(pid, host, port, bytesOut, bytesIn)
+                continue
             }
-            buffer.append(contentsOf: buf[..<n])
 
-            while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
-                let line = buffer[buffer.startIndex..<newline]
-                buffer = Data(buffer[buffer.index(after: newline)...])
-                self?.handleLine(line)
+            if event["proto"] != nil {
+                sink.onConnect(pid: pid, ppid: 0, process: "", user: 0,
+                               remoteAddr: host, remotePort: port)
             }
         }
-        source.setCancelHandler {
-            close(clientFd)
-        }
-        clientSources[clientFd] = source
-        source.resume()
-    }
-
-    private func handleLine(_ data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-
-        let pid = json["pid"] as? Int32 ?? -1
-        let host = json["host"] as? String ?? ""
-        let port = UInt16(json["port"] as? String ?? "0") ?? 0
-
-        // Byte count update (live or final)
-        if let bytesOut = json["bytesOut"] as? Int64,
-           let bytesIn = json["bytesIn"] as? Int64 {
-            onBytesUpdate?(pid, host, port, bytesOut, bytesIn)
-            return
-        }
-
-        // New connection event
-        let process = json["process"] as? String ?? ""
-        sink.onConnect(pid: pid, ppid: 0, process: process, user: 0,
-                       remoteAddr: host, remotePort: port)
     }
 }

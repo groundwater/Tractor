@@ -40,6 +40,8 @@ targetTemplates:
         com.apple.developer.system-extension.install: true
         com.apple.developer.networking.networkextension:
           - app-proxy-provider
+        com.apple.security.temporary-exception.mach-lookup.global-name:
+          - group.com.jacobgroundwater.Tractor.xpc
 
 targets:
   Tractor:
@@ -60,41 +62,57 @@ targets:
       path: Sources/TractorNE/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.5.0"
+        CFBundleVersion: "5"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
           NEProviderClasses:
             com.apple.networkextension.app-proxy: "$(PRODUCT_MODULE_NAME).TransparentProxy"
+          NEMachServiceName: group.com.jacobgroundwater.Tractor.xpc
     settings:
       base:
         PRODUCT_NAME: com.jacobgroundwater.Tractor.NE
         PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor.NE
         SWIFT_VERSION: "5.9"
-        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/TractorNE/TractorNE.entitlements
         INFOPLIST_FILE: Sources/TractorNE/Info.plist
         SKIP_INSTALL: "YES"
         WRAPPER_EXTENSION: systemextension
         MACH_O_TYPE: mh_execute
+        PROVISIONING_PROFILE_SPECIFIER: ""
 
   TractorApp:
-    templates:
-      - TractorCommon
     type: application
+    platform: macOS
     sources:
+      - path: Sources/Tractor
+        excludes:
+          - "*.png"
       - path: icon/Tractor.icns
         buildPhase: resources
     dependencies:
+      - package: swift-argument-parser
+        product: ArgumentParser
       - target: TractorNE
         embed: false
     postBuildScripts:
       - script: |
-          mkdir -p "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions"
-          ditto "${TARGET_BUILD_DIR}/com.jacobgroundwater.Tractor.NE.systemextension" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension"
-          /usr/bin/codesign --force --sign - --deep --entitlements "${CODE_SIGN_ENTITLEMENTS}" --timestamp=none "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
+          SYSEXT_SRC="${TARGET_BUILD_DIR}/com.jacobgroundwater.Tractor.NE.systemextension"
+          SYSEXT_DST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions"
+          mkdir -p "${SYSEXT_DST}"
+          ditto "${SYSEXT_SRC}" "${SYSEXT_DST}/com.jacobgroundwater.Tractor.NE.systemextension"
+          /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --entitlements "${SRCROOT}/Sources/Tractor/TractorApp.entitlements" --timestamp=none "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
         name: "Embed System Extension"
+    entitlements:
+      path: Sources/Tractor/TractorApp.entitlements
+      properties:
+        com.apple.developer.system-extension.install: true
+        com.apple.developer.networking.networkextension:
+          - app-proxy-provider
     info:
       path: Sources/Tractor/Info.plist
       properties:
@@ -112,7 +130,21 @@ targets:
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic for security analysis."
     settings:
       base:
-        CODE_SIGN_IDENTITY: "-"
+        PRODUCT_NAME: Tractor
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/Tractor/TractorApp.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor
         INFOPLIST_FILE: Sources/Tractor/Info.plist
+        OTHER_LDFLAGS:
+          - "-lEndpointSecurity"
+          - "-lbsm"
+          - "-lsqlite3"
+          - "-framework"
+          - "NetworkExtension"
+          - "-framework"
+          - "SystemExtensions"

@@ -1,33 +1,46 @@
 import ArgumentParser
 import Foundation
-
-/// If launched via a symlink, re-exec from the real path so that
-/// NSBundle.main resolves to the .app bundle. This is required for
-/// NETunnelProviderManager.saveToPreferences to find the sysext.
-private func reexecIfSymlinked() {
-    let fm = FileManager.default
-    let argv0 = ProcessInfo.processInfo.arguments[0]
-    guard let realPath = try? fm.destinationOfSymbolicLink(atPath: argv0) else { return }
-    // Already running from the real path
-    if argv0 == realPath { return }
-    // Re-exec from the resolved path
-    var args = ProcessInfo.processInfo.arguments
-    args[0] = realPath
-    let cArgs = args.map { strdup($0) } + [nil]
-    execv(realPath, cArgs)
-    // execv only returns on error
-}
+import NetworkExtension
 
 @main
 struct Tractor: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tractor",
         abstract: "Monitor AI coding agent activity via Endpoint Security",
-        subcommands: [Trace.self]
+        subcommands: [Trace.self, Activate.self]
+    )
+}
+
+struct Activate: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Activate the network extension (one-time setup)"
     )
 
-    static func main() {
-        reexecIfSymlinked()
-        Self.main(nil)
+    func run() throws {
+        let pm = ProxyManager()
+        pm.activate { error in
+            if let error = error {
+                fputs("Error: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+            fputs("Network extension running. Press Ctrl-C to stop.\n", stderr)
+        }
+        // Stay alive — the tunnel needs this process to remain running
+        signal(SIGINT, SIG_IGN)
+        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigintSource.setEventHandler {
+            fputs("\nRemoving proxy config...\n", stderr)
+            NETransparentProxyManager.loadAllFromPreferences { managers, _ in
+                for m in managers ?? [] {
+                    m.removeFromPreferences { _ in }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    fputs("Done.\n", stderr)
+                    Foundation.exit(0)
+                }
+            }
+        }
+        sigintSource.resume()
+        dispatchMain()
     }
 }
