@@ -33,7 +33,10 @@ class TransparentProxy: NETransparentProxyProvider {
             direction: .outbound
         )
 
-        settings.includedNetworkRules = [tcpRule, udpRule]
+        // Only intercept TCP for now — UDP relay requires a real socket
+        // to forward datagrams, and broken UDP kills DNS (and this session).
+        // TODO: add UDP interception with proper datagram forwarding
+        settings.includedNetworkRules = [tcpRule]
 
         setTunnelNetworkSettings(settings) { error in
             if let error = error {
@@ -75,21 +78,10 @@ class TransparentProxy: NETransparentProxyProvider {
             return true
         }
 
-        if let udp = flow as? NEAppProxyUDPFlow {
-            let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
-            reporter.reportFlow(pid: pid, process: "", host: "", port: "0", proto: "udp")
-
-            let endpoint = NWHostEndpoint(hostname: "0.0.0.0", port: "0")
-            udp.open(withLocalEndpoint: endpoint) { error in
-                if let error = error {
-                    NSLog("TractorNE: UDP open error: \(error)")
-                    udp.closeReadWithError(error)
-                    udp.closeWriteWithError(error)
-                    return
-                }
-                self.relayUDP(udp)
-            }
-            return true
+        // UDP flows are not intercepted (no network rules for UDP).
+        // If we receive one anyway, let it pass through.
+        if flow is NEAppProxyUDPFlow {
+            return false
         }
 
         return false
