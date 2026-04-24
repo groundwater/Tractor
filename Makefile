@@ -12,8 +12,16 @@ debug:
 	xcodebuild -project $(PROJECT).xcodeproj -scheme $(PROJECT) -configuration Debug \
 		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) build
 
+# Auto-increment sysext build number so macOS recognizes replacement
+bump-sysext-version:
+	@OLD=$$(awk '/CFBundleVersion:/{gsub(/"/,""); print $$2; exit}' project.yml); \
+	NEW=$$((OLD + 1)); \
+	awk -v n="$$NEW" '/CFBundleVersion:/ && !done {sub(/"[0-9]+"/, "\"" n "\""); done=1} 1' project.yml > project.yml.tmp && \
+	mv project.yml.tmp project.yml; \
+	echo "Tractor: sysext build number → $$NEW"
+
 # Release: .app bundle suitable for signing, notarization, and provisioning profiles
-release:
+release: bump-sysext-version
 	xcodegen generate
 	@# Fix: XcodeGen creates a bundle for TractorNE, but sysexts need system-extension product type
 	@sed -i '' '/TractorNE/,/productType/{s/productType = "com.apple.product-type.bundle";/productType = "com.apple.product-type.system-extension";/;}' $(PROJECT).xcodeproj/project.pbxproj

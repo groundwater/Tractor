@@ -30,25 +30,35 @@ class TransparentProxy: NETransparentProxyProvider {
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
         guard let tcp = flow as? NEAppProxyTCPFlow else { return false }
 
+        let remote = tcp.remoteEndpoint as? NWHostEndpoint
         let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
         guard reporter.isWatched(pid) else { return false }
 
-        let remote = tcp.remoteEndpoint as? NWHostEndpoint
         let host = remote?.hostname ?? "?"
         let port = remote?.port ?? "0"
-
         guard let portNum = UInt16(port), portNum > 0 else { return false }
 
+        // Always report the flow for visibility
         reporter.reportFlow(pid: pid, host: host, port: port, proto: "tcp")
 
-        // Create a TCP connection that bypasses the proxy
+        // IPv6: don't intercept. The sysext can't bridge IPv6 when the host
+        // lacks global IPv6 connectivity, and claiming the flow would make the
+        // app think the connection succeeded. Return false so the kernel
+        // rejects it instantly and happy eyeballs falls through to IPv4.
+        if host.contains(":") {
+            return false
+        }
+
+        // Use createTCPConnection — the NE framework's own async bypass API.
+        // Despite being deprecated, it's the only API that creates connections
+        // exempt from our own proxy interception.
         let endpoint = NWHostEndpoint(hostname: host, port: port)
-        let remoteConnection = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
+        let conn = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
 
         class BridgeBox { var bridge: TCPBridge? }
         let box = BridgeBox()
 
-        let bridge = TCPBridge(flow: tcp, connection: remoteConnection) { [weak self] bytesOut, bytesIn in
+        let bridge = TCPBridge(flow: tcp, connection: conn) { [weak self] bytesOut, bytesIn in
             self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true)
             if let self = self, let b = box.bridge {
                 self.bridgeLock.lock()
@@ -71,9 +81,10 @@ class TransparentProxy: NETransparentProxyProvider {
                 os_log("flow open error: %{public}@", log: log, type: .error, error.localizedDescription)
                 tcp.closeReadWithError(error)
                 tcp.closeWriteWithError(error)
+                bridge.teardown()
                 return
             }
-            bridge.start()
+            bridge.flowDidOpen()
         }
         return true
     }

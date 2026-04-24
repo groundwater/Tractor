@@ -1,60 +1,70 @@
 import Foundation
 import NetworkExtension
+import os.log
 
-/// Bridges an NEAppProxyTCPFlow to the remote via NETunnelProviderSession.
+private let bridgeLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.NE", category: "bridge")
+
+/// Bridges an NEAppProxyTCPFlow to the remote via NWTCPConnection.
 ///
-/// Uses createTCPConnection (from NETunnelProvider) which bypasses the proxy,
-/// preventing the sysext from intercepting its own outbound connections.
-///
-/// Two independent loops:
-///   - Outbound: flow.readData → connection.write  (app → remote)
-///   - Inbound:  connection.readData → flow.write   (remote → app)
-///
-/// Tracks byte counts in both directions.
+/// Uses the deprecated but functional createTCPConnection API which is the
+/// NE framework's own async, non-blocking bypass mechanism. All callbacks
+/// are handled by the framework — no manual threading.
 final class TCPBridge: NSObject {
     private let flow: NEAppProxyTCPFlow
     private let connection: NWTCPConnection
     private let onComplete: (Int64, Int64) -> Void
 
-    /// Called on each chunk with cumulative byte counts
     var onBytesUpdated: ((Int64, Int64) -> Void)?
 
     private var bytesOut: Int64 = 0
     private var bytesIn: Int64 = 0
     private var tornDown = false
+    private var flowOpen = false
+    private var connectionReady = false
 
     init(flow: NEAppProxyTCPFlow, connection: NWTCPConnection, onComplete: @escaping (Int64, Int64) -> Void) {
         self.flow = flow
         self.connection = connection
         self.onComplete = onComplete
-    }
+        super.init()
 
-    func start() {
-        // Wait for connection to be ready before pumping
-        connection.addObserver(self, forKeyPath: "state", options: [.new], context: nil)
+        // KVO with .initial so we catch already-connected state
+        connection.addObserver(self, forKeyPath: "state", options: [.new, .initial], context: nil)
     }
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?,
                                change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         guard keyPath == "state" else { return }
-        switch connection.state {
+        let state = connection.state
+        os_log("bridge state: %d", log: bridgeLog, type: .default, state.rawValue)
+        switch state {
         case .connected:
             connection.removeObserver(self, forKeyPath: "state")
-            pumpOutbound()
-            pumpInbound()
+            connectionReady = true
+            tryStartPumps()
         case .disconnected, .cancelled:
             connection.removeObserver(self, forKeyPath: "state")
             teardown()
         case .invalid:
             connection.removeObserver(self, forKeyPath: "state")
-            NSLog("TractorNE: bridge connection invalid")
             teardown()
         default:
             break
         }
     }
 
-    /// Read from app, send to remote
+    func flowDidOpen() {
+        flowOpen = true
+        tryStartPumps()
+    }
+
+    private func tryStartPumps() {
+        guard connectionReady, flowOpen, !tornDown else { return }
+        os_log("bridge: pumping", log: bridgeLog, type: .default)
+        pumpOutbound()
+        pumpInbound()
+    }
+
     private func pumpOutbound() {
         flow.readData { [weak self] data, error in
             guard let self = self, !self.tornDown else { return }
@@ -66,8 +76,7 @@ final class TCPBridge: NSObject {
             self.bytesOut += Int64(chunk.count)
             self.onBytesUpdated?(self.bytesOut, self.bytesIn)
             self.connection.write(chunk) { sendError in
-                if let sendError = sendError {
-                    NSLog("TractorNE: bridge send error: \(sendError)")
+                if sendError != nil {
                     self.teardown()
                     return
                 }
@@ -76,13 +85,12 @@ final class TCPBridge: NSObject {
         }
     }
 
-    /// Read from remote, send to app
     private func pumpInbound() {
         connection.readMinimumLength(1, maximumLength: 65536) { [weak self] data, error in
             guard let self = self, !self.tornDown else { return }
             if let error = error {
                 self.flow.closeWriteWithError(nil)
-                if !self.tornDown { self.teardown() }
+                self.teardown()
                 return
             }
             guard let data = data, !data.isEmpty else {
@@ -93,7 +101,7 @@ final class TCPBridge: NSObject {
             self.bytesIn += Int64(data.count)
             self.onBytesUpdated?(self.bytesOut, self.bytesIn)
             self.flow.write(data) { writeError in
-                if let writeError = writeError {
+                if writeError != nil {
                     self.teardown()
                     return
                 }
@@ -102,7 +110,7 @@ final class TCPBridge: NSObject {
         }
     }
 
-    private func teardown() {
+    func teardown() {
         guard !tornDown else { return }
         tornDown = true
         connection.cancel()
