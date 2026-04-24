@@ -1161,6 +1161,7 @@ final class TUI: EventSink {
         case 114: return resampleLast        // r
         case 120: return handleXKey            // x
         case 108: return clearExited         // l
+        case 97:  return { self.showAllConnections = !self.showAllConnections }  // a
         default: return nil
         }
     }

@@ -325,7 +325,7 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.files)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
-                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120:
+                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120, 97:
                         // i, d, n, z, k, s, w, l, r, x — all routed through executeShortcut for flash
                         t.executeShortcut(ch)
                     case 126: // '~' - toggle auto mode
