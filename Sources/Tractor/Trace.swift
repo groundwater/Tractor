@@ -40,6 +40,9 @@ struct Trace: ParsableCommand {
     @Option(name: .long, help: "Exact executable path to trace (repeatable)")
     var path: [String] = []
 
+    @Argument(help: "PIDs to trace (all remaining arguments are treated as PIDs until --)")
+    var pids: [Int32] = []
+
     @Flag(help: "Output JSON lines instead of the interactive TUI")
     var json: Bool = false
 
@@ -66,6 +69,7 @@ struct Trace: ParsableCommand {
         var labels: [String] = []
         for n in name { labels.append(n) }
         for p in pid { labels.append("PID \(p)") }
+        for p in pids { labels.append("PID \(p)") }
         for p in path { labels.append(p) }
         let agentLabel = labels.joined(separator: ", ")
 
@@ -116,6 +120,9 @@ struct Trace: ParsableCommand {
             for p in pid {
                 t.addTrackerGroup(kind: .pid, value: "\(p)")
             }
+            for p in pids {
+                t.addTrackerGroup(kind: .pid, value: "\(p)")
+            }
             for p in path {
                 t.addTrackerGroup(kind: .path, value: p)
             }
@@ -126,6 +133,9 @@ struct Trace: ParsableCommand {
                 roots.append(contentsOf: findProcessesByName(n))
             }
             for p in pid {
+                roots.append(p)
+            }
+            for p in pids {
                 roots.append(p)
             }
             for p in path {
