@@ -57,6 +57,7 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
             self?.watchedPids.removeAll()
             self?.pidLock.unlock()
             self?.hasClient = false
+            self?.onWatchListChanged?(false)
         }
         connection.resume()
         hasClient = true
@@ -66,12 +67,16 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
 
     // MARK: - TractorNEXPC
 
+    /// Called when the watch list changes — set by TransparentProxy
+    var onWatchListChanged: ((Bool) -> Void)?
+
     func updateWatchList(_ pids: [Int32]) {
         pidLock.lock()
         watchedPids = Set(pids)
         let count = watchedPids.count
         pidLock.unlock()
         os_log("watch list updated — %d PIDs", log: xpcLog, type: .default, count)
+        onWatchListChanged?(count > 0)
     }
 
     func pollEvents(reply: @escaping (Data) -> Void) {

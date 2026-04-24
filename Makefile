@@ -40,6 +40,7 @@ pkg: release
 
 # Install: build .app bundle and install to /Applications
 install: release
+	sudo killall "com.jacobgroundwater.Tractor.NE" 2>/dev/null || true
 	sudo systemextensionsctl reset 2>/dev/null || true
 	sudo find /Library/SystemExtensions -name "com.jacobgroundwater*" -exec rm -rf {} + 2>/dev/null || true
 	sudo rm -rf "$(INSTALL_APP)"

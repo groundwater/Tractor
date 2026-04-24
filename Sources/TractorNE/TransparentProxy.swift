@@ -11,9 +11,13 @@ class TransparentProxy: NETransparentProxyProvider {
 
     override func startProxy(options: [String: Any]?, completionHandler: @escaping (Error?) -> Void) {
         os_log("startProxy called", log: log, type: .default)
+
+        // When watch list changes, enable/disable TCP interception
+        reporter.onWatchListChanged = { [weak self] hasWatchedPids in
+            self?.updateNetworkRules(hasWatchedPids: hasWatchedPids)
+        }
+
         reporter.connect()
-        // No network rules yet — don't intercept anything.
-        // Rules are set by updateNetworkRules when CLI sends a watch list.
         os_log("proxy ready — no interception until CLI connects", log: log, type: .default)
         completionHandler(nil)
     }
