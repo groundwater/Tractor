@@ -2192,6 +2192,21 @@ final class TUI: EventSink {
     func addProcess(pid: pid_t, ppid: pid_t, name: String, argv: String) {
         lock.lock()
         defer { lock.unlock() }
+        // If a placeholder row was created by an early connect/file event,
+        // update its metadata but preserve accumulated event data.
+        if let existing = rows[pid] {
+            existing.ppid = ppid
+            existing.name = name
+            existing.argv = argv
+            if expandSpecified {
+                if !expandCriteria.hasAnyFile { existing.filesAuto = false }
+                if !expandCriteria.hasAnyNet { existing.netAuto = false }
+            }
+            if autoExpandEnabled && expandCriteria.procCreate {
+                autoExpand(pid, panel: .tree)
+            }
+            return
+        }
         let row = ProcessRow(pid: pid, ppid: ppid, name: name, argv: argv)
         if viewMode == .tree && !autoExpandEnabled { row.disclosed = true }
         // When --expand is explicit, disable auto-show for omitted categories
@@ -2203,6 +2218,43 @@ final class TUI: EventSink {
         if autoExpandEnabled && expandCriteria.procCreate {
             autoExpand(pid, panel: .tree)
         }
+    }
+
+    /// Ensure a row exists for pid, creating a placeholder if needed.
+    /// Respects tracker group filtering. Must be called while NOT holding lock.
+    private func ensureProcess(pid: pid_t, ppid: pid_t, name: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        // If row already exists, nothing to do
+        if rows[pid] != nil { return }
+        // Check tracker group membership (same logic as onExec)
+        let hasGroups = !trackerGroups.isEmpty
+        if hasGroups {
+            let pidHasGroup = !(pidToGroups[pid] ?? []).isEmpty
+            if !pidHasGroup {
+                // Try inheriting from parent
+                if let parentGroups = pidToGroups[ppid], !parentGroups.isEmpty {
+                    pidToGroups[pid, default: []].formUnion(parentGroups)
+                }
+                // Try matching by name
+                for group in trackerGroups {
+                    if case .name = group.kind {
+                        let lower = group.value.lowercased()
+                        if name.lowercased().contains(lower) {
+                            pidToGroups[pid, default: []].insert(group.id)
+                        }
+                    }
+                }
+                if (pidToGroups[pid] ?? []).isEmpty { return }
+            }
+        }
+        let row = ProcessRow(pid: pid, ppid: ppid, name: name, argv: "")
+        if viewMode == .tree && !autoExpandEnabled { row.disclosed = true }
+        if expandSpecified {
+            if !expandCriteria.hasAnyFile { row.filesAuto = false }
+            if !expandCriteria.hasAnyNet { row.netAuto = false }
+        }
+        rows[pid] = row
     }
 
     func markExited(pid: pid_t, exitCode: Int32 = 0) {
@@ -2289,12 +2341,14 @@ final class TUI: EventSink {
     }
 
     func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
+        ensureProcess(pid: pid, ppid: ppid, name: process)
         // For renames, use the destination path (that's the file that matters)
         let path = details["to"] ?? details["path"] ?? details["from"] ?? "?"
         recordFileOp(type: type, pid: pid, path: path)
     }
 
     func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
+        ensureProcess(pid: pid, ppid: ppid, name: process)
         recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
     }
 
