@@ -1288,8 +1288,12 @@ final class TUI: EventSink {
         lines.append(("", .separator))
 
         // Response
-        for line in rt.response.components(separatedBy: "\n") {
-            lines.append((line.replacingOccurrences(of: "\r", with: ""), .down))
+        if rt.response.isEmpty {
+            lines.append(("(no response captured)", .separator))
+        } else {
+            for line in rt.response.components(separatedBy: "\n") {
+                lines.append((line.replacingOccurrences(of: "\r", with: ""), .down))
+            }
         }
 
         // Clamp scroll
@@ -3243,7 +3247,14 @@ final class TUI: EventSink {
                     lock.unlock()
                     // Show: "GET /path HTTP/1.1  →  HTTP/1.1 200 OK"
                     let reqSummary = rt.requestLine.isEmpty ? "?" : rt.requestLine
-                    let respSummary = rt.responseLine.isEmpty ? "..." : rt.responseLine
+                    let respSummary: String
+                    if rt.responseLine.isEmpty {
+                        respSummary = "..."
+                    } else if !rt.responseComplete {
+                        respSummary = rt.responseLine + " (streaming...)"
+                    } else {
+                        respSummary = rt.responseLine
+                    }
                     let text = "\(reqSummary)  \u{2192}  \(respSummary)"
                     let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
                     drawLine(y: y, indent: depthIndent + 6, content: text, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
