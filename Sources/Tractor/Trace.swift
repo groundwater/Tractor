@@ -244,9 +244,11 @@ struct Trace: ParsableCommand {
                     t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port)
                 }
                 flowClient.onTraffic = { pid, host, port, direction, content in
-                    let dir: TrafficEntry.Direction = direction == "up" ? .up : .down
+                    let dir: TrafficDirection = direction == "up" ? .up : .down
                     t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
                                     direction: dir, content: content)
+                    activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
+                                                direction: direction, content: content)
                 }
             }
 

@@ -4,6 +4,7 @@ import Foundation
 final class SQLiteLog: EventSink {
     private var db: OpaquePointer?
     private var insertStmt: OpaquePointer?
+    private var trafficStmt: OpaquePointer?
     private let lock = NSLock()
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -52,6 +53,23 @@ final class SQLiteLog: EventSink {
             throw SQLiteLogError.schema(msg)
         }
 
+        let createTraffic = """
+            CREATE TABLE IF NOT EXISTS http_traffic (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                pid INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+            """
+        guard sqlite3_exec(db, createTraffic, nil, nil, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db!))
+            sqlite3_close(db)
+            throw SQLiteLogError.schema(msg)
+        }
+
         var stmt: OpaquePointer?
         let insert = "INSERT INTO events (timestamp, type, pid, ppid, process, user, details) VALUES (?, ?, ?, ?, ?, ?, ?)"
         guard sqlite3_prepare_v2(db, insert, -1, &stmt, nil) == SQLITE_OK else {
@@ -60,6 +78,15 @@ final class SQLiteLog: EventSink {
             throw SQLiteLogError.prepare(msg)
         }
         self.insertStmt = stmt
+
+        var tstmt: OpaquePointer?
+        let tinsert = "INSERT INTO http_traffic (timestamp, pid, host, port, direction, content) VALUES (?, ?, ?, ?, ?, ?)"
+        guard sqlite3_prepare_v2(db, tinsert, -1, &tstmt, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db!))
+            sqlite3_close(db)
+            throw SQLiteLogError.prepare(msg)
+        }
+        self.trafficStmt = tstmt
     }
 
     func close() {
@@ -68,6 +95,10 @@ final class SQLiteLog: EventSink {
         if let stmt = insertStmt {
             sqlite3_finalize(stmt)
             insertStmt = nil
+        }
+        if let stmt = trafficStmt {
+            sqlite3_finalize(stmt)
+            trafficStmt = nil
         }
         if let d = db {
             sqlite3_wal_checkpoint_v2(d, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
@@ -112,6 +143,23 @@ final class SQLiteLog: EventSink {
         } else {
             sqlite3_bind_null(stmt, 7)
         }
+
+        sqlite3_step(stmt)
+    }
+
+    /// Log captured HTTP traffic (called from MITM flow)
+    func logTraffic(pid: pid_t, host: String, port: UInt16, direction: String, content: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stmt = trafficStmt else { return }
+
+        sqlite3_reset(stmt)
+        sqlite3_bind_text(stmt, 1, (now() as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 2, pid)
+        sqlite3_bind_text(stmt, 3, (host as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 4, Int32(port))
+        sqlite3_bind_text(stmt, 5, (direction as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 6, (content as NSString).utf8String, -1, nil)
 
         sqlite3_step(stmt)
     }
