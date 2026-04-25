@@ -26,8 +26,11 @@ private let ATTR_BOLD    = NCURSES_BITS(1, 13)  // A_BOLD
 // MARK: - ncurses mouse constants
 
 private let KEY_MOUSE: Int32 = 0o631
-private let BUTTON4_PRESSED: UInt = 0x20000   // scroll up
-private let BUTTON5_PRESSED: UInt = 0x400000  // scroll down
+// NCURSES_MOUSE_VERSION 1: NCURSES_MOUSE_MASK(b,m) = m << ((b-1)*6), 6 bits per button
+// Mask all event types (released/pressed/clicked/double/triple/reserved) per button
+private let BUTTON1_EVENTS: UInt = 0x3F          // bits  0.. 5
+private let BUTTON4_EVENTS: UInt = 0x3F << 18    // bits 18..23  (scroll up)
+private let BUTTON5_EVENTS: UInt = 0x3F << 24    // bits 24..29  (scroll down)
 
 // ncurses defines A_CHARTEXT as (NCURSES_BITS(1U,0) - 1U) = 0x00ff
 private let A_CHARTEXT: UInt32 = 0x00ff
@@ -711,16 +714,19 @@ final class TUI: EventSink {
 
         // Scroll wheel — adjust viewport without changing selection
         let bs = UInt(event.bstate)
-        if bs & BUTTON4_PRESSED != 0 {
+        if bs & BUTTON4_EVENTS != 0 {
             scrollOffset = max(0, scrollOffset - 3)
             forceRender()
             return
         }
-        if bs & BUTTON5_PRESSED != 0 {
+        if bs & BUTTON5_EVENTS != 0 {
             scrollOffset += 3
             forceRender()
             return
         }
+
+        // Only handle clicks (button 1 events); ignore other button events
+        guard bs & BUTTON1_EVENTS != 0 else { return }
 
         // When a menu is open, all clicks are handled in menu context
         if activeMenu != nil {
