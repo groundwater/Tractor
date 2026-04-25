@@ -82,130 +82,6 @@ struct FileStats {
 
 // MARK: - Per-connection tracking
 
-/// A complete HTTP round-trip (request + response)
-struct HTTPRoundTrip {
-    var request: String = ""       // full request (headers + body)
-    var response: String = ""      // full response (headers + body)
-    var requestLine: String = ""   // e.g. "GET / HTTP/1.1"
-    var responseLine: String = ""  // e.g. "HTTP/1.1 200 OK"
-    var timestamp: Date = Date()
-}
-
-/// Accumulates raw plaintext chunks and parses them into HTTP round-trips.
-/// Simpler approach: instead of full HTTP framing, we detect message boundaries
-/// by looking for HTTP request/response line patterns at the start of data.
-class HTTPStreamParser {
-    private var requestBuffer = ""
-    private var responseBuffer = ""
-    var roundTrips: [HTTPRoundTrip] = []
-
-    func feed(direction: String, content: String) {
-        if direction == "up" {
-            requestBuffer += content
-            // Split on HTTP request lines: "GET /... HTTP/1.1\r\n"
-            splitMessages(buffer: &requestBuffer, isRequest: true)
-        } else {
-            responseBuffer += content
-            // Split on HTTP response lines: "HTTP/1.1 200 OK\r\n"
-            splitMessages(buffer: &responseBuffer, isRequest: false)
-        }
-    }
-
-    private func splitMessages(buffer: inout String, isRequest: Bool) {
-        // Pattern: HTTP request starts with "METHOD /path HTTP/1.x"
-        //          HTTP response starts with "HTTP/1.x NNN"
-        // We find the SECOND occurrence of such a pattern — everything before it
-        // is the first complete message.
-
-        let lines = buffer.components(separatedBy: "\n")
-        var messageEndLine = -1
-
-        for (i, line) in lines.enumerated() {
-            if i == 0 { continue } // skip first line — that's the current message's start
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if isRequest && isHTTPRequestLine(trimmed) {
-                messageEndLine = i
-                break
-            }
-            if !isRequest && isHTTPResponseLine(trimmed) {
-                messageEndLine = i
-                break
-            }
-        }
-
-        if messageEndLine > 0 {
-            // Extract the first complete message
-            let msgLines = lines[0..<messageEndLine]
-            let msg = msgLines.joined(separator: "\n")
-            let remaining = lines[messageEndLine...].joined(separator: "\n")
-
-            emitMessage(msg, isRequest: isRequest)
-            buffer = remaining
-
-            // Recursively process remaining buffer
-            if !buffer.isEmpty {
-                splitMessages(buffer: &buffer, isRequest: isRequest)
-            }
-        }
-        // If no second message start found, the buffer holds an incomplete message — wait for more data
-    }
-
-    private func emitMessage(_ msg: String, isRequest: Bool) {
-        let firstLine = msg.components(separatedBy: "\n").first?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if isRequest {
-            var rt = HTTPRoundTrip()
-            rt.request = msg
-            rt.requestLine = firstLine
-            rt.timestamp = Date()
-            roundTrips.append(rt)
-        } else {
-            // Pair with the oldest round-trip that doesn't have a response
-            if let idx = roundTrips.firstIndex(where: { $0.response.isEmpty }) {
-                roundTrips[idx].response = msg
-                roundTrips[idx].responseLine = firstLine
-            } else {
-                // Orphan response
-                var rt = HTTPRoundTrip()
-                rt.response = msg
-                rt.responseLine = firstLine
-                rt.timestamp = Date()
-                roundTrips.append(rt)
-            }
-        }
-    }
-
-    /// Flush any remaining buffered data as final messages
-    func flush() {
-        if !requestBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            emitMessage(requestBuffer, isRequest: true)
-            requestBuffer = ""
-        }
-        if !responseBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            emitMessage(responseBuffer, isRequest: false)
-            responseBuffer = ""
-        }
-    }
-
-    private func isHTTPRequestLine(_ line: String) -> Bool {
-        let methods = ["GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT "]
-        return methods.contains(where: { line.hasPrefix($0) }) && line.contains("HTTP/")
-    }
-
-    private func isHTTPResponseLine(_ line: String) -> Bool {
-        return line.hasPrefix("HTTP/")
-    }
-}
-
-/// Legacy entry type kept for compatibility
-struct TrafficEntry {
-    enum Direction { case up, down }
-    let direction: Direction
-    let timestamp: Date
-    let data: String
-}
-
 struct ConnectionStats {
     let remoteAddr: String
     let remotePort: UInt16
@@ -218,7 +94,7 @@ struct ConnectionStats {
     var httpRequestLine: String?
     var httpResponseLine: String?
     var httpParser: HTTPStreamParser = HTTPStreamParser()
-    var trafficLog: [TrafficEntry] = []  // kept for raw chunks
+    var trafficLog: [(direction: TrafficDirection, timestamp: Date, data: String)] = []
     var trafficDisclosed: Bool = false
     var isMITM: Bool = false
 
@@ -2666,7 +2542,7 @@ final class TUI: EventSink {
 
     /// Update HTTP request/response line for a connection (called from MITM flow reports)
     /// Append a captured plaintext chunk to a connection's traffic log
-    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficEntry.Direction, content: String) {
+    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, content: String) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
