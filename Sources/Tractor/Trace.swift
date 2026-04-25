@@ -380,8 +380,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.files)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
-                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120, 97, 98:
-                        // i, d, n, z, k, s, w, l, r, x — all routed through executeShortcut for flash
+                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120, 97, 98, 104:
+                        // i, d, n, z, k, s, w, l, r, x, h — all routed through executeShortcut for flash
                         t.executeShortcut(ch)
                     case 126: // '~' - toggle auto mode
                         t.toggleAutoMode()
@@ -389,8 +389,6 @@ struct Trace: ParsableCommand {
                         t.toggleHints()
                     case 27: // ESC
                         t.clearSelection()
-                    case 104: // 'h'
-                        t.toggleViewMode()
                     case 113: // 'q'
                         exitAfterRestoringTerminal(message: "", code: 0)
                     default:

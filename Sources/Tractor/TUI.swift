@@ -750,6 +750,8 @@ final class TUI: EventSink {
             MenuItem(label: "  Net: Read", shortcut: "", key: nil, checked: expandCriteria.netRead, enabled: ae),
             MenuItem(label: "  Net: Write", shortcut: "", key: nil, checked: expandCriteria.netWrite, enabled: ae),
             .sep(),
+            MenuItem(label: "Hierarchical View", shortcut: "h", key: 104, checked: viewMode == .tree),
+            .sep(),
             MenuItem(label: "Columns", shortcut: "▸", key: nil, enabled: false),
         ]
     }
@@ -842,6 +844,8 @@ final class TUI: EventSink {
                 expandCollapseAll(open: false)
             } else if item.label == "Auto Expand" {
                 autoExpandEnabled = !autoExpandEnabled
+            } else if item.label == "Hierarchical View" {
+                toggleViewMode()
             } else {
                 toggleExpandCriterion(item.label)
             }
@@ -1359,6 +1363,7 @@ final class TUI: EventSink {
         case 108: return clearExited         // l
         case 97:  return { self.showAllConnections = !self.showAllConnections }  // a
         case 98:  return { self.showExited = !self.showExited; self.forceRender() }  // b
+        case 104: return toggleViewMode      // h
         default: return nil
         }
     }
@@ -2547,10 +2552,21 @@ final class TUI: EventSink {
     /// Update HTTP request/response line for a connection (called from MITM flow reports)
     /// Append a captured plaintext chunk to a connection's traffic log
     func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, content: String) {
+        // Ensure process exists BEFORE acquiring lock (prevents deadlock)
+        ensureProcess(pid: pid, ppid: 0, name: "")
+
         lock.lock()
         defer { lock.unlock() }
+
         guard let row = rows[pid] else { return }
         let key = "\(remoteAddr):\(remotePort)"
+
+        // Directly create connection if it doesn't exist (avoid deadlock from recordConnect)
+        if row.connections[key] == nil {
+            row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
+            row.lifetimeConnCount += 1
+        }
+
         if var conn = row.connections[key] {
             // Feed the HTTP parser
             let dir = direction == .up ? "up" : "down"
@@ -2570,7 +2586,6 @@ final class TUI: EventSink {
             row.connections[key] = conn
         }
     }
-
     /// Toggle traffic disclosure for a connection.
     /// NOTE: caller must hold lock.
     func toggleTrafficDisclosure(pid: pid_t, key: String) {
