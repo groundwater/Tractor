@@ -111,6 +111,9 @@ struct ExpandCriteria {
     var procCreate = false, procError = false, procExit = false, procSpawn = false  // c, e, x, s
     var netConnect = false, netRead = false, netWrite = false  // c, r, w
 
+    var hasAnyFile: Bool { fileCreate || fileUpdate || fileDelete }
+    var hasAnyNet: Bool { netConnect || netRead || netWrite }
+
     static let `default` = ExpandCriteria(
         fileCreate: true, fileUpdate: true, fileDelete: true,
         procError: true,
@@ -370,6 +373,8 @@ final class TUI: EventSink {
     private var hideInactiveFiles = true
     private var showAllConnections = false
 
+    /// Whether --expand was explicitly provided (vs using defaults)
+    var expandSpecified = false
     // Auto-expand state
     var autoExpandEnabled = true
     var expandCriteria = ExpandCriteria.default
@@ -2170,6 +2175,11 @@ final class TUI: EventSink {
         defer { lock.unlock() }
         let row = ProcessRow(pid: pid, ppid: ppid, name: name, argv: argv)
         if viewMode == .tree && !autoExpandEnabled { row.disclosed = true }
+        // When --expand is explicit, disable auto-show for omitted categories
+        if expandSpecified {
+            if !expandCriteria.hasAnyFile { row.filesAuto = false }
+            if !expandCriteria.hasAnyNet { row.netAuto = false }
+        }
         rows[pid] = row
         if autoExpandEnabled && expandCriteria.procCreate {
             autoExpand(pid, panel: .tree)

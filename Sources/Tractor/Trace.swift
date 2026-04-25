@@ -84,6 +84,7 @@ struct Trace: ParsableCommand {
             let t = TUI()
             if let expandSpec = expand {
                 t.expandCriteria = try ExpandCriteria.parse(expandSpec)
+                t.expandSpecified = true
             }
             t.excludeSelf()
             t.processTree = tree
