@@ -747,22 +747,20 @@ final class TUI: EventSink {
 
         // No menu open — normal click handling
 
-        // Check if click is on a disclosure indicator first
-        let charAtPos = characterAtScreen(y: event.y, x: event.x)
-        if (charAtPos == "▶" || charAtPos == "▼") && event.y >= 4 {
-            handleDisclosureClick(y: Int(event.y), x: Int(event.x))
-            return
-        }
-
         // Click on menu bar - open menu
         if event.y == 1 {
             handleMenuBarClick(x: Int(event.x))
             return
         }
 
-        // Click in main content area (lines 4+) - row selection
+        // Click in main content area (lines 4+)
         if event.y >= 4 {
-            handleRowSelection(y: Int(event.y), x: Int(event.x))
+            let idx = scrollOffset + (Int(event.y) - 4)
+            if idx >= 0 && idx < displayRows.count && isDisclosable(displayRows[idx]) {
+                handleDisclosureClick(y: Int(event.y), x: Int(event.x))
+            } else {
+                handleRowSelection(y: Int(event.y), x: Int(event.x))
+            }
         }
     }
 
@@ -793,9 +791,9 @@ final class TUI: EventSink {
     private func handleDisclosureClick(y: Int, x: Int) {
         let idx = scrollOffset + (y - 4)
         guard idx >= 0 && idx < displayRows.count else { return }
-        if case .process(let pid, _) = displayRows[idx] {
-            toggleDisclose(pid: pid)
-        }
+        selectedIndex = idx
+        selectedIndices.removeAll()
+        toggleDisclose()
     }
 
     /// Handle click on menu bar
@@ -2631,6 +2629,19 @@ final class TUI: EventSink {
             sampleNodeAt(pid, path: path)?.disclosed = open
         case .waitHeader(let pid): rows[pid]?.waitDisclosed = open
         default: break
+        }
+    }
+
+    /// Does this row type have a disclosure triangle?
+    private func isDisclosable(_ row: DisplayRow) -> Bool {
+        switch row {
+        case .trackerGroupHeader, .process,
+             .processHeader, .argsHeader, .envHeader, .resourcesHeader,
+             .filesHeader, .netHeader, .netDetail, .netProtocolHeader,
+             .sampleHeader, .sampleNode, .waitHeader:
+            return true
+        default:
+            return false
         }
     }
 
