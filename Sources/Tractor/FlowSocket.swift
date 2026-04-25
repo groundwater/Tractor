@@ -28,9 +28,10 @@ final class FlowXPCClient {
     private var pollTimer: DispatchSourceTimer?
     private(set) var mitmProxy: MITMProxy?
 
-    var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?
-    var onConnectionClosed: ((pid_t, String, UInt16) -> Void)?
-    var onTraffic: ((pid_t, String, UInt16, String, String) -> Void)?  // pid, host, port, direction, content
+    var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64, UInt64) -> Void)?
+    var onConnectionClosed: ((pid_t, String, UInt16, UInt64) -> Void)?
+    var onTraffic: ((pid_t, String, UInt16, String, String, UInt64) -> Void)?
+    // Local endpoint not available from NEAppProxyTCPFlow API
 
     init(sink: EventSink) {
         self.sink = sink
@@ -74,8 +75,8 @@ final class FlowXPCClient {
         proxy.closeSysextFlow = { [weak self] flowID in
             self?.proxy?.closeFlow(id: flowID)
         }
-        proxy.onTraffic = { [weak self] pid, host, port, direction, content in
-            self?.onTraffic?(pid, host, port, direction, content)
+        proxy.onTraffic = { [weak self] pid, host, port, direction, content, flowID in
+            self?.onTraffic?(pid, host, port, direction, content, flowID)
         }
 
         mitmProxy = proxy
@@ -120,25 +121,26 @@ final class FlowXPCClient {
             let pid = (event["pid"] as? Int).map { Int32($0) } ?? -1
             let host = event["host"] as? String ?? ""
             let port = UInt16(event["port"] as? String ?? "0") ?? 0
+            let flowID = (event["flowID"] as? UInt64) ?? (event["flowID"] as? Int).map { UInt64($0) } ?? 0
 
             if let bytesOut = event["bytesOut"] as? Int64,
                let bytesIn = event["bytesIn"] as? Int64 {
-                onBytesUpdate?(pid, host, port, bytesOut, bytesIn)
+                onBytesUpdate?(pid, host, port, bytesOut, bytesIn, flowID)
                 if event["closed"] as? Bool == true {
-                    onConnectionClosed?(pid, host, port)
+                    onConnectionClosed?(pid, host, port, flowID)
                 }
                 continue
             }
 
             if let direction = event["traffic"] as? String,
                let content = event["content"] as? String {
-                onTraffic?(pid, host, port, direction, content)
+                onTraffic?(pid, host, port, direction, content, flowID)
                 continue
             }
 
             if event["proto"] != nil {
                 sink.onConnect(pid: pid, ppid: 0, process: "", user: 0,
-                               remoteAddr: host, remotePort: port)
+                               remoteAddr: host, remotePort: port, flowID: flowID)
             }
         }
     }

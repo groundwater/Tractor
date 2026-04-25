@@ -57,7 +57,7 @@ final class EventOutput: EventSink {
         ))
     }
 
-    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
+    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
         emit(AgentEvent(
             timestamp: now(), type: "connect",
             pid: pid, ppid: ppid, process: process, user: user,

@@ -141,28 +141,26 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
 
     // MARK: - Event buffering (called from handleNewFlow/TCPBridge)
 
-    func reportFlow(pid: Int32, host: String, port: String, proto: String) {
-        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "proto": proto]
+    func reportFlow(pid: Int32, host: String, port: String, proto: String, flowID: UInt64) {
+        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "proto": proto, "flowID": flowID]
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()
     }
 
-    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64, closed: Bool = false) {
-        var event: [String: Any] = ["pid": pid, "host": host, "port": port, "bytesOut": bytesOut, "bytesIn": bytesIn]
+    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64, closed: Bool = false, flowID: UInt64) {
+        var event: [String: Any] = ["pid": pid, "host": host, "port": port, "bytesOut": bytesOut, "bytesIn": bytesIn, "flowID": flowID]
         if closed { event["closed"] = true }
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()
     }
 
-    func reportTraffic(pid: Int32, host: String, port: String, direction: String, content: String) {
-        // Truncate and sanitize content for safe JSON serialization
+    func reportTraffic(pid: Int32, host: String, port: String, direction: String, content: String, flowID: UInt64) {
         let truncated = String(content.prefix(4096))
-        // Replace any characters that could break JSON serialization
         let safe = truncated.unicodeScalars.filter { $0.value >= 0x20 || $0 == "\n" || $0 == "\r" || $0 == "\t" }
         let safeString = String(String.UnicodeScalarView(safe))
-        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "content": safeString]
+        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "content": safeString, "flowID": flowID]
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()

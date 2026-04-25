@@ -236,20 +236,21 @@ struct Trace: ParsableCommand {
             }
 
             if let t = tui {
-                flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn in
+                flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn, flowID in
                     t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
-                                            txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn))
+                                            txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn), flowID: flowID)
                 }
-                flowClient.onConnectionClosed = { pid, host, port in
-                    t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port)
+                flowClient.onConnectionClosed = { pid, host, port, flowID in
+                    t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
                 }
-                flowClient.onTraffic = { pid, host, port, direction, content in
+                flowClient.onTraffic = { pid, host, port, direction, content, flowID in
                     let dir: TrafficDirection = direction == "up" ? .up : .down
                     t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
-                                    direction: dir, content: content)
+                                    direction: dir, content: content, flowID: flowID)
                     activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
                                                 direction: direction, content: content)
                 }
+                // Local endpoint not available from NEAppProxyTCPFlow API
             }
 
             flowClient.updateWatchList(tree.snapshot)

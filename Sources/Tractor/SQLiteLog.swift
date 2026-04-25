@@ -174,8 +174,8 @@ final class SQLiteLog: EventSink {
         insert(timestamp: now(), type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
     }
 
-    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
-        insert(timestamp: now(), type: "connect", pid: pid, ppid: ppid, process: process, user: user, details: ["addr": remoteAddr, "port": "\(remotePort)"])
+    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
+        insert(timestamp: now(), type: "connect", pid: pid, ppid: ppid, process: process, user: user, details: ["addr": remoteAddr, "port": "\(remotePort)", "flowID": "\(flowID)"])
     }
 
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
@@ -199,8 +199,8 @@ final class MultiSink: EventSink {
         for s in sinks { s.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details) }
     }
 
-    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
-        for s in sinks { s.onConnect(pid: pid, ppid: ppid, process: process, user: user, remoteAddr: remoteAddr, remotePort: remotePort) }
+    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
+        for s in sinks { s.onConnect(pid: pid, ppid: ppid, process: process, user: user, remoteAddr: remoteAddr, remotePort: remotePort, flowID: flowID) }
     }
 
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {

@@ -94,7 +94,8 @@ class TransparentProxy: NETransparentProxyProvider {
             return handleMITMFlow(tcp, pid: pid, host: host, port: port, portNum: portNum)
         }
 
-        reporter.reportFlow(pid: pid, host: host, port: port, proto: "tcp")
+        let fid = allocFlowID()
+        reporter.reportFlow(pid: pid, host: host, port: port, proto: "tcp", flowID: fid)
         // Passthrough: use createTCPConnection — the NE framework's own async bypass API.
         // Despite being deprecated, it's the only API that creates connections
         // exempt from our own proxy interception.
@@ -105,7 +106,7 @@ class TransparentProxy: NETransparentProxyProvider {
         let box = BridgeBox()
 
         let bridge = TCPBridge(flow: tcp, connection: conn) { [weak self] bytesOut, bytesIn in
-            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true)
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
             if let self = self, let b = box.bridge {
                 self.bridgeLock.lock()
                 self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
@@ -115,7 +116,7 @@ class TransparentProxy: NETransparentProxyProvider {
         box.bridge = bridge
 
         bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
-            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
         }
 
         bridgeLock.lock()
@@ -162,7 +163,8 @@ class TransparentProxy: NETransparentProxyProvider {
                 os_log("MITM: SNI=%{public}@ (endpoint=%{public}@)", log: log, type: .default, sniHost, host)
 
                 // Report flow with the correct SNI hostname
-                self.reporter.reportFlow(pid: pid, host: sniHost, port: port, proto: "tcp")
+                let fid = allocFlowID()
+                self.reporter.reportFlow(pid: pid, host: sniHost, port: port, proto: "tcp", flowID: fid)
 
                 // Ask CLI for a PKCS12 identity for this hostname
                 guard let p12Data = self.reporter.requestP12(hostname: sniHost),
@@ -190,7 +192,7 @@ class TransparentProxy: NETransparentProxyProvider {
                 let box = MITMBox()
 
                 let bridge = MITMBridge(flow: tcp, connection: conn, identity: identity) { [weak self] bytesOut, bytesIn in
-                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true)
+                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
                     if let self = self, let b = box.bridge {
                         self.bridgeLock.lock()
                         self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
@@ -199,11 +201,11 @@ class TransparentProxy: NETransparentProxyProvider {
                 }
                 box.bridge = bridge
 
-                bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
-                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
+                bridge.onRawBytesUpdated = { [weak self] bytesOut, bytesIn in
+                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
                 }
                 bridge.onPlaintext = { [weak self] direction, content in
-                    self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, content: content)
+                    self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, content: content, flowID: fid)
                 }
 
                 self.bridgeLock.lock()

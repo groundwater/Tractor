@@ -32,9 +32,14 @@ final class MITMBridge: NSObject {
     var onBytesUpdated: ((Int64, Int64) -> Void)?
     /// Reports decrypted plaintext: (direction "up"/"down", content)
     var onPlaintext: ((String, String) -> Void)?
+    
+    /// Reports raw encrypted bytes from the flow
+    var onRawBytesUpdated: ((Int64, Int64) -> Void)?
 
     private var bytesOut: Int64 = 0
     private var bytesIn: Int64 = 0
+    private var rawBytesOut: Int64 = 0
+    private var rawBytesIn: Int64 = 0
     private var state: State = .setup
     private var flowOpen = false
     private var connectionReady = false
@@ -143,7 +148,12 @@ final class MITMBridge: NSObject {
                 self.teardown()
                 return
             }
-            self.sslReadBuffer.append(data!)
+            let rawData = data!
+            // Count raw encrypted bytes from flow (client → server, i.e., "out" from app's perspective)
+            self.rawBytesOut += Int64(rawData.count)
+            self.onRawBytesUpdated?(self.rawBytesOut, self.rawBytesIn)
+            
+            self.sslReadBuffer.append(rawData)
             self.driveSSL()
         }
     }
@@ -152,6 +162,9 @@ final class MITMBridge: NSObject {
         guard !sslWriteBuffer.isEmpty else { next(); return }
         let chunk = sslWriteBuffer
         sslWriteBuffer = Data()
+        // Count raw encrypted bytes being written to flow (server → client reply, i.e., "in" from app's perspective)
+        self.rawBytesIn += Int64(chunk.count)
+        self.onRawBytesUpdated?(self.rawBytesOut, self.rawBytesIn)
         flow.write(chunk) { [weak self] error in
             guard let self = self, self.state != .tornDown else { return }
             if error != nil { self.teardown(); return }
@@ -282,7 +295,8 @@ final class MITMBridge: NSObject {
         connection.cancel()
         flow.closeReadWithError(nil)
         flow.closeWriteWithError(nil)
-        onComplete(bytesOut, bytesIn)
+        // Report raw encrypted bytes from the flow (not decrypted plaintext)
+        onComplete(rawBytesOut, rawBytesIn)
     }
 }
 

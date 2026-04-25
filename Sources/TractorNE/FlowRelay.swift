@@ -4,10 +4,10 @@ import os.log
 
 private let relayLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.NE", category: "relay")
 
-/// Atomic counter for flow IDs
-private var nextFlowID: UInt64 = 0
-private let flowIDLock = NSLock()
-private func allocFlowID() -> UInt64 {
+/// Atomic counter for flow IDs — used by FlowRelay and TransparentProxy
+var nextFlowID: UInt64 = 0
+let flowIDLock = NSLock()
+func allocFlowID() -> UInt64 {
     flowIDLock.lock()
     defer { flowIDLock.unlock() }
     nextFlowID += 1

@@ -82,11 +82,22 @@ struct FileStats {
 
 // MARK: - Per-connection tracking
 
+enum ProtocolDecode: String {
+    case auto     // detect from traffic
+    case http     // force HTTP decode
+    case binary   // force hex dump
+}
+
 struct ConnectionStats {
+    let flowID: UInt64
+    let connNumber: Int
     let remoteAddr: String
     let remotePort: UInt16
+    let connectedAt: Date
+    var localAddr: String?
+    var localPort: UInt16?
     var hostname: String?
-    var count: Int = 1
+    var decodedAs: ProtocolDecode = .auto
     var alive: Bool = true
     var rxBytes: UInt64 = 0
     var txBytes: UInt64 = 0
@@ -96,11 +107,27 @@ struct ConnectionStats {
     var httpParser: HTTPStreamParser = HTTPStreamParser()
     var trafficLog: [(direction: TrafficDirection, timestamp: Date, data: String)] = []
     var trafficDisclosed: Bool = false
+    var protocolDisclosed: Bool = false
     var isMITM: Bool = false
+    var rawBytes: Data = Data()
 
     var label: String {
         let host = hostname ?? remoteAddr
         return "\(host):\(remotePort)"
+    }
+
+    var protocolName: String {
+        switch decodedAs {
+        case .http: return "HTTP"
+        case .binary: return "Binary"
+        case .auto:
+            if isMITM && !httpParser.roundTrips.isEmpty { return "HTTP" }
+            return "Unknown"
+        }
+    }
+
+    var showAsHexDump: Bool {
+        return decodedAs == .binary || protocolName != "HTTP"
     }
 }
 
@@ -250,8 +277,9 @@ final class ProcessRow {
     /// Per-file stats: path -> FileStats
     var files: [String: FileStats] = [:]
 
-    /// Per-connection stats: "addr:port" -> ConnectionStats
-    var connections: [String: ConnectionStats] = [:]
+    /// Per-connection stats: flowID -> ConnectionStats
+    var connections: [UInt64: ConnectionStats] = [:]
+    var nextConnNumber: Int = 1
 
     /// Lifetime network byte totals (survives connection pruning)
     var lifetimeRxBytes: UInt64 = 0
@@ -300,11 +328,11 @@ final class ProcessRow {
             .sorted { $0.1.lastWrite > $1.1.lastWrite }
     }
 
-    /// All connections, alive first. Thread-safe snapshot.
-    var sortedConnections: [(key: String, stats: ConnectionStats)] {
+    /// All connections, alive first, then by connNumber ascending.
+    var sortedConnections: [(key: UInt64, stats: ConnectionStats)] {
         let snapshot = connections
         return snapshot.map { ($0.key, $0.value) }
-            .sorted { ($0.1.alive ? 0 : 1, -$0.1.count) < ($1.1.alive ? 0 : 1, -$1.1.count) }
+            .sorted { ($0.1.alive ? 0 : 1, $0.1.connNumber) < ($1.1.alive ? 0 : 1, $1.1.connNumber) }
     }
 
     init(pid: pid_t, ppid: pid_t, name: String, argv: String) {
@@ -332,8 +360,11 @@ private enum DisplayRow: Equatable {
     case filesHeader(pid_t)
     case fileDetail(pid_t, String)       // pid, path
     case netHeader(pid_t)
-    case netDetail(pid_t, String)        // pid, connection key
-    case netTraffic(pid_t, String, Int)  // pid, connection key, traffic index
+    case netDetail(pid_t, UInt64)        // pid, flowID
+    case netConnMeta(pid_t, UInt64)      // pid, flowID — disclosed connection metadata
+    case netProtocolHeader(pid_t, UInt64) // pid, flowID — protocol line (disclosable)
+    case netTraffic(pid_t, UInt64, Int)  // pid, flowID, traffic index
+    case netHexDump(pid_t, UInt64, Int)  // pid, flowID, line index (16 bytes per line)
     case separator(pid_t)               // horizontal rule between info and children
     case infoBorderTop(pid_t, Int)      // pid, depth — top of info box
     case infoBorderBottom(pid_t, Int)   // pid, depth — bottom of info box
@@ -688,12 +719,25 @@ final class TUI: EventSink {
     }
 
     private func networkMenuItems() -> [MenuItem] {
-        return [
+        var items: [MenuItem] = [
             MenuItem(label: "Show All Connections", shortcut: "A", key: 97, checked: showAllConnections),
             .sep(),
             MenuItem(label: "Reverse DNS Lookup", shortcut: "", key: nil, checked: true),
             MenuItem(label: "SNI Inspection", shortcut: "", key: nil, checked: true),
         ]
+
+        // Add "Decode As" options when cursor is on a connection row
+        if let fid = flowIDForRow(selectedIndex), let pid = pidForRow(selectedIndex) {
+            lock.lock()
+            let currentDecode = rows[pid]?.connections[fid]?.decodedAs ?? .auto
+            lock.unlock()
+            items.append(.sep())
+            items.append(MenuItem(label: "Decode As: HTTP", shortcut: "", key: nil, checked: currentDecode == .http))
+            items.append(MenuItem(label: "Decode As: Hexdump", shortcut: "", key: nil, checked: currentDecode == .binary))
+            items.append(MenuItem(label: "Decode As: Auto", shortcut: "", key: nil, checked: currentDecode == .auto))
+        }
+
+        return items
     }
 
     private func filesMenuItems() -> [MenuItem] {
@@ -863,6 +907,20 @@ final class TUI: EventSink {
 
         if menu == .network {
             if item.label == "Show All Connections" { showAllConnections = !showAllConnections }
+            else if item.label.hasPrefix("Decode As:") {
+                if let fid = flowIDForRow(selectedIndex), let pid = pidForRow(selectedIndex) {
+                    lock.lock()
+                    let decode: ProtocolDecode
+                    if item.label.contains("HTTP") { decode = .http }
+                    else if item.label.contains("Hexdump") { decode = .binary }
+                    else { decode = .auto }
+                    if var conn = rows[pid]?.connections[fid] {
+                        conn.decodedAs = decode
+                        rows[pid]?.connections[fid] = conn
+                    }
+                    lock.unlock()
+                }
+            }
             forceRender()
             return
         }
@@ -1222,7 +1280,7 @@ final class TUI: EventSink {
 
     // MARK: - Traffic modal
 
-    func openTrafficModal(pid: pid_t, key: String, roundTripIndex: Int) {
+    func openTrafficModal(pid: pid_t, key: UInt64, roundTripIndex: Int) {
         lock.lock()
         guard let row = rows[pid], let conn = row.connections[key],
               roundTripIndex < conn.httpParser.roundTrips.count else {
@@ -1447,7 +1505,7 @@ final class TUI: EventSink {
         guard let dr = displayRows[safe: selectedIndex] else { return .process }
         switch dr {
         case .sampleHeader, .sampleNode: return .sample
-        case .netHeader, .netDetail: return .network
+        case .netHeader, .netDetail, .netConnMeta, .netProtocolHeader, .netTraffic: return .network
         case .filesHeader, .fileDetail: return .files
         default:
             // Check if we're inside a sample box by scanning upward for sampleHeader
@@ -2168,6 +2226,8 @@ final class TUI: EventSink {
         case .netHeader(let pid):     rows[pid]?.netDisclosed = open
         case .netDetail(let pid, let key):
             toggleTrafficDisclosure(pid: pid, key: key)
+        case .netProtocolHeader(let pid, let key):
+            toggleProtocolDisclosure(pid: pid, key: key)
         case .sampleHeader(let pid): rows[pid]?.sampleDisclosed = open
         case .sampleNode(let pid, let path):
             sampleNodeAt(pid, path: path)?.disclosed = open
@@ -2190,6 +2250,8 @@ final class TUI: EventSink {
         case .netHeader(let pid):     return rows[pid]?.netDisclosed ?? false
         case .netDetail(let pid, let key):
             return rows[pid]?.connections[key]?.trafficDisclosed ?? false
+        case .netProtocolHeader(let pid, let key):
+            return rows[pid]?.connections[key]?.protocolDisclosed ?? false
         case .sampleHeader(let pid): return rows[pid]?.sampleDisclosed ?? false
         case .sampleNode(let pid, let path):
             return sampleNodeAt(pid, path: path)?.disclosed ?? false
@@ -2258,8 +2320,14 @@ final class TUI: EventSink {
             return .filesHeader(pid)
         case .netDetail(let pid, _):
             return .netHeader(pid)
-        case .netTraffic(let pid, let key, _):
+        case .netConnMeta(let pid, let key):
             return .netDetail(pid, key)
+        case .netProtocolHeader(let pid, let key):
+            return .netDetail(pid, key)
+        case .netTraffic(let pid, let key, _):
+            return .netProtocolHeader(pid, key)
+        case .netHexDump(let pid, let key, _):
+            return .netProtocolHeader(pid, key)
         case .separator(let pid):
             return .process(pid, 0)
         case .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _):
@@ -2286,12 +2354,25 @@ final class TUI: EventSink {
              .envHeader(let pid), .envDetail(let pid, _),
              .resourcesHeader(let pid), .resourceDetail(let pid, _),
              .filesHeader(let pid), .fileDetail(let pid, _),
-             .netHeader(let pid), .netDetail(let pid, _), .netTraffic(let pid, _, _),
+             .netHeader(let pid), .netDetail(let pid, _), .netConnMeta(let pid, _), .netProtocolHeader(let pid, _), .netTraffic(let pid, _, _), .netHexDump(let pid, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
              .sampleHeader(let pid), .sampleNode(let pid, _),
              .waitHeader(let pid), .waitLine(let pid, _):
             return pid
+        }
+    }
+
+    /// Extract the flowID from a display row, if it's a network connection row.
+    private func flowIDForRow(_ index: Int) -> UInt64? {
+        guard let row = displayRows[safe: index] else { return nil }
+        switch row {
+        case .netDetail(_, let fid), .netConnMeta(_, let fid),
+             .netProtocolHeader(_, let fid), .netTraffic(_, let fid, _),
+             .netHexDump(_, let fid, _):
+            return fid
+        default:
+            return nil
         }
     }
 
@@ -2457,22 +2538,18 @@ final class TUI: EventSink {
         }
     }
 
-    func recordConnect(pid: pid_t, remoteAddr: String, remotePort: UInt16) {
+    func recordConnect(pid: pid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
-        let key = "\(remoteAddr):\(remotePort)"
-        if var existing = row.connections[key] {
-            existing.count += 1
-            existing.alive = true
-            existing.closedAt = nil
-            row.connections[key] = existing
-        } else {
-            row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
-        }
+        let num = row.nextConnNumber
+        row.nextConnNumber += 1
+        row.connections[flowID] = ConnectionStats(
+            flowID: flowID, connNumber: num,
+            remoteAddr: remoteAddr, remotePort: remotePort,
+            connectedAt: Date())
         row.lifetimeConnCount += 1
 
-        // Auto-expand network panel on connect
         if autoExpandEnabled && expandCriteria.netConnect {
             autoExpand(pid, panel: .net)
         }
@@ -2506,42 +2583,37 @@ final class TUI: EventSink {
         recordFileOp(type: type, pid: pid, path: path)
     }
 
-    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16) {
+    func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
         ensureProcess(pid: pid, ppid: ppid, name: process)
-        recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort)
+        recordConnect(pid: pid, remoteAddr: remoteAddr, remotePort: remotePort, flowID: flowID)
     }
 
     /// Mark a connection as closed
-    func markConnectionClosed(pid: pid_t, remoteAddr: String, remotePort: UInt16) {
+    func markConnectionClosed(pid: pid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
-        let key = "\(remoteAddr):\(remotePort)"
-        if var conn = row.connections[key] {
+        if var conn = row.connections[flowID] {
             conn.alive = false
             conn.closedAt = Date()
-            // Flush any remaining HTTP data in the parser
             conn.httpParser.flush()
-            row.connections[key] = conn
+            row.connections[flowID] = conn
         }
     }
 
-    /// Update byte counts for a connection (called from NE flow reports — live and final)
-    func updateConnectionBytes(pid: pid_t, remoteAddr: String, remotePort: UInt16, txBytes: UInt64, rxBytes: UInt64) {
+    /// Update byte counts for a connection
+    func updateConnectionBytes(pid: pid_t, remoteAddr: String, remotePort: UInt16, txBytes: UInt64, rxBytes: UInt64, flowID: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
-        let key = "\(remoteAddr):\(remotePort)"
-        if var conn = row.connections[key] {
+        if var conn = row.connections[flowID] {
             let hadRx = conn.rxBytes
             let hadTx = conn.txBytes
             conn.txBytes = txBytes
             conn.rxBytes = rxBytes
-            row.connections[key] = conn
-            // Update lifetime totals with the delta (guard against underflow from reconnects)
+            row.connections[flowID] = conn
             if rxBytes > hadRx { row.lifetimeRxBytes += rxBytes - hadRx }
             if txBytes > hadTx { row.lifetimeTxBytes += txBytes - hadTx }
-            // Auto-expand on byte activity
             if autoExpandEnabled {
                 if rxBytes > hadRx && expandCriteria.netRead { autoExpand(pid, panel: .net) }
                 if txBytes > hadTx && expandCriteria.netWrite { autoExpand(pid, panel: .net) }
@@ -2549,30 +2621,30 @@ final class TUI: EventSink {
         }
     }
 
-    /// Update HTTP request/response line for a connection (called from MITM flow reports)
-    /// Append a captured plaintext chunk to a connection's traffic log
-    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, content: String) {
-        // Ensure process exists BEFORE acquiring lock (prevents deadlock)
+    /// Append captured plaintext to a connection's traffic log
+    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, content: String, flowID: UInt64) {
         ensureProcess(pid: pid, ppid: 0, name: "")
 
         lock.lock()
         defer { lock.unlock() }
 
         guard let row = rows[pid] else { return }
-        let key = "\(remoteAddr):\(remotePort)"
 
-        // Directly create connection if it doesn't exist (avoid deadlock from recordConnect)
-        if row.connections[key] == nil {
-            row.connections[key] = ConnectionStats(remoteAddr: remoteAddr, remotePort: remotePort)
+        // Create connection if it doesn't exist yet (traffic can arrive before the flow event)
+        if row.connections[flowID] == nil {
+            let num = row.nextConnNumber
+            row.nextConnNumber += 1
+            row.connections[flowID] = ConnectionStats(
+                flowID: flowID, connNumber: num,
+                remoteAddr: remoteAddr, remotePort: remotePort,
+                connectedAt: Date())
             row.lifetimeConnCount += 1
         }
 
-        if var conn = row.connections[key] {
-            // Feed the HTTP parser
+        if var conn = row.connections[flowID] {
             let dir = direction == .up ? "up" : "down"
             conn.httpParser.feed(direction: dir, content: content)
 
-            // Update summary lines from parsed round-trips
             if let first = conn.httpParser.roundTrips.first {
                 if conn.httpRequestLine == nil && !first.requestLine.isEmpty {
                     conn.httpRequestLine = first.requestLine
@@ -2582,17 +2654,46 @@ final class TUI: EventSink {
                 }
             }
 
+            // Store raw bytes for hex dump (cap at 4KB)
+            if conn.rawBytes.count < 4096, let raw = content.data(using: .utf8) {
+                let space = 4096 - conn.rawBytes.count
+                conn.rawBytes.append(raw.prefix(space))
+            }
+
             conn.isMITM = true
-            row.connections[key] = conn
+            row.connections[flowID] = conn
         }
     }
+
     /// Toggle traffic disclosure for a connection.
-    /// NOTE: caller must hold lock.
-    func toggleTrafficDisclosure(pid: pid_t, key: String) {
+    func toggleTrafficDisclosure(pid: pid_t, key: UInt64) {
         guard let row = rows[pid] else { return }
         if var conn = row.connections[key] {
             conn.trafficDisclosed = !conn.trafficDisclosed
             row.connections[key] = conn
+        }
+    }
+
+    /// Toggle protocol disclosure for a connection.
+    func toggleProtocolDisclosure(pid: pid_t, key: UInt64) {
+        guard let row = rows[pid] else { return }
+        if var conn = row.connections[key] {
+            conn.protocolDisclosed = !conn.protocolDisclosed
+            row.connections[key] = conn
+        }
+    }
+
+    /// Update a connection's local endpoint (reported after flow open completes).
+    func setLocalEndpoint(flowID: UInt64, localAddr: String, localPort: UInt16) {
+        lock.lock()
+        defer { lock.unlock() }
+        for row in rows.values {
+            if var conn = row.connections[flowID] {
+                conn.localAddr = localAddr
+                conn.localPort = localPort
+                row.connections[flowID] = conn
+                return
+            }
         }
     }
 
@@ -3222,37 +3323,38 @@ final class TUI: EventSink {
             case .netDetail(let pid, let key):
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
-                    // Columns: TIME  DOWN  UP  HOST:PORT
-                    // For closed connections, freeze the time display
-                    let time: String
-                    if conn.alive {
-                        time = row.runtimeString
-                    } else if let closed = conn.closedAt {
-                        let elapsed = closed.timeIntervalSince(row.startTime ?? closed)
-                        let mins = Int(elapsed) / 60
-                        let secs = Int(elapsed) % 60
-                        time = String(format: "%02d:%02d", mins, secs)
-                    } else {
-                        time = row.runtimeString
-                    }
-                    let timePad = String(repeating: " ", count: max(1, 9 - time.count))
+                    let disc = conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}"
                     let up = "\u{2191}\(formatBytes(conn.txBytes))"
                     let upPad = String(repeating: " ", count: max(1, 10 - up.count))
                     let down = "\u{2193}\(formatBytes(conn.rxBytes))"
                     let downPad = String(repeating: " ", count: max(1, 10 - down.count))
-                    // Connection label with protocol type
-                    var connLabel = conn.label
-                    let hasRoundTrips = !conn.httpParser.roundTrips.isEmpty
-                    if conn.isMITM {
-                        connLabel += hasRoundTrips ? " (HTTP)" : " (Unknown)"
-                    }
-                    // Disclosure triangle for MITM connections with round-trips
-                    let disc = conn.isMITM && hasRoundTrips
-                        ? (conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}")
-                        : ""
-                    let line = "\(time)\(timePad)\(up)\(upPad)\(down)\(downPad)\(disc)\(connLabel)"
+                    let line = "\(disc) [#\(conn.connNumber)] \(up)\(upPad)\(down)\(downPad)\(conn.label)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dimNet
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netConnMeta(let pid, let key):
+                if let row = rows[pid], let conn = row.connections[key] {
+                    lock.unlock()
+                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "HH:mm:ss"
+                    let ts = formatter.string(from: conn.connectedAt)
+                    let statusStr = conn.alive ? "open" : "closed"
+                    drawLine(y: y, indent: depthIndent + 8, content: "Remote: \(conn.label)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                    drawLine(y: y, indent: depthIndent + 8, content: "Connected: \(ts)  Status: \(statusStr)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netProtocolHeader(let pid, let key):
+                if let row = rows[pid], let conn = row.connections[key] {
+                    lock.unlock()
+                    let disc = conn.protocolDisclosed ? "\u{25BC}" : "\u{25B6}"
+                    let line = "\(disc) Protocol: \(conn.protocolName)"
+                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    drawLine(y: y, indent: depthIndent + 8, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3260,7 +3362,6 @@ final class TUI: EventSink {
                 if let row = rows[pid], let conn = row.connections[key], idx < conn.httpParser.roundTrips.count {
                     let rt = conn.httpParser.roundTrips[idx]
                     lock.unlock()
-                    // Show: "GET /path HTTP/1.1  →  HTTP/1.1 200 OK"
                     let reqSummary = rt.requestLine.isEmpty ? "?" : rt.requestLine
                     let respSummary: String
                     if rt.responseLine.isEmpty {
@@ -3272,7 +3373,21 @@ final class TUI: EventSink {
                     }
                     let text = "\(reqSummary)  \u{2192}  \(respSummary)"
                     let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
-                    drawLine(y: y, indent: depthIndent + 6, content: text, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawLine(y: y, indent: depthIndent + 10, content: text, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netHexDump(let pid, let key, let lineIdx):
+                if let row = rows[pid], let conn = row.connections[key] {
+                    lock.unlock()
+                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    if conn.rawBytes.isEmpty {
+                        drawLine(y: y, indent: depthIndent + 10, content: "(no data captured)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    } else {
+                        let offset = lineIdx * 16
+                        let line = formatHexDumpLine(conn.rawBytes, offset: offset)
+                        drawLine(y: y, indent: depthIndent + 10, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    }
                     y += 1
                 } else { lock.unlock() }
 
@@ -3405,7 +3520,10 @@ final class TUI: EventSink {
              .fileDetail(let pid, _),
              .netHeader(let pid),
              .netDetail(let pid, _),
+             .netConnMeta(let pid, _),
+             .netProtocolHeader(let pid, _),
              .netTraffic(let pid, _, _),
+             .netHexDump(let pid, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _),
              .infoBorderBottom(let pid, _),
@@ -3897,10 +4015,21 @@ final class TUI: EventSink {
                 for conn in conns {
                     if showAllConnections || conn.stats.alive {
                         displayRows.append(.netDetail(row.pid, conn.key))
-                        // If traffic is disclosed, add traffic rows
                         if conn.stats.trafficDisclosed {
-                            for i in 0..<conn.stats.httpParser.roundTrips.count {
-                                displayRows.append(.netTraffic(row.pid, conn.key, i))
+                            displayRows.append(.netConnMeta(row.pid, conn.key))
+                            displayRows.append(.netProtocolHeader(row.pid, conn.key))
+                            if conn.stats.protocolDisclosed {
+                                if !conn.stats.showAsHexDump {
+                                    for i in 0..<conn.stats.httpParser.roundTrips.count {
+                                        displayRows.append(.netTraffic(row.pid, conn.key, i))
+                                    }
+                                } else {
+                                    let lineCount = (conn.stats.rawBytes.count + 15) / 16
+                                    let lines = max(lineCount, 1) // at least 1 line for "(no data)"
+                                    for i in 0..<min(lines, 32) {
+                                        displayRows.append(.netHexDump(row.pid, conn.key, i))
+                                    }
+                                }
                             }
                         }
                     }
@@ -4173,6 +4302,27 @@ final class TUI: EventSink {
         if bytes < 1024 * 1024 { return "\(bytes / 1024)KB" }
         if bytes < 1024 * 1024 * 1024 { return String(format: "%.1fMB", Double(bytes) / (1024 * 1024)) }
         return String(format: "%.1fGB", Double(bytes) / (1024 * 1024 * 1024))
+    }
+
+    /// Format one line of hex dump (16 bytes per line).
+    /// Output: "00000000  48 65 6c 6c 6f 20 57 6f  72 6c 64 0a           |Hello World. |"
+    private func formatHexDumpLine(_ data: Data, offset: Int) -> String {
+        let end = min(offset + 16, data.count)
+        guard offset < data.count else { return "" }
+        let slice = data[offset..<end]
+
+        let addr = String(format: "%08x", offset)
+        var hex = ""
+        var ascii = ""
+        for (i, byte) in slice.enumerated() {
+            hex += String(format: "%02x ", byte)
+            if i == 7 { hex += " " }
+            ascii += (byte >= 0x20 && byte < 0x7f) ? String(UnicodeScalar(byte)) : "."
+        }
+        // Pad hex to full 16-byte width
+        let hexWidth = 49 // "xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx "
+        hex += String(repeating: " ", count: max(0, hexWidth - hex.count))
+        return "\(addr)  \(hex)|\(ascii)|"
     }
 
     /// Truncate middle of string, keeping equal start and end

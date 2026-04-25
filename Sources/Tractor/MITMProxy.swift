@@ -12,7 +12,7 @@ final class MITMProxy: NSObject, TractorCLIXPC {
     private let caKeyPEM: String
 
     /// Called with plaintext traffic chunks (pid, host, port, direction "up"/"down", content)
-    var onTraffic: ((pid_t, String, UInt16, String, String) -> Void)?
+    var onTraffic: ((pid_t, String, UInt16, String, String, UInt64) -> Void)?
     /// Send data back to sysext
     var sendToSysext: ((UInt64, Data) -> Void)?
     /// Notify sysext to close a flow
@@ -61,7 +61,7 @@ final class MITMProxy: NSObject, TractorCLIXPC {
                 self?.sessionsLock.unlock()
             },
             onPlaintext: { [weak self] direction, content in
-                self?.onTraffic?(pid, hostname, port, direction, content)
+                self?.onTraffic?(pid, hostname, port, direction, content, id)
             }
         )
 

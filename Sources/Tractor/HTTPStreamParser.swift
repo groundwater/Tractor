@@ -278,6 +278,7 @@ class HTTPStreamParser {
     }
 
     func flush() {
+        // Extract and emit any remaining complete messages from parsers
         if let msg = reqParser.extract(), !msg.startLine.isEmpty {
             emitRequest(msg)
             reqParser.reset()
@@ -286,8 +287,17 @@ class HTTPStreamParser {
             emitResponse(msg)
             respParser.reset()
         }
+        
+        // Mark any incomplete round trips as complete (for display purposes)
         for i in roundTrips.indices where !roundTrips[i].responseComplete && !roundTrips[i].responseLine.isEmpty {
             roundTrips[i].responseComplete = true
+        }
+        
+        // Clean up orphaned entries: remove round trips that have no meaningful content
+        // (no request line AND either empty or incomplete response)
+        roundTrips = roundTrips.filter { rt in
+            // Keep if we have at least a valid request line OR (valid response line AND responseComplete)
+            !rt.requestLine.isEmpty || (rt.responseComplete && !rt.responseLine.isEmpty)
         }
     }
 
