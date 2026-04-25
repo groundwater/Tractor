@@ -90,6 +90,8 @@ struct ConnectionStats {
     var rxBytes: UInt64 = 0
     var txBytes: UInt64 = 0
     var closedAt: Date?
+    var httpRequestLine: String?
+    var httpResponseLine: String?
 
     var label: String {
         let host = hostname ?? remoteAddr
@@ -365,6 +367,8 @@ final class TUI: EventSink {
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var paused = false
+    private var flashMessage: String?
+    private var flashExpiry: Date?
     private var showHints = true
     private var killMode = false       // waiting for signal number
     private var showExited = false
@@ -983,7 +987,9 @@ final class TUI: EventSink {
         for rootPid in pids {
             let expanded = expandProcessTree(roots: [rootPid])
             for trackedPid in expanded {
+                lock.lock()
                 pidToGroups[trackedPid, default: []].insert(group.id)
+                lock.unlock()
                 let (path, ppid, argv) = getProcessInfo(trackedPid)
                 addProcess(pid: trackedPid, ppid: ppid, name: path, argv: argv)
             }
@@ -1043,6 +1049,7 @@ final class TUI: EventSink {
 
     /// Check if a process (by name and path) matches any tracker group, and register it
     func matchProcessToGroups(pid: pid_t, name: String, path: String) {
+        lock.lock()
         for group in trackerGroups {
             switch group.kind {
             case .name:
@@ -1060,10 +1067,13 @@ final class TUI: EventSink {
                 }
             }
         }
+        lock.unlock()
     }
 
     /// Inherit parent's group membership for child processes
     func inheritGroupMembership(child: pid_t, parent: pid_t) {
+        lock.lock()
+        defer { lock.unlock() }
         if let parentGroups = pidToGroups[parent], !parentGroups.isEmpty {
             pidToGroups[child, default: []].formUnion(parentGroups)
         }
@@ -1071,8 +1081,11 @@ final class TUI: EventSink {
 
     /// Get processes belonging to a specific tracker group
     private func pidsForGroup(_ groupId: Int) -> Set<pid_t> {
+        lock.lock()
+        let snapshot = pidToGroups
+        lock.unlock()
         var result = Set<pid_t>()
-        for (pid, groups) in pidToGroups {
+        for (pid, groups) in snapshot {
             if groups.contains(groupId) {
                 result.insert(pid)
             }
@@ -2129,6 +2142,12 @@ final class TUI: EventSink {
         refresh()
     }
 
+    /// Show a temporary message in the footer bar. Auto-clears after `duration` seconds.
+    func flash(_ message: String, duration: TimeInterval = 3.0) {
+        flashMessage = message
+        flashExpiry = Date() + duration
+    }
+
     // MARK: - Auto-expand (called while lock is held)
 
     /// Expand a process row's panel for auto-expand, respecting user overrides.
@@ -2252,10 +2271,17 @@ final class TUI: EventSink {
 
     func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
         // If tracker groups exist, only add processes that belong to at least one group
-        if !trackerGroups.isEmpty && (pidToGroups[pid] ?? []).isEmpty {
+        lock.lock()
+        let hasGroups = !trackerGroups.isEmpty
+        let pidHasGroup = !(pidToGroups[pid] ?? []).isEmpty
+        lock.unlock()
+        if hasGroups && !pidHasGroup {
             // Try to inherit from parent before giving up
             inheritGroupMembership(child: pid, parent: ppid)
-            if (pidToGroups[pid] ?? []).isEmpty {
+            lock.lock()
+            let stillEmpty = (pidToGroups[pid] ?? []).isEmpty
+            lock.unlock()
+            if stillEmpty {
                 return
             }
         }
@@ -2308,6 +2334,22 @@ final class TUI: EventSink {
         }
     }
 
+    /// Update HTTP request/response line for a connection (called from MITM flow reports)
+    func updateConnectionHTTP(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: String, line: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let row = rows[pid] else { return }
+        let key = "\(remoteAddr):\(remotePort)"
+        if var conn = row.connections[key] {
+            if direction == "request" {
+                conn.httpRequestLine = line
+            } else {
+                conn.httpResponseLine = line
+            }
+            row.connections[key] = conn
+        }
+    }
+
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
         // Parse wait status: WIFEXITED → exit code, WIFSIGNALED → signal
         let exitCode: Int32
@@ -2352,8 +2394,9 @@ final class TUI: EventSink {
                         row.connections[key] = conn
                     }
                 }
-                // Prune closed connections after 5s (unless showing all)
-                if !showAllConnections {
+                // Prune closed connections after 5s only if over 500
+                // (keep them around so "Show All Connections" can display them)
+                if row.connections.count > 500 {
                     let stale = row.connections.filter {
                         if let closed = $0.value.closedAt {
                             return now.timeIntervalSince(closed) > 5
@@ -2944,7 +2987,16 @@ final class TUI: EventSink {
                     let downPad = String(repeating: " ", count: max(1, 10 - down.count))
                     let up = "\u{2191}\(formatBytes(conn.txBytes))"
                     let upPad = String(repeating: " ", count: max(1, 10 - up.count))
-                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(conn.label)"
+                    // Build connection display line, append HTTP info if available
+                    var connLabel = conn.label
+                    if let req = conn.httpRequestLine {
+                        // Show method + path from request line (e.g. "POST /v1/chat/completions HTTP/1.1")
+                        connLabel += "  \(req)"
+                    }
+                    if let resp = conn.httpResponseLine {
+                        connLabel += "  \u{2192} \(resp)"
+                    }
+                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(connLabel)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dim
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
@@ -3480,8 +3532,17 @@ final class TUI: EventSink {
 
     private func drawFooter(maxY: Int32, maxX: Int32) {
         let width = Int(maxX)
+
+        // Clear expired flash
+        if let expiry = flashExpiry, Date() > expiry {
+            flashMessage = nil
+            flashExpiry = nil
+        }
+
         let label: String
-        if paused {
+        if let flash = flashMessage {
+            label = flash
+        } else if paused {
             label = "PAUSED"
         } else {
             let mode = viewMode == .tree ? "tree" : "flat"
@@ -3499,7 +3560,9 @@ final class TUI: EventSink {
             + String(repeating: " ", count: max(0, width - text.count))
 
         let attr: Int32
-        if paused {
+        if flashMessage != nil {
+            attr = COLOR_PAIR(TUIColor.failed.rawValue) | ATTR_BOLD | ATTR_REVERSE
+        } else if paused {
             attr = ATTR_REVERSE | ATTR_BOLD
         } else {
             attr = COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM
