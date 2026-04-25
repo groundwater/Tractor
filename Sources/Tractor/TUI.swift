@@ -47,6 +47,7 @@ enum TUIColor: Int32 {
     case spark7 = 18
     case spark8 = 19
     case spark9 = 20
+    case dimNet = 21     // gray text, but reverses to yellow highlight
 }
 
 // MARK: - Sample tree node
@@ -650,8 +651,15 @@ final class TUI: EventSink {
         init_pair(Int16(TUIColor.failed.rawValue),  Int16(COLOR_RED), -1)
         init_pair(Int16(TUIColor.header.rawValue),  Int16(COLOR_CYAN), -1)
         init_pair(Int16(TUIColor.dim.rawValue),     Int16(COLOR_BLACK), -1)  // bright black = gray
-        init_pair(Int16(TUIColor.subNet.rawValue),  Int16(COLOR_YELLOW), -1)
-        init_pair(Int16(TUIColor.subFile.rawValue), Int16(COLOR_MAGENTA), -1)
+        if COLORS >= 256 {
+            init_pair(Int16(TUIColor.subNet.rawValue),  179, -1)   // muted gold (256-color)
+            init_pair(Int16(TUIColor.subFile.rawValue), 139, -1)   // muted purple (256-color)
+            init_pair(Int16(TUIColor.dimNet.rawValue),  243, -1)   // gray text, default bg
+        } else {
+            init_pair(Int16(TUIColor.subNet.rawValue),  Int16(COLOR_YELLOW), -1)
+            init_pair(Int16(TUIColor.subFile.rawValue), Int16(COLOR_MAGENTA), -1)
+            init_pair(Int16(TUIColor.dimNet.rawValue),  Int16(COLOR_WHITE), -1)
+        }
         init_pair(Int16(TUIColor.menuBar.rawValue), Int16(COLOR_BLACK), Int16(COLOR_WHITE))
         init_pair(Int16(TUIColor.menuHighlight.rawValue), Int16(COLOR_WHITE), Int16(COLOR_BLUE))
         // Custom gray for disabled menu highlight (256-color terminal)
@@ -849,7 +857,7 @@ final class TUI: EventSink {
     private func viewMenuItems() -> [MenuItem] {
         let ae = autoExpandEnabled
         return [
-            MenuItem(label: "Show Exited", shortcut: "", key: nil, checked: showExited),
+            MenuItem(label: "Show Exited", shortcut: "b", key: 98, checked: showExited),
             .sep(),
             MenuItem(label: "Expand All", shortcut: "", key: nil),
             MenuItem(label: "Collapse All", shortcut: "", key: nil),
@@ -1369,20 +1377,20 @@ final class TUI: EventSink {
         guard let rt = trafficModalRoundTrip else { return }
         let width = Int(maxX)
         let height = Int(maxY)
-        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let borderAttr = COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM  // dim white
         let innerW = width - 2
 
         // Title bar
         let titleText = " \(trafficModalTitle) "
         let titlePad = String(repeating: "\u{2500}", count: max(0, innerW - titleText.count - 1))
-        attron(barAttr | ATTR_BOLD)
+        attron(borderAttr | ATTR_BOLD)
         mvaddstr(0, 0, "\u{250C}\u{2500}\(String(titleText.prefix(innerW)))\(titlePad)\u{2510}")
-        attroff(barAttr | ATTR_BOLD)
+        attroff(borderAttr | ATTR_BOLD)
 
         // Bottom border
-        attron(barAttr)
+        attron(borderAttr)
         mvaddstr(Int32(height - 2), 0, "\u{2514}\(String(repeating: "\u{2500}", count: innerW))\u{2518}")
-        attroff(barAttr)
+        attroff(borderAttr)
 
         // Footer
         let footer = "ESC: close  \u{2191}\u{2193}: scroll"
@@ -1420,9 +1428,9 @@ final class TUI: EventSink {
             let lineIdx = trafficModalScroll + vi
             let y = Int32(1 + vi)
 
-            attron(barAttr)
+            attron(borderAttr)
             mvaddstr(y, 0, "\u{2502}")
-            attroff(barAttr)
+            attroff(borderAttr)
 
             if lineIdx < lines.count {
                 let (text, dir) = lines[lineIdx]
@@ -1430,7 +1438,7 @@ final class TUI: EventSink {
                 switch dir {
                 case .up: color = upColor
                 case .down: color = downColor
-                case .separator: color = barAttr
+                case .separator: color = borderAttr
                 }
                 let truncated = String(text.prefix(innerW))
                 let padded = truncated + String(repeating: " ", count: max(0, innerW - truncated.count))
@@ -1442,9 +1450,9 @@ final class TUI: EventSink {
                 mvaddstr(y, 1, pad)
             }
 
-            attron(barAttr)
+            attron(borderAttr)
             mvaddstr(y, Int32(width - 1), "\u{2502}")
-            attroff(barAttr)
+            attroff(borderAttr)
         }
     }
 
@@ -1470,6 +1478,7 @@ final class TUI: EventSink {
         case 120: return handleXKey            // x
         case 108: return clearExited         // l
         case 97:  return { self.showAllConnections = !self.showAllConnections }  // a
+        case 98:  return { self.showExited = !self.showExited; self.forceRender() }  // b
         default: return nil
         }
     }
@@ -2704,11 +2713,18 @@ final class TUI: EventSink {
         }
         markExited(pid: pid, exitCode: exitCode)
 
-        // Ensure we have process info saved
+        // Mark all connections as closed when the process exits
         lock.lock()
         if let row = rows[pid] {
             if row.name.isEmpty || row.name == "?" {
                 row.name = process
+            }
+            for key in row.connections.keys {
+                if row.connections[key]?.alive == true {
+                    row.connections[key]?.alive = false
+                    row.connections[key]?.closedAt = Date()
+                    row.connections[key]?.httpParser.flush()
+                }
             }
         }
         lock.unlock()
@@ -3304,7 +3320,7 @@ final class TUI: EventSink {
                     let autoIndicator = row.netAuto ? "~ " : ""
                     lock.unlock()
                     let triIndent = depthIndent + 2
-                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2193}\(formatBytes(totalRx)) \u{2191}\(formatBytes(totalTx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2191}\(formatBytes(totalTx)) \u{2193}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3325,24 +3341,22 @@ final class TUI: EventSink {
                         time = row.runtimeString
                     }
                     let timePad = String(repeating: " ", count: max(1, 9 - time.count))
-                    let down = "\u{2193}\(formatBytes(conn.rxBytes))"
-                    let downPad = String(repeating: " ", count: max(1, 10 - down.count))
                     let up = "\u{2191}\(formatBytes(conn.txBytes))"
                     let upPad = String(repeating: " ", count: max(1, 10 - up.count))
-                    // Build connection display line, append HTTP info if available
+                    let down = "\u{2193}\(formatBytes(conn.rxBytes))"
+                    let downPad = String(repeating: " ", count: max(1, 10 - down.count))
+                    // Connection label with protocol type
                     var connLabel = conn.label
-                    if let req = conn.httpRequestLine {
-                        connLabel += "  \(req)"
+                    let hasRoundTrips = !conn.httpParser.roundTrips.isEmpty
+                    if conn.isMITM {
+                        connLabel += hasRoundTrips ? " (HTTP)" : " (Unknown)"
                     }
-                    if let resp = conn.httpResponseLine {
-                        connLabel += "  \u{2192} \(resp)"
-                    }
-                    // Disclosure triangle for MITM connections with traffic
-                    let disc = conn.isMITM && !conn.httpParser.roundTrips.isEmpty
-                        ? (conn.trafficDisclosed ? "\u{25BC} " : "\u{25B6} ")
+                    // Disclosure triangle for MITM connections with round-trips
+                    let disc = conn.isMITM && hasRoundTrips
+                        ? (conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}")
                         : ""
-                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(disc)\(connLabel)"
-                    let connColor = conn.alive ? TUIColor.subNet : TUIColor.dim
+                    let line = "\(time)\(timePad)\(up)\(upPad)\(down)\(downPad)\(disc)\(connLabel)"
+                    let connColor = conn.alive ? TUIColor.subNet : TUIColor.dimNet
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
@@ -3530,7 +3544,7 @@ final class TUI: EventSink {
     }
 
     private func drawDisclosureTriangle(_ triangle: String, y: Int32, indent: Int, color: Int32, highlighted: Bool) {
-        let attr = highlighted ? (color | ATTR_REVERSE) : color
+        let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
         attron(attr)
         mvaddstr(y, Int32(indent), triangle)
         attroff(attr)
@@ -3731,7 +3745,7 @@ final class TUI: EventSink {
         let padding = max(0, width - label.count)
 
         let headerColor = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
-        let attr = highlighted ? (headerColor | ATTR_REVERSE) : headerColor
+        let attr = highlighted ? ((headerColor & ~ATTR_DIM) | ATTR_REVERSE) : headerColor
         attron(attr)
         mvaddstr(y, 0, String((label + String(repeating: " ", count: padding)).prefix(width)))
         attroff(attr)
@@ -4089,7 +4103,7 @@ final class TUI: EventSink {
         var attr = row.isRunning
             ? COLOR_PAIR(color.rawValue)
             : COLOR_PAIR(color.rawValue) | ATTR_DIM
-        if highlight { attr |= ATTR_REVERSE }
+        if highlight { attr = (attr & ~ATTR_DIM) | ATTR_REVERSE }
 
         // Render indent (no highlight)
         let indentStr = String(repeating: " ", count: discIndent)
@@ -4184,7 +4198,7 @@ final class TUI: EventSink {
         addstr(disc)
 
         // │ + title + pad + │ — highlighted
-        let attr = highlighted ? (color | ATTR_REVERSE) : color
+        let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
         attron(ATTR_DIM)
         addstr("\u{2502}")
         attroff(ATTR_DIM)
@@ -4209,7 +4223,7 @@ final class TUI: EventSink {
             attron(ATTR_DIM)
             mvaddstr(y, 0, boxLeft)
             attroff(ATTR_DIM)
-            let attr = highlighted ? (color | ATTR_REVERSE) : color
+            let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
             attron(attr)
             addstr(padded)
             attroff(attr)
@@ -4221,7 +4235,7 @@ final class TUI: EventSink {
             let contentStr = truncate(content, to: width - indent)
             let padded = contentStr + String(repeating: " ", count: max(0, width - indent - contentStr.count))
             mvaddstr(y, 0, indentStr)
-            let attr = highlighted ? (color | ATTR_REVERSE) : color
+            let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
             attron(attr)
             addstr(padded)
             attroff(attr)
