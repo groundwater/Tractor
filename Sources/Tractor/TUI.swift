@@ -81,6 +81,130 @@ struct FileStats {
 
 // MARK: - Per-connection tracking
 
+/// A complete HTTP round-trip (request + response)
+struct HTTPRoundTrip {
+    var request: String = ""       // full request (headers + body)
+    var response: String = ""      // full response (headers + body)
+    var requestLine: String = ""   // e.g. "GET / HTTP/1.1"
+    var responseLine: String = ""  // e.g. "HTTP/1.1 200 OK"
+    var timestamp: Date = Date()
+}
+
+/// Accumulates raw plaintext chunks and parses them into HTTP round-trips.
+/// Simpler approach: instead of full HTTP framing, we detect message boundaries
+/// by looking for HTTP request/response line patterns at the start of data.
+class HTTPStreamParser {
+    private var requestBuffer = ""
+    private var responseBuffer = ""
+    var roundTrips: [HTTPRoundTrip] = []
+
+    func feed(direction: String, content: String) {
+        if direction == "up" {
+            requestBuffer += content
+            // Split on HTTP request lines: "GET /... HTTP/1.1\r\n"
+            splitMessages(buffer: &requestBuffer, isRequest: true)
+        } else {
+            responseBuffer += content
+            // Split on HTTP response lines: "HTTP/1.1 200 OK\r\n"
+            splitMessages(buffer: &responseBuffer, isRequest: false)
+        }
+    }
+
+    private func splitMessages(buffer: inout String, isRequest: Bool) {
+        // Pattern: HTTP request starts with "METHOD /path HTTP/1.x"
+        //          HTTP response starts with "HTTP/1.x NNN"
+        // We find the SECOND occurrence of such a pattern — everything before it
+        // is the first complete message.
+
+        let lines = buffer.components(separatedBy: "\n")
+        var messageEndLine = -1
+
+        for (i, line) in lines.enumerated() {
+            if i == 0 { continue } // skip first line — that's the current message's start
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isRequest && isHTTPRequestLine(trimmed) {
+                messageEndLine = i
+                break
+            }
+            if !isRequest && isHTTPResponseLine(trimmed) {
+                messageEndLine = i
+                break
+            }
+        }
+
+        if messageEndLine > 0 {
+            // Extract the first complete message
+            let msgLines = lines[0..<messageEndLine]
+            let msg = msgLines.joined(separator: "\n")
+            let remaining = lines[messageEndLine...].joined(separator: "\n")
+
+            emitMessage(msg, isRequest: isRequest)
+            buffer = remaining
+
+            // Recursively process remaining buffer
+            if !buffer.isEmpty {
+                splitMessages(buffer: &buffer, isRequest: isRequest)
+            }
+        }
+        // If no second message start found, the buffer holds an incomplete message — wait for more data
+    }
+
+    private func emitMessage(_ msg: String, isRequest: Bool) {
+        let firstLine = msg.components(separatedBy: "\n").first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if isRequest {
+            var rt = HTTPRoundTrip()
+            rt.request = msg
+            rt.requestLine = firstLine
+            rt.timestamp = Date()
+            roundTrips.append(rt)
+        } else {
+            // Pair with the oldest round-trip that doesn't have a response
+            if let idx = roundTrips.firstIndex(where: { $0.response.isEmpty }) {
+                roundTrips[idx].response = msg
+                roundTrips[idx].responseLine = firstLine
+            } else {
+                // Orphan response
+                var rt = HTTPRoundTrip()
+                rt.response = msg
+                rt.responseLine = firstLine
+                rt.timestamp = Date()
+                roundTrips.append(rt)
+            }
+        }
+    }
+
+    /// Flush any remaining buffered data as final messages
+    func flush() {
+        if !requestBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            emitMessage(requestBuffer, isRequest: true)
+            requestBuffer = ""
+        }
+        if !responseBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            emitMessage(responseBuffer, isRequest: false)
+            responseBuffer = ""
+        }
+    }
+
+    private func isHTTPRequestLine(_ line: String) -> Bool {
+        let methods = ["GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT "]
+        return methods.contains(where: { line.hasPrefix($0) }) && line.contains("HTTP/")
+    }
+
+    private func isHTTPResponseLine(_ line: String) -> Bool {
+        return line.hasPrefix("HTTP/")
+    }
+}
+
+/// Legacy entry type kept for compatibility
+struct TrafficEntry {
+    enum Direction { case up, down }
+    let direction: Direction
+    let timestamp: Date
+    let data: String
+}
+
 struct ConnectionStats {
     let remoteAddr: String
     let remotePort: UInt16
@@ -92,6 +216,10 @@ struct ConnectionStats {
     var closedAt: Date?
     var httpRequestLine: String?
     var httpResponseLine: String?
+    var httpParser: HTTPStreamParser = HTTPStreamParser()
+    var trafficLog: [TrafficEntry] = []  // kept for raw chunks
+    var trafficDisclosed: Bool = false
+    var isMITM: Bool = false
 
     var label: String {
         let host = hostname ?? remoteAddr
@@ -328,6 +456,7 @@ private enum DisplayRow: Equatable {
     case fileDetail(pid_t, String)       // pid, path
     case netHeader(pid_t)
     case netDetail(pid_t, String)        // pid, connection key
+    case netTraffic(pid_t, String, Int)  // pid, connection key, traffic index
     case separator(pid_t)               // horizontal rule between info and children
     case infoBorderTop(pid_t, Int)      // pid, depth — top of info box
     case infoBorderBottom(pid_t, Int)   // pid, depth — bottom of info box
@@ -393,6 +522,12 @@ final class TUI: EventSink {
     var isSampleConfigOpen = false
     // Wait config modal
     var isWaitConfigOpen = false
+    // Traffic modal (full-screen view of a single HTTP round-trip)
+    var isTrafficModalOpen = false
+    private var trafficModalRoundTrip: HTTPRoundTrip?
+    private var trafficModalScroll = 0
+    private var trafficModalTitle = ""
+
     // Track modal
     var isTrackModalOpen = false
     private var trackModalIndex = 0
@@ -1197,6 +1332,122 @@ final class TUI: EventSink {
         forceRender()
     }
 
+    // MARK: - Traffic modal
+
+    func openTrafficModal(pid: pid_t, key: String, roundTripIndex: Int) {
+        lock.lock()
+        guard let row = rows[pid], let conn = row.connections[key],
+              roundTripIndex < conn.httpParser.roundTrips.count else {
+            lock.unlock()
+            return
+        }
+        let rt = conn.httpParser.roundTrips[roundTripIndex]
+        trafficModalRoundTrip = rt
+        trafficModalTitle = "\(conn.label) — \(rt.requestLine)"
+        lock.unlock()
+        trafficModalScroll = 0
+        isTrafficModalOpen = true
+        forceRender()
+    }
+
+    func trafficModalUp() {
+        if trafficModalScroll > 0 { trafficModalScroll -= 1 }
+        forceRender()
+    }
+
+    func trafficModalDown() {
+        trafficModalScroll += 1
+        forceRender()
+    }
+
+    func trafficModalClose() {
+        isTrafficModalOpen = false
+        forceRender()
+    }
+
+    private func renderTrafficModal(maxY: Int32, maxX: Int32) {
+        guard let rt = trafficModalRoundTrip else { return }
+        let width = Int(maxX)
+        let height = Int(maxY)
+        let barAttr = COLOR_PAIR(TUIColor.menuBar.rawValue)
+        let innerW = width - 2
+
+        // Title bar
+        let titleText = " \(trafficModalTitle) "
+        let titlePad = String(repeating: "\u{2500}", count: max(0, innerW - titleText.count - 1))
+        attron(barAttr | ATTR_BOLD)
+        mvaddstr(0, 0, "\u{250C}\u{2500}\(String(titleText.prefix(innerW)))\(titlePad)\u{2510}")
+        attroff(barAttr | ATTR_BOLD)
+
+        // Bottom border
+        attron(barAttr)
+        mvaddstr(Int32(height - 2), 0, "\u{2514}\(String(repeating: "\u{2500}", count: innerW))\u{2518}")
+        attroff(barAttr)
+
+        // Footer
+        let footer = "ESC: close  \u{2191}\u{2193}: scroll"
+        let footerPad = String(repeating: " ", count: max(0, width - footer.count))
+        attron(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+        mvaddstr(Int32(height - 1), 0, footer + footerPad)
+        attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
+
+        // Build content lines: request (up) then response (down)
+        enum LineDir { case up, down, separator }
+        var lines: [(String, LineDir)] = []
+
+        // Request
+        for line in rt.request.components(separatedBy: "\n") {
+            lines.append((line.replacingOccurrences(of: "\r", with: ""), .up))
+        }
+
+        // Separator
+        lines.append(("", .separator))
+
+        // Response
+        for line in rt.response.components(separatedBy: "\n") {
+            lines.append((line.replacingOccurrences(of: "\r", with: ""), .down))
+        }
+
+        // Clamp scroll
+        let contentHeight = height - 3
+        let maxScroll = max(0, lines.count - contentHeight)
+        if trafficModalScroll > maxScroll { trafficModalScroll = maxScroll }
+
+        let upColor = COLOR_PAIR(TUIColor.subFile.rawValue)
+        let downColor = COLOR_PAIR(TUIColor.subNet.rawValue)
+
+        for vi in 0..<contentHeight {
+            let lineIdx = trafficModalScroll + vi
+            let y = Int32(1 + vi)
+
+            attron(barAttr)
+            mvaddstr(y, 0, "\u{2502}")
+            attroff(barAttr)
+
+            if lineIdx < lines.count {
+                let (text, dir) = lines[lineIdx]
+                let color: Int32
+                switch dir {
+                case .up: color = upColor
+                case .down: color = downColor
+                case .separator: color = barAttr
+                }
+                let truncated = String(text.prefix(innerW))
+                let padded = truncated + String(repeating: " ", count: max(0, innerW - truncated.count))
+                attron(color)
+                mvaddstr(y, 1, padded)
+                attroff(color)
+            } else {
+                let pad = String(repeating: " ", count: innerW)
+                mvaddstr(y, 1, pad)
+            }
+
+            attron(barAttr)
+            mvaddstr(y, Int32(width - 1), "\u{2502}")
+            attroff(barAttr)
+        }
+    }
+
     func clearExited() {
         lock.lock()
         let exited = rows.filter { !$0.value.isRunning }
@@ -1966,6 +2217,14 @@ final class TUI: EventSink {
     }
 
     func toggleDisclose() {
+        // Check if we're on a netTraffic row — open modal for that round-trip
+        if let dr = displayRows[safe: selectedIndex] {
+            if case .netTraffic(let pid, let key, let idx) = dr {
+                openTrafficModal(pid: pid, key: key, roundTripIndex: idx)
+                return
+            }
+        }
+
         lock.lock()
         for dr in effectiveDisplayRows() {
             let open = !isDisclosed(dr)
@@ -2013,6 +2272,8 @@ final class TUI: EventSink {
         case .resourcesHeader(let pid): rows[pid]?.resourcesDisclosed = open
         case .filesHeader(let pid):   rows[pid]?.filesDisclosed = open
         case .netHeader(let pid):     rows[pid]?.netDisclosed = open
+        case .netDetail(let pid, let key):
+            toggleTrafficDisclosure(pid: pid, key: key)
         case .sampleHeader(let pid): rows[pid]?.sampleDisclosed = open
         case .sampleNode(let pid, let path):
             sampleNodeAt(pid, path: path)?.disclosed = open
@@ -2033,6 +2294,8 @@ final class TUI: EventSink {
         case .resourcesHeader(let pid): return rows[pid]?.resourcesDisclosed ?? false
         case .filesHeader(let pid):   return rows[pid]?.filesDisclosed ?? false
         case .netHeader(let pid):     return rows[pid]?.netDisclosed ?? false
+        case .netDetail(let pid, let key):
+            return rows[pid]?.connections[key]?.trafficDisclosed ?? false
         case .sampleHeader(let pid): return rows[pid]?.sampleDisclosed ?? false
         case .sampleNode(let pid, let path):
             return sampleNodeAt(pid, path: path)?.disclosed ?? false
@@ -2101,6 +2364,8 @@ final class TUI: EventSink {
             return .filesHeader(pid)
         case .netDetail(let pid, _):
             return .netHeader(pid)
+        case .netTraffic(let pid, let key, _):
+            return .netDetail(pid, key)
         case .separator(let pid):
             return .process(pid, 0)
         case .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _):
@@ -2127,7 +2392,7 @@ final class TUI: EventSink {
              .envHeader(let pid), .envDetail(let pid, _),
              .resourcesHeader(let pid), .resourceDetail(let pid, _),
              .filesHeader(let pid), .fileDetail(let pid, _),
-             .netHeader(let pid), .netDetail(let pid, _),
+             .netHeader(let pid), .netDetail(let pid, _), .netTraffic(let pid, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
              .sampleHeader(let pid), .sampleNode(let pid, _),
@@ -2361,6 +2626,8 @@ final class TUI: EventSink {
         if var conn = row.connections[key] {
             conn.alive = false
             conn.closedAt = Date()
+            // Flush any remaining HTTP data in the parser
+            conn.httpParser.flush()
             row.connections[key] = conn
         }
     }
@@ -2389,17 +2656,38 @@ final class TUI: EventSink {
     }
 
     /// Update HTTP request/response line for a connection (called from MITM flow reports)
-    func updateConnectionHTTP(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: String, line: String) {
+    /// Append a captured plaintext chunk to a connection's traffic log
+    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficEntry.Direction, content: String) {
         lock.lock()
         defer { lock.unlock() }
         guard let row = rows[pid] else { return }
         let key = "\(remoteAddr):\(remotePort)"
         if var conn = row.connections[key] {
-            if direction == "request" {
-                conn.httpRequestLine = line
-            } else {
-                conn.httpResponseLine = line
+            // Feed the HTTP parser
+            let dir = direction == .up ? "up" : "down"
+            conn.httpParser.feed(direction: dir, content: content)
+
+            // Update summary lines from parsed round-trips
+            if let first = conn.httpParser.roundTrips.first {
+                if conn.httpRequestLine == nil && !first.requestLine.isEmpty {
+                    conn.httpRequestLine = first.requestLine
+                }
+                if conn.httpResponseLine == nil && !first.responseLine.isEmpty {
+                    conn.httpResponseLine = first.responseLine
+                }
             }
+
+            conn.isMITM = true
+            row.connections[key] = conn
+        }
+    }
+
+    /// Toggle traffic disclosure for a connection.
+    /// NOTE: caller must hold lock.
+    func toggleTrafficDisclosure(pid: pid_t, key: String) {
+        guard let row = rows[pid] else { return }
+        if var conn = row.connections[key] {
+            conn.trafficDisclosed = !conn.trafficDisclosed
             row.connections[key] = conn
         }
     }
@@ -3044,15 +3332,31 @@ final class TUI: EventSink {
                     // Build connection display line, append HTTP info if available
                     var connLabel = conn.label
                     if let req = conn.httpRequestLine {
-                        // Show method + path from request line (e.g. "POST /v1/chat/completions HTTP/1.1")
                         connLabel += "  \(req)"
                     }
                     if let resp = conn.httpResponseLine {
                         connLabel += "  \u{2192} \(resp)"
                     }
-                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(connLabel)"
+                    // Disclosure triangle for MITM connections with traffic
+                    let disc = conn.isMITM && !conn.httpParser.roundTrips.isEmpty
+                        ? (conn.trafficDisclosed ? "\u{25BC} " : "\u{25B6} ")
+                        : ""
+                    let line = "\(time)\(timePad)\(down)\(downPad)\(up)\(upPad)\(disc)\(connLabel)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dim
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netTraffic(let pid, let key, let idx):
+                if let row = rows[pid], let conn = row.connections[key], idx < conn.httpParser.roundTrips.count {
+                    let rt = conn.httpParser.roundTrips[idx]
+                    lock.unlock()
+                    // Show: "GET /path HTTP/1.1  →  HTTP/1.1 200 OK"
+                    let reqSummary = rt.requestLine.isEmpty ? "?" : rt.requestLine
+                    let respSummary = rt.responseLine.isEmpty ? "..." : rt.responseLine
+                    let text = "\(reqSummary)  \u{2192}  \(respSummary)"
+                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    drawLine(y: y, indent: depthIndent + 6, content: text, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3112,6 +3416,9 @@ final class TUI: EventSink {
         }
         if isTrackModalOpen {
             renderTrackModal(maxY: maxY, maxX: maxX)
+        }
+        if isTrafficModalOpen {
+            renderTrafficModal(maxY: maxY, maxX: maxX)
         }
 
         refresh()
@@ -3182,6 +3489,7 @@ final class TUI: EventSink {
              .fileDetail(let pid, _),
              .netHeader(let pid),
              .netDetail(let pid, _),
+             .netTraffic(let pid, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _),
              .infoBorderBottom(let pid, _),
@@ -3673,6 +3981,12 @@ final class TUI: EventSink {
                 for conn in conns {
                     if showAllConnections || conn.stats.alive {
                         displayRows.append(.netDetail(row.pid, conn.key))
+                        // If traffic is disclosed, add traffic rows
+                        if conn.stats.trafficDisclosed {
+                            for i in 0..<conn.stats.httpParser.roundTrips.count {
+                                displayRows.append(.netTraffic(row.pid, conn.key, i))
+                            }
+                        }
                     }
                 }
             }

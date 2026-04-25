@@ -30,8 +30,8 @@ final class MITMBridge: NSObject {
     private let onComplete: (Int64, Int64) -> Void
 
     var onBytesUpdated: ((Int64, Int64) -> Void)?
-    var onHTTPRequest: ((String) -> Void)?
-    var onHTTPResponse: ((String) -> Void)?
+    /// Reports decrypted plaintext: (direction "up"/"down", content)
+    var onPlaintext: ((String, String) -> Void)?
 
     private var bytesOut: Int64 = 0
     private var bytesIn: Int64 = 0
@@ -47,10 +47,7 @@ final class MITMBridge: NSObject {
     private var sslWriteBuffer = Data()
 
     // HTTP line capture
-    private var capturedRequestLine = false
-    private var capturedResponseLine = false
-    private var requestAccum = Data()
-    private var responseAccum = Data()
+    // (removed old HTTP line capture — now using onPlaintext for full content)
 
     init(flow: NEAppProxyTCPFlow, connection: NWTCPConnection,
          identity: SecIdentity, onComplete: @escaping (Int64, Int64) -> Void) {
@@ -186,6 +183,7 @@ final class MITMBridge: NSObject {
             }
 
         case .streaming:
+            os_log("MITM: driveSSL streaming, sslReadBuffer=%d bytes", log: mitmLog, type: .default, sslReadBuffer.count)
             var allPlaintext = Data()
             var lastStatus: OSStatus = noErr
             while true {
@@ -198,16 +196,14 @@ final class MITMBridge: NSObject {
                 if lastStatus != noErr { break }
             }
 
+            os_log("MITM: SSLRead got %d bytes, lastStatus=%d", log: mitmLog, type: .default, allPlaintext.count, lastStatus)
             if !allPlaintext.isEmpty {
                 bytesOut += Int64(allPlaintext.count)
                 onBytesUpdated?(bytesOut, bytesIn)
 
-                if !capturedRequestLine {
-                    requestAccum.append(allPlaintext)
-                    if let line = extractFirstLine(from: requestAccum) {
-                        capturedRequestLine = true
-                        onHTTPRequest?(line)
-                    }
+                if let text = String(data: allPlaintext, encoding: .utf8) {
+                    os_log("MITM: reporting %d chars plaintext UP", log: mitmLog, type: .default, text.count)
+                    onPlaintext?("up", text)
                 }
 
                 connection.write(allPlaintext) { [weak self] error in
@@ -244,15 +240,15 @@ final class MITMBridge: NSObject {
                 return
             }
             let plaintext = data!
+            os_log("MITM: pumpInbound got %d bytes from server", log: mitmLog, type: .default, plaintext.count)
             self.bytesIn += Int64(plaintext.count)
             self.onBytesUpdated?(self.bytesOut, self.bytesIn)
 
-            if !self.capturedResponseLine {
-                self.responseAccum.append(plaintext)
-                if let line = extractFirstLine(from: self.responseAccum) {
-                    self.capturedResponseLine = true
-                    self.onHTTPResponse?(line)
-                }
+            if let text = String(data: plaintext, encoding: .utf8) {
+                os_log("MITM: reporting %d chars plaintext DOWN", log: mitmLog, type: .default, text.count)
+                self.onPlaintext?("down", text)
+            } else {
+                os_log("MITM: pumpInbound data not valid UTF-8", log: mitmLog, type: .default)
             }
 
             guard let ctx = self.sslContext else { return }
@@ -336,13 +332,3 @@ extension MITMBridge {
     }
 }
 
-// MARK: - HTTP line extraction
-
-private func extractFirstLine(from data: Data) -> String? {
-    guard let idx = data.firstIndex(of: 0x0A) else { return nil }
-    var end = idx
-    if end > data.startIndex && data[data.index(before: end)] == 0x0D {
-        end = data.index(before: end)
-    }
-    return String(data: data[data.startIndex..<end], encoding: .utf8)
-}

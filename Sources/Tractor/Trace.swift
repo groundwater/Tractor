@@ -243,9 +243,10 @@ struct Trace: ParsableCommand {
                 flowClient.onConnectionClosed = { pid, host, port in
                     t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port)
                 }
-                flowClient.onHTTPLine = { pid, host, port, direction, line in
-                    t.updateConnectionHTTP(pid: pid, remoteAddr: host, remotePort: port,
-                                           direction: direction, line: line)
+                flowClient.onTraffic = { pid, host, port, direction, content in
+                    let dir: TrafficEntry.Direction = direction == "up" ? .up : .down
+                    t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
+                                    direction: dir, content: content)
                 }
             }
 
@@ -265,6 +266,17 @@ struct Trace: ParsableCommand {
                 while true {
                     let ch = wgetch(stdscr)
                     guard ch != -1 else { break }
+
+                    // Traffic modal intercepts keys
+                    if t.isTrafficModalOpen {
+                        switch ch {
+                        case 259: t.trafficModalUp()
+                        case 258: t.trafficModalDown()
+                        case 27, 113, 10, 13: t.trafficModalClose()  // ESC, q, Enter
+                        default: break
+                        }
+                        continue
+                    }
 
                     // Sample config modal intercepts keys
                     if t.isSampleConfigOpen {

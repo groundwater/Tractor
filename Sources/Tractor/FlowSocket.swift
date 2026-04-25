@@ -30,7 +30,7 @@ final class FlowXPCClient {
 
     var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64) -> Void)?
     var onConnectionClosed: ((pid_t, String, UInt16) -> Void)?
-    var onHTTPLine: ((pid_t, String, UInt16, String, String) -> Void)?
+    var onTraffic: ((pid_t, String, UInt16, String, String) -> Void)?  // pid, host, port, direction, content
 
     init(sink: EventSink) {
         self.sink = sink
@@ -73,6 +73,9 @@ final class FlowXPCClient {
         }
         proxy.closeSysextFlow = { [weak self] flowID in
             self?.proxy?.closeFlow(id: flowID)
+        }
+        proxy.onTraffic = { [weak self] pid, host, port, direction, content in
+            self?.onTraffic?(pid, host, port, direction, content)
         }
 
         mitmProxy = proxy
@@ -127,9 +130,9 @@ final class FlowXPCClient {
                 continue
             }
 
-            if let direction = event["http"] as? String,
-               let line = event["line"] as? String {
-                onHTTPLine?(pid, host, port, direction, line)
+            if let direction = event["traffic"] as? String,
+               let content = event["content"] as? String {
+                onTraffic?(pid, host, port, direction, content)
                 continue
             }
 

@@ -180,8 +180,9 @@ class TransparentProxy: NETransparentProxyProvider {
                 }
                 os_log("MITM: leaf cert for %{public}@ imported", log: log, type: .default, sniHost)
 
-                // Outbound TLS to real server
-                let endpoint = NWHostEndpoint(hostname: host, port: port)
+                // Outbound TLS to real server — use sniHost for correct SNI,
+                // but connect to the original IP (host) for routing
+                let endpoint = NWHostEndpoint(hostname: sniHost, port: port)
                 let conn = self.createTCPConnection(to: endpoint, enableTLS: true,
                                                     tlsParameters: nil, delegate: MITMTLSDelegate.shared)
 
@@ -201,11 +202,8 @@ class TransparentProxy: NETransparentProxyProvider {
                 bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
                     self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn)
                 }
-                bridge.onHTTPRequest = { [weak self] line in
-                    self?.reporter.reportHTTP(pid: pid, host: sniHost, port: port, direction: "request", line: line)
-                }
-                bridge.onHTTPResponse = { [weak self] line in
-                    self?.reporter.reportHTTP(pid: pid, host: sniHost, port: port, direction: "response", line: line)
+                bridge.onPlaintext = { [weak self] direction, content in
+                    self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, content: content)
                 }
 
                 self.bridgeLock.lock()

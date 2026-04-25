@@ -120,12 +120,23 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         eventBuffer.removeAll()
         bufferLock.unlock()
 
-        guard !events.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: events) else {
+        guard !events.isEmpty else {
             reply(Data("[]".utf8))
             return
         }
-        reply(data)
+        // Filter out events that can't be serialized (e.g. traffic with bad chars)
+        var validEvents = events
+        if let data = try? JSONSerialization.data(withJSONObject: events) {
+            reply(data)
+        } else {
+            // Serialization failed — try each event individually, drop bad ones
+            validEvents = events.filter { JSONSerialization.isValidJSONObject($0) }
+            if let data = try? JSONSerialization.data(withJSONObject: validEvents) {
+                reply(data)
+            } else {
+                reply(Data("[]".utf8))
+            }
+        }
     }
 
     // MARK: - Event buffering (called from handleNewFlow/TCPBridge)
@@ -145,8 +156,13 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         bufferLock.unlock()
     }
 
-    func reportHTTP(pid: Int32, host: String, port: String, direction: String, line: String) {
-        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "http": direction, "line": line]
+    func reportTraffic(pid: Int32, host: String, port: String, direction: String, content: String) {
+        // Truncate and sanitize content for safe JSON serialization
+        let truncated = String(content.prefix(4096))
+        // Replace any characters that could break JSON serialization
+        let safe = truncated.unicodeScalars.filter { $0.value >= 0x20 || $0 == "\n" || $0 == "\r" || $0 == "\t" }
+        let safeString = String(String.UnicodeScalarView(safe))
+        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "content": safeString]
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()

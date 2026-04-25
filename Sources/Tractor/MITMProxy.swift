@@ -11,8 +11,8 @@ final class MITMProxy: NSObject, TractorCLIXPC {
     private let caCertPEM: String
     private let caKeyPEM: String
 
-    /// Called when we capture an HTTP request/response line
-    var onHTTPLine: ((pid_t, String, UInt16, String, String) -> Void)?
+    /// Called with plaintext traffic chunks (pid, host, port, direction "up"/"down", content)
+    var onTraffic: ((pid_t, String, UInt16, String, String) -> Void)?
     /// Send data back to sysext
     var sendToSysext: ((UInt64, Data) -> Void)?
     /// Notify sysext to close a flow
@@ -60,11 +60,8 @@ final class MITMProxy: NSObject, TractorCLIXPC {
                 self?.sessions.removeValue(forKey: id)
                 self?.sessionsLock.unlock()
             },
-            onHTTPRequest: { [weak self] line in
-                self?.onHTTPLine?(pid, hostname, port, "request", line)
-            },
-            onHTTPResponse: { [weak self] line in
-                self?.onHTTPLine?(pid, hostname, port, "response", line)
+            onPlaintext: { [weak self] direction, content in
+                self?.onTraffic?(pid, hostname, port, direction, content)
             }
         )
 
@@ -176,8 +173,7 @@ final class MITMSession {
     private let identity: SecIdentity
     private let sendToSysext: (Data) -> Void
     private let onClose: () -> Void
-    private let onHTTPRequest: (String) -> Void
-    private let onHTTPResponse: (String) -> Void
+    private let onPlaintext: (String, String) -> Void  // (direction "up"/"down", content)
 
     private var sslContext: SSLContext?
     var sslReadBuffer = Data()       // accessed by C callbacks
@@ -188,18 +184,11 @@ final class MITMSession {
     // Real server connection
     private var serverConnection: NWConnection?
 
-    // HTTP capture
-    private var capturedRequestLine = false
-    private var capturedResponseLine = false
-    private var requestAccum = Data()
-    private var responseAccum = Data()
-
     init(id: UInt64, hostname: String, port: UInt16, pid: Int32,
          identity: SecIdentity,
          sendToSysext: @escaping (Data) -> Void,
          onClose: @escaping () -> Void,
-         onHTTPRequest: @escaping (String) -> Void,
-         onHTTPResponse: @escaping (String) -> Void) {
+         onPlaintext: @escaping (String, String) -> Void) {
         self.id = id
         self.hostname = hostname
         self.port = port
@@ -207,8 +196,7 @@ final class MITMSession {
         self.identity = identity
         self.sendToSysext = sendToSysext
         self.onClose = onClose
-        self.onHTTPRequest = onHTTPRequest
-        self.onHTTPResponse = onHTTPResponse
+        self.onPlaintext = onPlaintext
     }
 
     func start() {
@@ -305,13 +293,9 @@ final class MITMSession {
         }
 
         if !allPlaintext.isEmpty {
-            // Capture HTTP request line
-            if !capturedRequestLine {
-                requestAccum.append(allPlaintext)
-                if let line = extractFirstLine(from: requestAccum) {
-                    capturedRequestLine = true
-                    onHTTPRequest(line)
-                }
+            // Report plaintext to TUI
+            if let text = String(data: allPlaintext, encoding: .utf8) {
+                onPlaintext("up", text)
             }
 
             // Forward plaintext to real server
@@ -343,13 +327,9 @@ final class MITMSession {
                 return
             }
 
-            // Capture HTTP response line
-            if !self.capturedResponseLine {
-                self.responseAccum.append(data)
-                if let line = extractFirstLine(from: self.responseAccum) {
-                    self.capturedResponseLine = true
-                    self.onHTTPResponse(line)
-                }
+            // Report plaintext to TUI
+            if let text = String(data: data, encoding: .utf8) {
+                self.onPlaintext("down", text)
             }
 
             // Encrypt via SSL and send to app
