@@ -3,6 +3,9 @@ import CoreGraphics
 import Darwin.ncurses
 import Foundation
 
+// KEY_MOUSE constant for ncurses mouse events (0o631 = 409 in decimal)
+private let KEY_MOUSE: Int32 = 0o631
+
 /// Globals for signal-safe cleanup
 private var activeTUI: TUI?
 private var activeESClient: ESClient?
@@ -347,6 +350,8 @@ struct Trace: ParsableCommand {
                         case 121: t.toggleMenu(.files)   // y
                         case 112: t.toggleContextMenu() // p
                         case 118: t.toggleMenu(.view)    // v
+                        case KEY_MOUSE:
+                            if let tui = activeTUI { tui.handleMouse() }
                         default:
                             // Shortcut keys still work while menu is open
                             t.executeShortcut(ch)
@@ -381,8 +386,8 @@ struct Trace: ParsableCommand {
                         t.toggleMenu(.files)
                     case 118: // 'v' - View menu
                         t.toggleMenu(.view)
-                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120, 97, 98, 104:
-                        // i, d, n, z, k, s, w, l, r, x, h — all routed through executeShortcut for flash
+                    case 105, 100, 110, 122, 107, 115, 119, 108, 114, 120, 97, 98, 104, 99:
+                        // i, d, n, z, k, s, w, l, r, x, h, c — all routed through executeShortcut for flash
                         t.executeShortcut(ch)
                     case 126: // '~' - toggle auto mode
                         t.toggleAutoMode()
@@ -390,6 +395,11 @@ struct Trace: ParsableCommand {
                         t.toggleHints()
                     case 27: // ESC
                         t.clearSelection()
+                    case KEY_MOUSE:
+                        // Mouse event - handle mouse click
+                        if let tui = activeTUI {
+                            tui.handleMouse()
+                        }
                     case 113: // 'q'
                         exitAfterRestoringTerminal(message: "", code: 0)
                     default:

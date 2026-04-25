@@ -23,6 +23,19 @@ private let ATTR_REVERSE = NCURSES_BITS(1, 10)  // A_REVERSE
 private let ATTR_DIM     = NCURSES_BITS(1, 12)  // A_DIM
 private let ATTR_BOLD    = NCURSES_BITS(1, 13)  // A_BOLD
 
+// MARK: - ncurses mouse constants
+
+private let KEY_MOUSE: Int32 = 0o631
+private let BUTTON4_PRESSED: UInt = 0x20000   // scroll up
+private let BUTTON5_PRESSED: UInt = 0x400000  // scroll down
+
+// ncurses defines A_CHARTEXT as (NCURSES_BITS(1U,0) - 1U) = 0x00ff
+private let A_CHARTEXT: UInt32 = 0x00ff
+
+// Use ncurses MEVENT directly (available via Darwin.ncurses)
+// Note: imported as "Darwin.MEVENT" from ncurses.h
+private typealias nc_MEVENT = Darwin.MEVENT
+
 // MARK: - Color scheme
 
 enum TUIColor: Int32 {
@@ -376,7 +389,23 @@ private enum DisplayRow: Equatable {
 
 // MARK: - Menu system
 
-enum MenuID: Equatable { case file, edit, process, sample, network, files, view }
+enum MenuID: Equatable {
+    case file, edit, process, sample, network, files, view
+}
+
+private extension MenuID {
+    var label: String {
+        switch self {
+        case .file:     return "File"
+        case .edit:     return "Edit"
+        case .process:  return "Process"
+        case .sample:   return "Sample"
+        case .network:  return "Network"
+        case .files:    return "Files"
+        case .view:     return "View"
+        }
+    }
+}
 
 private struct MenuItem {
     let label: String
@@ -544,6 +573,9 @@ final class TUI: EventSink {
         define_key("\u{1b}[1;2A", 337)  // KEY_SR (Shift+Up)
         define_key("\u{1b}[1;2B", 336)  // KEY_SF (Shift+Down)
 
+        // Enable mouse support - ncurses functions are available via Darwin.ncurses
+        _ = mousemask(0xdffffff, nil)
+
         guard has_colors() else {
             endwin()
             fputs("ERROR: Terminal does not support colors\n", stderr)
@@ -621,12 +653,196 @@ final class TUI: EventSink {
         }
     }
 
+    /// Check if a character at screen coordinates (y, x) is a disclosure indicator
+    private func isDisclosureAt(_ y: Int32, _ x: Int32) -> Bool {
+        // Read the character at the given position
+        attron(Int32(A_NORMAL))
+        let ch = inch()
+        attroff(Int32(A_NORMAL))
+        // Disclosure indicators are '▶' (closed) or '▼' (open) - check character code
+        // A_CHARTEXT is a macro: (NCURSES_BITS(1U,0) - 1U) = 0x00ff
+        let charCode = ch & UInt32(A_CHARTEXT)
+        let char = Character(UnicodeScalar(charCode) ?? " ")
+        return char == "▶" || char == "▼"
+    }
+
+    /// Get the display row index at screen coordinates (y, x)
+    private func rowIndexAtScreen(_ y: Int32, _ x: Int32) -> Int? {
+        guard y >= 4 else { return nil } // Rows start at line 4 (header + menu bar)
+        
+        let columnLayout = columnLayout(for: displayRows)
+        
+        var currentY: Int32 = 4
+        for (idx, row) in displayRows.enumerated() {
+            // Skip if outside visible range
+            guard currentY <= y else { break }
+            
+            let skip: Bool
+            switch row {
+            case .process(_, _), .trackerGroupHeader(_):
+                skip = false
+            default:
+                // Only count top-level rows (process headers)
+                skip = true
+            }
+            
+            guard !skip else { continue }
+            
+            if currentY == y {
+                // Check x coordinate is within bounds
+                let width = Int(getmaxx(stdscr))
+                guard x >= 0 && x < Int32(width) else { continue }
+                
+                // For process rows, check if it's within the row area
+                return idx
+            }
+            
+            currentY += 1
+        }
+        
+        return nil
+    }
+
+    /// Handle mouse event and perform appropriate action
+    func handleMouse() {
+        var event = nc_MEVENT()
+        let result = getmouse(&event)
+        guard result == 0 else { return }
+
+        // Scroll wheel — adjust viewport without changing selection
+        let bs = UInt(event.bstate)
+        if bs & BUTTON4_PRESSED != 0 {
+            scrollOffset = max(0, scrollOffset - 3)
+            forceRender()
+            return
+        }
+        if bs & BUTTON5_PRESSED != 0 {
+            scrollOffset += 3
+            forceRender()
+            return
+        }
+
+        // When a menu is open, all clicks are handled in menu context
+        if activeMenu != nil {
+            // Click on menu bar - switch menus
+            if event.y == 1 {
+                handleMenuBarClick(x: Int(event.x))
+                return
+            }
+            // Click inside dropdown - select item
+            if isClickInDropdown(x: event.x, y: event.y) {
+                handleMenuClick(y: Int(event.y), x: Int(event.x))
+                return
+            }
+            // Click anywhere else - close menu
+            closeMenu()
+            return
+        }
+
+        // No menu open — normal click handling
+
+        // Check if click is on a disclosure indicator first
+        let charAtPos = characterAtScreen(y: event.y, x: event.x)
+        if (charAtPos == "▶" || charAtPos == "▼") && event.y >= 4 {
+            handleDisclosureClick(y: Int(event.y), x: Int(event.x))
+            return
+        }
+
+        // Click on menu bar - open menu
+        if event.y == 1 {
+            handleMenuBarClick(x: Int(event.x))
+            return
+        }
+
+        // Click in main content area (lines 4+) - row selection
+        if event.y >= 4 {
+            handleRowSelection(y: Int(event.y), x: Int(event.x))
+        }
+    }
+
+    /// Get character at screen position
+    private func characterAtScreen(y: Int32, x: Int32) -> String {
+        move(y, x)
+        attron(Int32(A_NORMAL))
+        let ch = inch()
+        attroff(Int32(A_NORMAL))
+        // A_CHARTEXT is a macro: (NCURSES_BITS(1U,0) - 1U) = 0x00ff
+        // Extract the character code from the attributes
+        let charCode = ch & UInt32(A_CHARTEXT)
+        let char = Character(UnicodeScalar(charCode) ?? " ")
+        return String(char)
+    }
+
+    /// Handle click on row - select the process
+    private func handleRowSelection(y: Int, x: Int) {
+        guard y >= 4 else { return }
+        let idx = scrollOffset + (y - 4)
+        guard idx >= 0 && idx < displayRows.count && isSelectable(idx) else { return }
+        selectedIndex = idx
+        selectedIndices.removeAll()
+        forceRender()
+    }
+
+    /// Handle click on disclosure indicator
+    private func handleDisclosureClick(y: Int, x: Int) {
+        let idx = scrollOffset + (y - 4)
+        guard idx >= 0 && idx < displayRows.count else { return }
+        if case .process(let pid, _) = displayRows[idx] {
+            toggleDisclose(pid: pid)
+        }
+    }
+
+    /// Handle click on menu bar
+    private func handleMenuBarClick(x: Int) {
+        guard x >= 0 else { return }
+
+        var startX = 1
+        for entry in menuBarEntries {
+            let w = entry.before.count + entry.key.count + entry.after.count + 2
+            if x >= startX && x < startX + w {
+                toggleMenu(entry.id)
+                return
+            }
+            startX += w
+        }
+    }
+
+    /// Handle click on menu dropdown items
+    private func handleMenuClick(y: Int, x: Int) {
+        guard activeMenu != nil else { return }
+        
+        // Calculate menu item index based on y
+        // y=2 is the top border, items start at y=3
+        let itemIndex = y - 3
+        
+        lock.lock()
+        let items = currentMenuItems()
+        lock.unlock()
+        
+        guard itemIndex >= 0 && itemIndex < items.count else { return }
+        
+        menuItemIndex = itemIndex
+        menuSelect()
+    }
+
+    /// Adjust scrollOffset so selectedIndex is visible, roughly centered if off-screen.
+    private func scrollToSelection() {
+        guard selectedIndex >= 0 else { return }
+        let availableLines = Int(getmaxy(stdscr)) - 5
+        guard availableLines > 0 else { return }
+        if selectedIndex < scrollOffset || selectedIndex >= scrollOffset + availableLines {
+            // Off-screen — center it
+            scrollOffset = max(0, selectedIndex - availableLines / 2)
+        }
+    }
+
     func moveUp() {
         if selectedIndex < 0 { selectedIndex = displayRows.count - 1 }
         else if selectedIndex > 0 { selectedIndex -= 1 }
         // Skip non-selectable rows
         while selectedIndex > 0 && !isSelectable(selectedIndex) { selectedIndex -= 1 }
         selectedIndices.removeAll()
+        scrollToSelection()
         forceRender()
     }
 
@@ -636,6 +852,7 @@ final class TUI: EventSink {
         // Skip non-selectable rows
         while selectedIndex < displayRows.count - 1 && !isSelectable(selectedIndex) { selectedIndex += 1 }
         selectedIndices.removeAll()
+        scrollToSelection()
         forceRender()
     }
 
@@ -646,6 +863,7 @@ final class TUI: EventSink {
             selectedIndex -= 1
             selectedIndices.insert(selectedIndex)
         }
+        scrollToSelection()
         forceRender()
     }
 
@@ -656,6 +874,7 @@ final class TUI: EventSink {
             selectedIndex += 1
             selectedIndices.insert(selectedIndex)
         }
+        scrollToSelection()
         forceRender()
     }
 
@@ -765,12 +984,113 @@ final class TUI: EventSink {
         return nil
     }
 
+    /// Returns the DisplayRow at current selection, or nil if invalid
+    private func currentDisplayRow() -> DisplayRow? {
+        return displayRows[safe: selectedIndex]
+    }
+
+    /// Returns the value string to copy for a given DisplayRow
+    private func displayRowToCopyValue(for row: DisplayRow) -> String? {
+        guard let pid = pidForRow(selectedIndex) else { return nil }
+
+        switch row {
+        case .processDetail(let pid, let key):
+            // Get the full line (key: value) for copying
+            if let row = rows[pid] {
+                switch key {
+                case "Path":
+                    return "Path: \(row.fullPath)"
+                case "CWD":
+                    return "CWD: \(row.cwd)"
+                case "IDs":
+                    let ids = "PID: \(row.pid)  PPID: \(row.ppid)  UID:"
+                    return "\(ids): \(getuid())"
+                case "Started":
+                    let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                    return "Started: \(fmt.string(from: row.startTime))"
+                default:
+                    return ""
+                }
+            }
+            return nil
+
+        case .argDetail(let pid, let idx):
+            return rows[pid]?.argvArray[safe: idx]
+
+        case .envDetail(let pid, let idx):
+            if let env = rows[pid]?.envVars[safe: idx], let eqIdx = env.firstIndex(of: "=") {
+                // Copy the entire KEY=value line
+                return String(env)
+            }
+            return nil
+
+        case .resourceDetail(let pid, let key):
+            if let row = rows[pid] {
+                switch key {
+                case "CPU":
+                    let uMin = Int(row.cpuUser) / 60; let uSec = Int(row.cpuUser) % 60
+                    let sMin = Int(row.cpuSys) / 60; let sSec = Int(row.cpuSys) % 60
+                    return "CPU: \(uMin):\(String(format: "%02d", uSec)) user, \(sMin):\(String(format: "%02d", sSec)) sys"
+                case "Memory":
+                    return "Memory: \(formatBytes(row.rss)) RSS"
+                case "FDs":
+                    return "FDs: \(row.fdCount) open"
+                case "Disk":
+                    return "Disk: R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
+                default:
+                    return ""
+                }
+            }
+            return nil
+
+        case .fileDetail(let pid, let path):
+            // File details show just the path (from file header lines)
+            return "File: \(path)"
+
+        case .netDetail(let pid, let connKey), .netTraffic(let pid, let connKey, _):
+            // Network lines use key:value format for connections
+            return "Connection \(connKey)"
+
+        default:
+            return nil
+        }
+    }
+
+    private func copyToClipboard(_ text: String) {
+        guard !text.isEmpty else { return }
+        
+        // Write to temporary file and pipe to pbcopy
+        let tempPath = "/tmp/tractor_copy_\(ProcessInfo.processInfo.processIdentifier).txt"
+        do {
+            try text.write(toFile: tempPath, atomically: true, encoding: .utf8)
+            let task = Process()
+            task.launchPath = "/usr/bin/pbcopy"
+            task.arguments = []
+            task.standardInput = FileHandle(forReadingAtPath: tempPath)
+            try? task.run()
+            try? FileManager.default.removeItem(atPath: tempPath)
+            flash("Copied to clipboard")
+        } catch {
+            flash("Failed to copy: \(error)")
+        }
+    }
+
+    /// Copy the value from current line to clipboard
+    private func copyCurrentLine() {
+        guard let row = displayRows[safe: selectedIndex] else { return }
+        if let value = displayRowToCopyValue(for: row) {
+            copyToClipboard(value)
+        }
+    }
+
     private func editMenuItems() -> [MenuItem] {
+        // Enable Copy when cursor is on a process detail, arg, env, resource, file, net, or sample line
+        let canCopy = currentDisplayRow().flatMap { displayRowToCopyValue(for: $0) } != nil
         return [
             MenuItem(label: "Filter", shortcut: "/", key: nil, enabled: false),
             MenuItem(label: "Find", shortcut: "f", key: nil, enabled: false),
             MenuItem(label: "Clear", shortcut: "l", key: 108),
-            MenuItem(label: "Copy", shortcut: "c", key: nil, enabled: false),
+            MenuItem(label: "Copy", shortcut: "c", key: 99, enabled: canCopy),
         ]
     }
 
@@ -874,6 +1194,14 @@ final class TUI: EventSink {
             if item.label == "Track..." { openTrackModal() }
             if item.label == "Untrack" {
                 if let id = selectedTrackerGroupId() { removeTrackerGroup(id: id) }
+            }
+            forceRender()
+            return
+        }
+
+        if menu == .edit {
+            if item.label == "Copy" {
+                copyCurrentLine()
             }
             forceRender()
             return
@@ -1422,6 +1750,7 @@ final class TUI: EventSink {
         case 97:  return { self.showAllConnections = !self.showAllConnections }  // a
         case 98:  return { self.showExited = !self.showExited; self.forceRender() }  // b
         case 104: return toggleViewMode      // h
+        case 99:  return copyCurrentLine     // c (Copy)
         default: return nil
         }
     }
@@ -1500,6 +1829,36 @@ final class TUI: EventSink {
         return [.file, .edit, .process, ctx, .view]
     }
 
+    /// Visible menu bar entries with rendering info, matching renderMenuBar layout exactly.
+    private var menuBarEntries: [(before: String, key: String, after: String, id: MenuID)] {
+        let ctx = contextMenuID()
+        var menus: [(before: String, key: String, after: String, id: MenuID)] = [
+            ("", "F", "ile", .file),
+            ("", "E", "dit", .edit),
+            ("", "P", "rocess", .process),
+        ]
+        if ctx != .process {
+            switch ctx {
+            case .sample:  menus.append(("Sa", "m", "ple", .sample))
+            case .network: menus.append(("Ne", "t", "work", .network))
+            case .files:   menus.append(("FileS", "y", "stem", .files))
+            default: break
+            }
+        }
+        menus.append(("", "V", "iew", .view))
+        return menus
+    }
+
+    /// X position where a menu's dropdown should appear, based on actual rendered widths.
+    private func menuBarX(for target: MenuID) -> Int32 {
+        var x: Int32 = 1
+        for entry in menuBarEntries {
+            if entry.id == target { break }
+            x += Int32(entry.before.count + entry.key.count + entry.after.count + 2)
+        }
+        return x
+    }
+
     /// Which context menu to show based on current selection
     private func contextMenuID() -> MenuID {
         guard let dr = displayRows[safe: selectedIndex] else { return .process }
@@ -1535,6 +1894,28 @@ final class TUI: EventSink {
         case .view: return viewMenuItems()
         case nil: return []
         }
+    }
+
+    /// Check if click at (x, y) is within the dropdown bounds of active menu
+    private func isClickInDropdown(x: Int32, y: Int32) -> Bool {
+        guard let menu = activeMenu else { return false }
+
+        let dropX = menuBarX(for: menu)
+
+        // Get items for this menu
+        let items = currentMenuItems()
+        guard !items.isEmpty else { return false }
+
+        // Calculate dropdown dimensions
+        let maxLabel = items.map { $0.label.count }.max() ?? 0
+        let maxShortcut = items.map { $0.shortcut.count }.max() ?? 0
+        let dropWidth: Int32 = Int32(maxLabel + maxShortcut + 6)  // padding + check + gap
+
+        // Dropdown spans from dropX to dropX+dropWidth-1 in X, and y=2 to bottom border in Y
+        let dropY: Int32 = 2
+        let bottomY = dropY + Int32(items.count) + 1
+
+        return x >= dropX && x < dropX + dropWidth && y >= dropY && y <= bottomY
     }
 
     func menuLeft() {
@@ -2182,6 +2563,17 @@ final class TUI: EventSink {
             let open = !isDisclosed(dr)
             setDisclosure(dr, open: open)
         }
+        lock.unlock()
+        forceRender()
+    }
+
+    /// Toggle disclosure for a specific PID
+    private func toggleDisclose(pid: pid_t) {
+        lock.lock()
+        guard let row = rows[pid] else { lock.unlock(); return }
+        let newDisclosed = !row.disclosed
+        row.disclosed = newDisclosed
+        row.userCollapsedTree = !newDisclosed
         lock.unlock()
         forceRender()
     }
@@ -3121,10 +3513,6 @@ final class TUI: EventSink {
 
         // Clamp selectedIndex and adjust scroll
         if selectedIndex >= displayRows.count { selectedIndex = max(-1, displayRows.count - 1) }
-        if selectedIndex >= 0 {
-            if selectedIndex < scrollOffset { scrollOffset = selectedIndex }
-            if selectedIndex >= scrollOffset + availableLines { scrollOffset = selectedIndex - availableLines + 1 }
-        }
         scrollOffset = max(0, min(scrollOffset, max(0, displayRows.count - 1)))
 
         // Render rows
@@ -3198,16 +3586,17 @@ final class TUI: EventSink {
 
             case .processDetail(let pid, let key):
                 if let row = rows[pid] {
-                    let value: String
+                    // Get the key and value separately for proper highlighting
+                    let (keyPart, val): (String, String)
                     switch key {
-                    case "Path":    value = "Path: \(row.fullPath)"
-                    case "CWD":     value = "CWD:  \(row.cwd)"
-                    case "IDs":     value = "PID: \(row.pid)  PPID: \(row.ppid)  UID: \(getuid())"
-                    case "Started": let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"; value = "Started: \(fmt.string(from: row.startTime))"
-                    default:        value = key
+                    case "Path":    keyPart = "Path"; val = row.fullPath
+                    case "CWD":     keyPart = "CWD";  val = row.cwd
+                    case "IDs":     keyPart = "PID: \(row.pid)  PPID: \(row.ppid)  UID:"; val = "\(getuid())"
+                    case "Started": keyPart = "Started"; let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"; val = fmt.string(from: row.startTime)
+                    default:        keyPart = key; val = ""
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 4, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawKeyValLine(y: y, indent: depthIndent + 4, key: keyPart, value: val, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3234,13 +3623,40 @@ final class TUI: EventSink {
             case .envDetail(let pid, let idx):
                 let env = rows[pid]?.envVars[safe: idx] ?? ""
                 lock.unlock()
-                // Bold the KEY= part, dim the value
+                // Display env var with KEY in header color (blue), VALUE dimmed
+                let indentStr = String(repeating: " ", count: depthIndent + 6)
+                
                 if let eqIdx = env.firstIndex(of: "=") {
-                    let key = String(env[...eqIdx])
-                    let val = String(env[env.index(after: eqIdx)...])
-                    drawLine(y: y, indent: depthIndent + 6, content: key + val, color: ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    let keyPart = String(env[...eqIdx])
+                    let valPart = String(env[env.index(after: eqIdx)...])
+                    
+                    // Draw indentation
+                    attron(ATTR_DIM)
+                    mvaddstr(y, 0, indentStr)
+                    attroff(ATTR_DIM)
+                    
+                    // Handle highlighting (copy mode)
+                    if isHighlighted {
+                        let attr = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_REVERSE
+                        attron(attr)
+                        addstr(keyPart + valPart)
+                        attroff(attr)
+                    } else {
+                        // Draw KEY in header color (blue, bold)
+                        let keyAttr = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
+                        attron(keyAttr)
+                        addstr(keyPart)
+                        attroff(keyAttr)
+                        
+                        // Draw VALUE in dim color
+                        attron(COLOR_PAIR(TUIColor.dim.rawValue))
+                        addstr(valPart)
+                        attroff(COLOR_PAIR(TUIColor.dim.rawValue))
+                    }
                 } else {
-                    drawLine(y: y, indent: depthIndent + 6, content: env, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    attron(ATTR_DIM)
+                    mvaddstr(y, 0, indentStr + env)
+                    attroff(ATTR_DIM)
                 }
                 y += 1
 
@@ -3252,19 +3668,20 @@ final class TUI: EventSink {
 
             case .resourceDetail(let pid, let key):
                 if let row = rows[pid] {
-                    let value: String
+                    // Get key and value separately for proper highlighting
+                    let (keyPart, val): (String, String)
                     switch key {
                     case "CPU":
                         let uMin = Int(row.cpuUser) / 60; let uSec = Int(row.cpuUser) % 60
                         let sMin = Int(row.cpuSys) / 60; let sSec = Int(row.cpuSys) % 60
-                        value = "CPU: \(uMin):\(String(format: "%02d", uSec)) user, \(sMin):\(String(format: "%02d", sSec)) sys"
-                    case "Memory":  value = "Memory: \(formatBytes(row.rss)) RSS"
-                    case "FDs":     value = "FDs: \(row.fdCount) open"
-                    case "Disk":    value = "Disk: R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
-                    default: value = key
+                        keyPart = "CPU"; val = "\(uMin):\(String(format: "%02d", uSec)) user, \(sMin):\(String(format: "%02d", sSec)) sys"
+                    case "Memory":  keyPart = "Memory"; val = formatBytes(row.rss) + " RSS"
+                    case "FDs":     keyPart = "FDs"; val = "\(row.fdCount) open"
+                    case "Disk":    keyPart = "Disk"; val = "R:\(formatBytes(row.diskBytesRead)) W:\(formatBytes(row.diskBytesWritten))"
+                    default: keyPart = key; val = ""
                     }
                     lock.unlock()
-                    drawLine(y: y, indent: depthIndent + 6, content: value, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawKeyValLine(y: y, indent: depthIndent + 6, key: keyPart, value: val, color: ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3367,14 +3784,20 @@ final class TUI: EventSink {
                     if rt.responseLine.isEmpty {
                         respSummary = "..."
                     } else if !rt.responseComplete {
-                        respSummary = rt.responseLine + " (streaming...)"
+                        respSummary = rt.responseLine
                     } else {
                         respSummary = rt.responseLine
                     }
                     let text = "\(reqSummary)  \u{2192}  \(respSummary)"
                     let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
-                    drawLine(y: y, indent: depthIndent + 10, content: text, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                    y += 1
+                    let indent = depthIndent + 10
+                    let availWidth = max(1, width - indent - currentBoxIndent - 1)
+                    let wrapped = wrapText(text, width: availWidth)
+                    for (li, line) in wrapped.enumerated() {
+                        let lineIndent = li == 0 ? indent : indent + 2
+                        drawLine(y: y, indent: lineIndent, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                        y += 1
+                    }
                 } else { lock.unlock() }
 
             case .netHexDump(let pid, let key, let lineIdx):
@@ -3578,24 +4001,8 @@ final class TUI: EventSink {
         mvaddstr(y, 0, pad)
         attroff(barAttr)
 
-        let ctx = contextMenuID()
-        var menus: [(before: String, key: String, after: String, id: MenuID)] = [
-            ("", "F", "ile", .file),
-            ("", "E", "dit", .edit),
-            ("", "P", "rocess", .process),
-        ]
-        if ctx != .process {
-            switch ctx {
-            case .sample:  menus.append(("Sa", "m", "ple", .sample))
-            case .network: menus.append(("Ne", "t", "work", .network))
-            case .files:   menus.append(("FileS", "y", "stem", .files))
-            default: break
-            }
-        }
-        menus.append(("", "V", "iew", .view))
-
         var x: Int32 = 1
-        for menu in menus {
+        for menu in menuBarEntries {
             let isActive = activeMenu == menu.id
             let isFlashing = menuFlash == menu.id
             let baseAttr = (isActive || isFlashing) ? COLOR_PAIR(TUIColor.menuHighlight.rawValue) : barAttr
@@ -3617,24 +4024,7 @@ final class TUI: EventSink {
 
     private func renderMenuDropdown(menu: MenuID, maxY: Int32, maxX: Int32) {
         let items: [MenuItem]
-        // Compute X position based on menu order
-        // Compute dropdown X by measuring actual menu bar items
-        func menuWidth(_ id: MenuID) -> Int {
-            switch id {
-            case .file: return 6
-            case .edit: return 6
-            case .process: return 10
-            case .sample: return 10
-            case .network: return 11
-            case .files: return 12
-            case .view: return 6
-            }
-        }
-        var dropX: Int32 = 1
-        for mid in menuOrder {
-            if mid == menu { break }
-            dropX += Int32(menuWidth(mid))
-        }
+        let dropX = menuBarX(for: menu)
 
         switch menu {
         case .file: items = fileMenuItems()
@@ -4241,35 +4631,288 @@ final class TUI: EventSink {
         attroff(ATTR_DIM)
     }
 
+    /// Wrap text at word boundaries with indentation for continuation lines
+    private func wrapText(_ text: String, to width: Int, indent: Int = 0) -> [String] {
+        guard width > indent else { return [text] }
+        
+        let availableWidth = max(1, width - indent)
+        var lines: [String] = []
+        let words = text.split(separator: " ")
+        var currentLine = ""
+        
+        for word in words {
+            let wordStr = String(word)
+            if currentLine.isEmpty {
+                currentLine = wordStr
+            } else if (currentLine.count + 1 + wordStr.count) <= availableWidth {
+                currentLine += " " + wordStr
+            } else {
+                if !currentLine.isEmpty {
+                    lines.append(currentLine)
+                }
+                currentLine = String(repeating: " ", count: indent) + wordStr
+            }
+        }
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+        
+        return lines
+    }
+
     private func drawLine(y: Int32, indent: Int, content: String, color: Int32, highlighted: Bool, width: Int, boxIndent: Int = -1) {
+        // Wrap the entire content (will add indentation for continuation lines)
+        let wrappedLines = wrapText(content, to: width, indent: indent)
+
+        for (i, line) in wrappedLines.enumerated() {
+            let drawY = y + Int32(i)
+            
+            if boxIndent >= 0 {
+                // Draw with box borders
+                let boxLeft = String(repeating: " ", count: boxIndent) + "\u{2502} "
+                let innerWidth = max(0, width - boxLeft.count - 1)
+                let contentIndent = max(0, indent - boxIndent - 2)
+
+                // First line gets the content indent; continuation lines are already indented
+                let lineIndentStr = i == 0 ? String(repeating: " ", count: contentIndent) : ""
+                let padded = lineIndentStr + line + String(repeating: " ", count: max(0, innerWidth - contentIndent - line.count))
+
+                attron(ATTR_DIM)
+                mvaddstr(drawY, 0, boxLeft)
+                attroff(ATTR_DIM)
+
+                // Determine highlight color
+                let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
+                attron(attr)
+                addstr(padded)
+                attroff(attr)
+                attron(ATTR_DIM)
+                addstr("\u{2502}")
+                attroff(ATTR_DIM)
+            } else {
+                let indentStr = String(repeating: " ", count: indent)
+                let padded = line + String(repeating: " ", count: max(0, width - indent - line.count))
+                mvaddstr(drawY, 0, indentStr)
+                let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
+                attron(attr)
+                addstr(padded)
+                attroff(attr)
+            }
+        }
+    }
+
+    /// Draw a key:value line with proper wrapping (key dim, value gets color/highlight)
+    private func drawKeyValLine(y: Int32, indent: Int, key: String, value: String, color: Int32, highlighted: Bool, width: Int, boxIndent: Int = -1) {
+        // Format: key + ": " + value
+        let fullLine = "\(key): \(value)"
+
         if boxIndent >= 0 {
-            // Draw with box borders
+            // With box borders
             let boxLeft = String(repeating: " ", count: boxIndent) + "\u{2502} "
-            let innerWidth = max(0, width - boxLeft.count - 1)  // -1 for right border
-            // indent is absolute; convert to relative inside the box
+            let innerWidth = max(0, width - boxLeft.count - 1)
             let contentIndent = max(0, indent - boxIndent - 2)
-            let indentStr = String(repeating: " ", count: contentIndent)
-            let contentStr = truncate(content, to: innerWidth - contentIndent)
-            let padded = indentStr + contentStr + String(repeating: " ", count: max(0, innerWidth - contentIndent - contentStr.count))
-            attron(ATTR_DIM)
-            mvaddstr(y, 0, boxLeft)
-            attroff(ATTR_DIM)
-            let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
-            attron(attr)
-            addstr(padded)
-            attroff(attr)
-            attron(ATTR_DIM)
-            addstr("\u{2502}")
-            attroff(ATTR_DIM)
+            let keyEnd = key.count + 2  // include ": "
+
+            if fullLine.count <= innerWidth {
+                // Fits on one line
+                let padded = String(repeating: " ", count: contentIndent) + fullLine
+                    + String(repeating: " ", count: max(0, innerWidth - contentIndent - fullLine.count))
+
+                if highlighted {
+                    // Highlight entire line
+                    let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                    // Draw border first (no highlight)
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    mvaddstr(y, 0, boxLeft)
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    // Highlight content only (from boxLeft end to before final border)
+                    attron(attr)
+                    addstr(padded)
+                    attroff(attr)
+                    // Draw closing border (no highlight)
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    addstr("\u{2502}")
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                } else {
+                    // Normal case: dim key, color value
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    mvaddstr(y, 0, boxLeft)
+                    addstr(String(padded.prefix(keyEnd)))
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                    let valAttr = color
+                    attron(valAttr)
+                    addstr(String(padded.dropFirst(keyEnd)))
+                    attroff(valAttr)
+                    attron(ATTR_DIM)
+                    addstr("\u{2502}")
+                    attroff(ATTR_DIM)
+                }
+            } else {
+                // Needs wrapping - key on first line, value wraps with indent
+                let valueIndent = contentIndent + keyEnd
+                let availableOnFirst = innerWidth - contentIndent
+
+                // First line: key + as much value as fits
+                let remainingForValue = max(1, availableOnFirst - keyEnd)
+                let valueLines = wrapText(value, to: remainingForValue + keyEnd, indent: valueIndent)
+
+                // Draw first line with key dimmed and partial value
+                let firstVal = valueLines[0]
+                let firstPadded = String(repeating: " ", count: contentIndent) + key + ": " + firstVal
+                    + String(repeating: " ", count: max(0, innerWidth - contentIndent - (keyEnd + firstVal.count)))
+
+                if highlighted {
+                    // Highlight entire line
+                    let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                    // Draw border first (no highlight)
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    mvaddstr(y, 0, boxLeft)
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    // Highlight content only
+                    attron(attr)
+                    addstr(firstPadded)
+                    attroff(attr)
+                    // Draw closing border
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    addstr("\u{2502}")
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                } else {
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    mvaddstr(y, 0, boxLeft)
+                    addstr(String(firstPadded.prefix(keyEnd)))
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                    let valAttr = color
+                    attron(valAttr)
+                    addstr(String(firstPadded.dropFirst(keyEnd)))
+                    attroff(valAttr)
+                    attron(ATTR_DIM)
+                    addstr("\u{2502}")
+                    attroff(ATTR_DIM)
+                }
+
+                // Draw remaining wrapped value lines with indent
+                for i in 1..<valueLines.count {
+                    let drawY = y + Int32(i)
+                    let linePadded = valueLines[i] + String(repeating: " ", count: max(0, innerWidth - valueLines[i].count))
+
+                    if highlighted {
+                        // Highlight entire line
+                        let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                        // Draw border first (no highlight)
+                        attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                        mvaddstr(drawY, 0, boxLeft)
+                        attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                        // Highlight content only
+                        attron(attr)
+                        addstr(linePadded)
+                        attroff(attr)
+                        // Draw closing border
+                        attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                        addstr("\u{2502}")
+                        attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    } else {
+                        attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                        mvaddstr(drawY, 0, boxLeft)
+                        addstr(String(linePadded.prefix(keyEnd)))
+                        attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                        let valAttr = color
+                        attron(valAttr)
+                        addstr(String(linePadded.dropFirst(keyEnd)))
+                        attroff(valAttr)
+                        attron(ATTR_DIM)
+                        addstr("\u{2502}")
+                        attroff(ATTR_DIM)
+                    }
+                }
+            }
         } else {
-            let indentStr = String(repeating: " ", count: indent)
-            let contentStr = truncate(content, to: width - indent)
-            let padded = contentStr + String(repeating: " ", count: max(0, width - indent - contentStr.count))
-            mvaddstr(y, 0, indentStr)
-            let attr = highlighted ? ((color & ~ATTR_DIM) | ATTR_REVERSE) : color
-            attron(attr)
-            addstr(padded)
-            attroff(attr)
+            // No box - simpler case
+            let keyEnd = indent + key.count + 2
+
+            if fullLine.count <= width {
+                // Fits on one line
+                let padded = String(repeating: " ", count: indent) + fullLine
+                    + String(repeating: " ", count: max(0, width - indent - fullLine.count))
+
+                mvaddstr(y, 0, String(repeating: " ", count: indent))
+
+                if highlighted {
+                    // Highlight entire line
+                    let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                    attron(attr)
+                    addstr(padded)
+                    attroff(attr)
+                } else {
+                    // Normal case: dim key, color value
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    addstr(String(padded.prefix(keyEnd)))
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                    let valAttr = color
+                    attron(valAttr)
+                    addstr(String(padded.dropFirst(keyEnd)))
+                    attroff(valAttr)
+                }
+            } else {
+                // Needs wrapping
+                let valueIndent = indent + keyEnd
+                let availableOnFirst = width - indent
+
+                // First line: key + partial value
+                let remainingForValue = max(1, availableOnFirst - keyEnd)
+                let valueLines = wrapText(value, to: remainingForValue + keyEnd, indent: valueIndent)
+
+                let firstVal = valueLines[0]
+                let firstPadded = String(repeating: " ", count: indent) + key + ": " + firstVal
+                    + String(repeating: " ", count: max(0, width - indent - (keyEnd + firstVal.count)))
+
+                mvaddstr(y, 0, String(repeating: " ", count: indent))
+
+                if highlighted {
+                    // Highlight entire line
+                    let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                    attron(attr)
+                    addstr(firstPadded)
+                    attroff(attr)
+                } else {
+                    attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                    addstr(String(firstPadded.prefix(keyEnd)))
+                    attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                    let valAttr = color
+                    attron(valAttr)
+                    addstr(String(firstPadded.dropFirst(keyEnd)))
+                    attroff(valAttr)
+                }
+
+                // Draw remaining wrapped value lines
+                for i in 1..<valueLines.count {
+                    let drawY = y + Int32(i)
+                    let linePadded = valueLines[i] + String(repeating: " ", count: max(0, width - valueLines[i].count))
+
+                    mvaddstr(drawY, 0, String(repeating: " ", count: valueIndent))
+
+                    if highlighted {
+                        // Highlight entire line
+                        let attr = (color & ~ATTR_DIM) | ATTR_REVERSE
+                        attron(attr)
+                        addstr(linePadded)
+                        attroff(attr)
+                    } else {
+                        attron(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+                        addstr(String(linePadded.prefix(keyEnd)))
+                        attroff(COLOR_PAIR(TUIColor.header.rawValue) | ATTR_DIM)
+
+                        let valAttr = color
+                        attron(valAttr)
+                        addstr(String(linePadded.dropFirst(keyEnd)))
+                        attroff(valAttr)
+                    }
+                }
+            }
         }
     }
 
@@ -4326,6 +4969,20 @@ final class TUI: EventSink {
     }
 
     /// Truncate middle of string, keeping equal start and end
+    /// Wrap text into lines that fit within `width` characters.
+    private func wrapText(_ text: String, width: Int) -> [String] {
+        guard width > 0 else { return [text] }
+        guard text.count > width else { return [text] }
+        var lines: [String] = []
+        var remaining = text
+        while !remaining.isEmpty {
+            let chunk = String(remaining.prefix(width))
+            lines.append(chunk)
+            remaining = String(remaining.dropFirst(chunk.count))
+        }
+        return lines.isEmpty ? [text] : lines
+    }
+
     private func truncate(_ s: String, to maxLen: Int) -> String {
         guard s.count > maxLen, maxLen > 5 else { return s }
         let half = (maxLen - 3) / 2
