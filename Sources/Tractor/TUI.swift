@@ -377,7 +377,8 @@ private enum DisplayRow: Equatable {
     case fileDetail(pid_t, String)       // pid, path
     case netHeader(pid_t)
     case netDetail(pid_t, UInt64)        // pid, flowID
-    case netConnMeta(pid_t, UInt64)      // pid, flowID — disclosed connection metadata
+    case netConnMeta(pid_t, UInt64)      // pid, flowID — Remote: line
+    case netConnMeta2(pid_t, UInt64)     // pid, flowID — Connected/Status line
     case netProtocolHeader(pid_t, UInt64) // pid, flowID — protocol line (disclosable)
     case netTraffic(pid_t, UInt64, Int)  // pid, flowID, traffic index
     case netHexDump(pid_t, UInt64, Int)  // pid, flowID, line index (16 bytes per line)
@@ -1868,7 +1869,7 @@ final class TUI: EventSink {
         guard let dr = displayRows[safe: selectedIndex] else { return .process }
         switch dr {
         case .sampleHeader, .sampleNode: return .sample
-        case .netHeader, .netDetail, .netConnMeta, .netProtocolHeader, .netTraffic: return .network
+        case .netHeader, .netDetail, .netConnMeta, .netConnMeta2, .netProtocolHeader, .netTraffic: return .network
         case .filesHeader, .fileDetail: return .files
         default:
             // Check if we're inside a sample box by scanning upward for sampleHeader
@@ -2729,7 +2730,7 @@ final class TUI: EventSink {
             return .filesHeader(pid)
         case .netDetail(let pid, _):
             return .netHeader(pid)
-        case .netConnMeta(let pid, let key):
+        case .netConnMeta(let pid, let key), .netConnMeta2(let pid, let key):
             return .netDetail(pid, key)
         case .netProtocolHeader(let pid, let key):
             return .netDetail(pid, key)
@@ -2763,7 +2764,7 @@ final class TUI: EventSink {
              .envHeader(let pid), .envDetail(let pid, _),
              .resourcesHeader(let pid), .resourceDetail(let pid, _),
              .filesHeader(let pid), .fileDetail(let pid, _),
-             .netHeader(let pid), .netDetail(let pid, _), .netConnMeta(let pid, _), .netProtocolHeader(let pid, _), .netTraffic(let pid, _, _), .netHexDump(let pid, _, _),
+             .netHeader(let pid), .netDetail(let pid, _), .netConnMeta(let pid, _), .netConnMeta2(let pid, _), .netProtocolHeader(let pid, _), .netTraffic(let pid, _, _), .netHexDump(let pid, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
              .sampleHeader(let pid), .sampleNode(let pid, _),
@@ -2776,7 +2777,7 @@ final class TUI: EventSink {
     private func flowIDForRow(_ index: Int) -> UInt64? {
         guard let row = displayRows[safe: index] else { return nil }
         switch row {
-        case .netDetail(_, let fid), .netConnMeta(_, let fid),
+        case .netDetail(_, let fid), .netConnMeta(_, let fid), .netConnMeta2(_, let fid),
              .netProtocolHeader(_, let fid), .netTraffic(_, let fid, _),
              .netHexDump(_, let fid, _):
             return fid
@@ -3772,12 +3773,18 @@ final class TUI: EventSink {
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
                     let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    drawLine(y: y, indent: depthIndent + 8, content: "Remote: \(conn.label)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netConnMeta2(let pid, let key):
+                if let row = rows[pid], let conn = row.connections[key] {
+                    lock.unlock()
+                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
                     let formatter = DateFormatter()
                     formatter.dateFormat = "HH:mm:ss"
                     let ts = formatter.string(from: conn.connectedAt)
                     let statusStr = conn.alive ? "open" : "closed"
-                    drawLine(y: y, indent: depthIndent + 8, content: "Remote: \(conn.label)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                    y += 1
                     drawLine(y: y, indent: depthIndent + 8, content: "Connected: \(ts)  Status: \(statusStr)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
@@ -3960,7 +3967,7 @@ final class TUI: EventSink {
              .fileDetail(let pid, _),
              .netHeader(let pid),
              .netDetail(let pid, _),
-             .netConnMeta(let pid, _),
+             .netConnMeta(let pid, _), .netConnMeta2(let pid, _),
              .netProtocolHeader(let pid, _),
              .netTraffic(let pid, _, _),
              .netHexDump(let pid, _, _),
@@ -4424,6 +4431,7 @@ final class TUI: EventSink {
                         displayRows.append(.netDetail(row.pid, conn.key))
                         if conn.stats.trafficDisclosed {
                             displayRows.append(.netConnMeta(row.pid, conn.key))
+                            displayRows.append(.netConnMeta2(row.pid, conn.key))
                             displayRows.append(.netProtocolHeader(row.pid, conn.key))
                             if conn.stats.protocolDisclosed {
                                 if !conn.stats.showAsHexDump {
