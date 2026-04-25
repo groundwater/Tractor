@@ -260,12 +260,26 @@ class HTTPStreamParser {
     private var respParser = MessageParser(isRequest: false)
     private let maxBodySize = 256 * 1024
 
+    /// Discard stray chunked terminators and other tiny non-HTTP noise.
+    /// These arrive as separate events when chunked responses complete on
+    /// keep-alive connections — they're meaningless outside their original context.
+    private static func isNoise(_ content: String, isRequest: Bool) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Chunked terminator: just "0"
+        if trimmed == "0" { return true }
+        // Tiny hex-only content (stray chunk sizes): e.g. "1a", "ff"
+        if trimmed.count <= 4 && trimmed.allSatisfy({ $0.isHexDigit }) { return true }
+        return false
+    }
+
     func feed(direction: String, content: String) {
         if direction == "up" {
+            if Self.isNoise(content, isRequest: true) { return }
             for msg in reqParser.feed(content) {
                 emitRequest(msg)
             }
         } else {
+            if Self.isNoise(content, isRequest: false) { return }
             let msgs = respParser.feed(content)
             for msg in msgs {
                 emitResponse(msg)
