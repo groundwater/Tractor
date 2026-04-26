@@ -106,6 +106,10 @@ Expand a connection to see protocol details. For HTTP connections (with `--mitm`
 
 **Network menu** (`t`): toggle show all connections (including closed), reverse DNS, SNI inspection, and decode mode (HTTP / hexdump / auto).
 
+<p align="center">
+  <img src="screenshots/network-connections.png" width="720" alt="Network connections panel showing per-connection TX/RX bytes and hostnames" />
+</p>
+
 ### TLS Interception (MITM)
 
 With `--mitm`, Tractor acts as a transparent TLS proxy and decrypts HTTPS traffic from traced processes. This lets you see the actual HTTP requests and responses your agent is making — method, URL, headers, and body.
@@ -129,6 +133,20 @@ sudo tractor trust-ca
 ```
 
 The CA is stored in the app group container (`group.com.jacobgroundwater.Tractor`) and installed into both the system keychain and `/etc/ssl/cert.pem`.
+
+<p align="center">
+  <img src="screenshots/http-protocol-frames.png" width="720" alt="HTTP protocol frames showing request/response summary lines with chunked transfer decoding" />
+</p>
+
+Press Enter on any frame to open the full-screen traffic inspector:
+
+<p align="center">
+  <img src="screenshots/traffic-request.png" width="720" alt="Traffic inspector showing HTTP request headers" />
+</p>
+
+<p align="center">
+  <img src="screenshots/traffic-response.png" width="720" alt="Traffic inspector showing decoded HTTP response with gzip decompression" />
+</p>
 
 **Then trace with MITM enabled:**
 
