@@ -27,7 +27,7 @@ release: bump-sysext-version
 	@sed -i '' '/TractorNE/,/productType/{s/productType = "com.apple.product-type.bundle";/productType = "com.apple.product-type.system-extension";/;}' $(PROJECT).xcodeproj/project.pbxproj
 	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Release \
 		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) \
-		-allowProvisioningUpdates -allowProvisioningDeviceRegistration build
+		build
 
 # Pkg: build a .pkg installer
 pkg: release
@@ -46,10 +46,12 @@ pkg: release
 	@echo ""
 	@echo "Package: $(PKG_OUT)"
 
-# Install: build .app bundle and install to /Applications
+# Install: build .app bundle and install to /Applications (ad-hoc signed with ES entitlement)
 install: release
 	sudo rm -rf "$(INSTALL_APP)"
 	sudo cp -R "$(BUILD_DIR)/Release/Tractor.app" "$(INSTALL_APP)"
+	sudo codesign --force --sign - --entitlements Sources/TractorNE/TractorNE.entitlements "$(INSTALL_APP)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension"
+	sudo codesign --force --sign - --entitlements Sources/Tractor/TractorApp.entitlements "$(INSTALL_APP)"
 	@echo ""
 	@echo "Installed: $(INSTALL_APP)"
 

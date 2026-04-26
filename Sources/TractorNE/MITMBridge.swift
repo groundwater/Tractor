@@ -30,8 +30,8 @@ final class MITMBridge: NSObject {
     private let onComplete: (Int64, Int64) -> Void
 
     var onBytesUpdated: ((Int64, Int64) -> Void)?
-    /// Reports decrypted plaintext: (direction "up"/"down", content)
-    var onPlaintext: ((String, String) -> Void)?
+    /// Reports decrypted plaintext: (direction "up"/"down", raw data)
+    var onPlaintext: ((String, Data) -> Void)?
     
     /// Reports raw encrypted bytes from the flow
     var onRawBytesUpdated: ((Int64, Int64) -> Void)?
@@ -214,10 +214,8 @@ final class MITMBridge: NSObject {
                 bytesOut += Int64(allPlaintext.count)
                 onBytesUpdated?(bytesOut, bytesIn)
 
-                if let text = String(data: allPlaintext, encoding: .utf8) {
-                    os_log("MITM: reporting %d chars plaintext UP", log: mitmLog, type: .default, text.count)
-                    onPlaintext?("up", text)
-                }
+                os_log("MITM: reporting %d bytes plaintext UP", log: mitmLog, type: .default, allPlaintext.count)
+                onPlaintext?("up", allPlaintext)
 
                 connection.write(allPlaintext) { [weak self] error in
                     if error != nil { self?.teardown() }
@@ -257,12 +255,8 @@ final class MITMBridge: NSObject {
             self.bytesIn += Int64(plaintext.count)
             self.onBytesUpdated?(self.bytesOut, self.bytesIn)
 
-            if let text = String(data: plaintext, encoding: .utf8) {
-                os_log("MITM: reporting %d chars plaintext DOWN", log: mitmLog, type: .default, text.count)
-                self.onPlaintext?("down", text)
-            } else {
-                os_log("MITM: pumpInbound data not valid UTF-8", log: mitmLog, type: .default)
-            }
+            os_log("MITM: reporting %d bytes plaintext DOWN", log: mitmLog, type: .default, plaintext.count)
+            self.onPlaintext?("down", plaintext)
 
             guard let ctx = self.sslContext else { return }
             var totalWritten = 0

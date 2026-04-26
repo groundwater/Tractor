@@ -204,8 +204,8 @@ class TransparentProxy: NETransparentProxyProvider {
                 bridge.onRawBytesUpdated = { [weak self] bytesOut, bytesIn in
                     self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
                 }
-                bridge.onPlaintext = { [weak self] direction, content in
-                    self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, content: content, flowID: fid)
+                bridge.onPlaintext = { [weak self] direction, data in
+                    self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, data: data, flowID: fid)
                 }
 
                 self.bridgeLock.lock()

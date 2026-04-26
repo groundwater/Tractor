@@ -246,12 +246,15 @@ struct Trace: ParsableCommand {
                 flowClient.onConnectionClosed = { pid, host, port, flowID in
                     t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
                 }
-                flowClient.onTraffic = { pid, host, port, direction, content, flowID in
+                flowClient.onTraffic = { pid, host, port, direction, data, flowID in
                     let dir: TrafficDirection = direction == "up" ? .up : .down
                     t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
-                                    direction: dir, content: content, flowID: flowID)
+                                    direction: dir, data: data, flowID: flowID)
+                    // SQLite log gets a best-effort text representation
+                    let logContent = String(data: data, encoding: .utf8)
+                        ?? String(data: data, encoding: .isoLatin1) ?? "<binary>"
                     activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
-                                                direction: direction, content: content)
+                                                direction: direction, content: logContent)
                 }
                 // Local endpoint not available from NEAppProxyTCPFlow API
             }
@@ -279,6 +282,7 @@ struct Trace: ParsableCommand {
                         case 259: t.trafficModalUp()
                         case 258: t.trafficModalDown()
                         case 27, 113, 10, 13: t.trafficModalClose()  // ESC, q, Enter
+                        case 0o631: t.trafficModalMouse()  // KEY_MOUSE — scroll wheel in modal
                         default: break
                         }
                         continue

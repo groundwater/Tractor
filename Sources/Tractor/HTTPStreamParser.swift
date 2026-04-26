@@ -1,6 +1,14 @@
 import Foundation
 
-// MARK: - HTTP Round-Trip
+// MARK: - Traffic chunk (authoritative ordered record)
+
+struct TrafficChunk {
+    let direction: TrafficDirection
+    let timestamp: Date
+    let content: String
+}
+
+// MARK: - HTTP Round-Trip (derived view)
 
 struct HTTPRoundTrip {
     var request: String = ""
@@ -60,7 +68,7 @@ private class MessageParser {
                 }
             }
 
-            guard let data = input.data(using: .utf8) else { break }
+            guard let data = input.data(using: .isoLatin1) else { break }
 
             let accepted = data.withUnsafeBytes { ptr -> Bool in
                 guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
@@ -73,7 +81,7 @@ private class MessageParser {
                 if let r = extract() { results.append(r) }
                 reset()
 
-                let retryData = input.data(using: .utf8)!
+                let retryData = input.data(using: .isoLatin1)!
                 let retryOk = retryData.withUnsafeBytes { ptr -> Bool in
                     guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
                     return CFHTTPMessageAppendBytes(msg, base, retryData.count)
@@ -250,68 +258,90 @@ private class MessageParser {
 
 // MARK: - HTTP Stream Parser
 
-/// Parses a bidirectional HTTP/1.1 stream into round-trips.
-/// Uses CFHTTPMessage for proper HTTP framing, with truncation recovery
-/// for the sysext's 4096-char-per-event limit.
+/// Stores an ordered log of traffic chunks (the source of truth) and derives
+/// HTTP round-trips by processing chunks strictly in arrival order.
+///
+/// Root cause of the old bug: the request MessageParser would hold an incomplete
+/// POST body (waiting for Content-Length bytes that never arrive because the
+/// sysext truncates). Meanwhile the response parser would emit immediately.
+/// Result: response appeared before its request.
+///
+/// Fix: a direction switch is a message boundary. When we see a DOWN chunk,
+/// the preceding UP message is done (the server is already responding).
+/// Flush the request parser before feeding the response parser, and vice versa.
 class HTTPStreamParser {
-    var roundTrips: [HTTPRoundTrip] = []
+    /// Authoritative ordered record of all traffic on this connection.
+    private(set) var chunks: [TrafficChunk] = []
+
+    /// Derived round-trips, built incrementally as chunks arrive.
+    private(set) var roundTrips: [HTTPRoundTrip] = []
 
     private var reqParser = MessageParser(isRequest: true)
     private var respParser = MessageParser(isRequest: false)
     private let maxBodySize = 256 * 1024
 
-    /// Discard stray chunked terminators and other tiny non-HTTP noise.
-    /// These arrive as separate events when chunked responses complete on
-    /// keep-alive connections — they're meaningless outside their original context.
-    private static func isNoise(_ content: String, isRequest: Bool) -> Bool {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Chunked terminator: just "0"
-        if trimmed == "0" { return true }
-        // Tiny hex-only content (stray chunk sizes): e.g. "1a", "ff"
-        if trimmed.count <= 4 && trimmed.allSatisfy({ $0.isHexDigit }) { return true }
-        return false
-    }
+    private var lastDirection: TrafficDirection?
 
-    func feed(direction: String, content: String) {
-        if direction == "up" {
-            if Self.isNoise(content, isRequest: true) { return }
+    func feed(direction: TrafficDirection, content: String) {
+
+        // 1. Store the chunk (authoritative)
+        chunks.append(TrafficChunk(direction: direction, timestamp: Date(), content: content))
+
+        // 2. Direction switch = message boundary. Flush the other parser.
+        if let last = lastDirection, last != direction {
+            if direction == .down {
+                // Switching to response — flush any buffered request
+                if reqParser.hasData {
+                    if let msg = reqParser.extract(), !msg.startLine.isEmpty {
+                        emitRequest(msg)
+                    }
+                    reqParser.reset()
+                }
+            } else {
+                // Switching to request — flush any buffered response
+                if respParser.hasData {
+                    if let msg = respParser.extract(), !msg.startLine.isEmpty {
+                        emitResponse(msg)
+                    }
+                    respParser.reset()
+                }
+            }
+        }
+        lastDirection = direction
+
+        // 3. Feed to the appropriate parser
+        if direction == .up {
             for msg in reqParser.feed(content) {
                 emitRequest(msg)
             }
         } else {
-            if Self.isNoise(content, isRequest: false) { return }
-            let msgs = respParser.feed(content)
-            for msg in msgs {
+            let results = respParser.feed(content)
+            for msg in results {
                 emitResponse(msg)
             }
             // Show partial response headers early
-            if msgs.isEmpty, let partial = respParser.extract(), !partial.startLine.isEmpty {
+            if results.isEmpty, let partial = respParser.extract(), !partial.startLine.isEmpty {
                 showPartialResponse(partial)
             }
         }
     }
 
     func flush() {
-        // Extract and emit any remaining complete messages from parsers
-        if let msg = reqParser.extract(), !msg.startLine.isEmpty {
-            emitRequest(msg)
+        if reqParser.hasData {
+            if let msg = reqParser.extract(), !msg.startLine.isEmpty {
+                emitRequest(msg)
+            }
             reqParser.reset()
         }
-        if let msg = respParser.extract(), !msg.startLine.isEmpty {
-            emitResponse(msg)
+        if respParser.hasData {
+            if let msg = respParser.extract(), !msg.startLine.isEmpty {
+                emitResponse(msg)
+            }
             respParser.reset()
         }
-        
-        // Mark any incomplete round trips as complete (for display purposes)
+
         for i in roundTrips.indices where !roundTrips[i].responseComplete && !roundTrips[i].responseLine.isEmpty {
             roundTrips[i].responseComplete = true
-        }
-        
-        // Clean up orphaned entries: remove round trips that have no meaningful content
-        // (no request line AND either empty or incomplete response)
-        roundTrips = roundTrips.filter { rt in
-            // Keep if we have at least a valid request line OR (valid response line AND responseComplete)
-            !rt.requestLine.isEmpty || (rt.responseComplete && !rt.responseLine.isEmpty)
         }
     }
 
@@ -325,12 +355,11 @@ class HTTPStreamParser {
 
     private func emitResponse(_ msg: MessageParser.Result) {
         let text = capBody(msg.text)
-        if let idx = roundTrips.firstIndex(where: { $0.response.isEmpty }) {
+        // Fill the first round-trip whose response isn't complete yet.
+        // This correctly overwrites partial responses from showPartialResponse.
+        if let idx = roundTrips.firstIndex(where: { !$0.responseComplete }) {
             roundTrips[idx].response = text
             roundTrips[idx].responseLine = msg.startLine
-            roundTrips[idx].responseComplete = msg.isComplete
-        } else if let idx = roundTrips.lastIndex(where: { !$0.responseComplete && !$0.responseLine.isEmpty }) {
-            roundTrips[idx].response = text
             roundTrips[idx].responseComplete = msg.isComplete
         } else {
             var rt = HTTPRoundTrip()
@@ -343,17 +372,10 @@ class HTTPStreamParser {
     }
 
     private func showPartialResponse(_ msg: MessageParser.Result) {
-        if let idx = roundTrips.firstIndex(where: { $0.response.isEmpty }) {
+        if let idx = roundTrips.firstIndex(where: { !$0.responseComplete }) {
             roundTrips[idx].response = msg.text
             roundTrips[idx].responseLine = msg.startLine
-            roundTrips[idx].responseComplete = false
-        } else if !roundTrips.contains(where: { $0.responseLine == msg.startLine }) {
-            var rt = HTTPRoundTrip()
-            rt.response = msg.text
-            rt.responseLine = msg.startLine
-            rt.responseComplete = false
-            rt.timestamp = Date()
-            roundTrips.append(rt)
+            // leave responseComplete = false
         }
     }
 

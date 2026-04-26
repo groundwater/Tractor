@@ -30,7 +30,7 @@ final class FlowXPCClient {
 
     var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64, UInt64) -> Void)?
     var onConnectionClosed: ((pid_t, String, UInt16, UInt64) -> Void)?
-    var onTraffic: ((pid_t, String, UInt16, String, String, UInt64) -> Void)?
+    var onTraffic: ((pid_t, String, UInt16, String, Data, UInt64) -> Void)?
     // Local endpoint not available from NEAppProxyTCPFlow API
 
     init(sink: EventSink) {
@@ -75,8 +75,8 @@ final class FlowXPCClient {
         proxy.closeSysextFlow = { [weak self] flowID in
             self?.proxy?.closeFlow(id: flowID)
         }
-        proxy.onTraffic = { [weak self] pid, host, port, direction, content, flowID in
-            self?.onTraffic?(pid, host, port, direction, content, flowID)
+        proxy.onTraffic = { [weak self] pid, host, port, direction, data, flowID in
+            self?.onTraffic?(pid, host, port, direction, data, flowID)
         }
 
         mitmProxy = proxy
@@ -132,9 +132,17 @@ final class FlowXPCClient {
                 continue
             }
 
-            if let direction = event["traffic"] as? String,
-               let content = event["content"] as? String {
-                onTraffic?(pid, host, port, direction, content, flowID)
+            if let direction = event["traffic"] as? String {
+                let data: Data
+                if let b64 = event["contentBase64"] as? String {
+                    data = Data(base64Encoded: b64) ?? Data()
+                } else if let content = event["content"] as? String {
+                    // Legacy fallback: old sysext sending String content
+                    data = content.data(using: .isoLatin1) ?? Data()
+                } else {
+                    continue
+                }
+                onTraffic?(pid, host, port, direction, data, flowID)
                 continue
             }
 

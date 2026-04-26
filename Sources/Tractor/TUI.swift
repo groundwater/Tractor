@@ -121,11 +121,11 @@ struct ConnectionStats {
     var httpRequestLine: String?
     var httpResponseLine: String?
     var httpParser: HTTPStreamParser = HTTPStreamParser()
-    var trafficLog: [(direction: TrafficDirection, timestamp: Date, data: String)] = []
     var trafficDisclosed: Bool = false
     var protocolDisclosed: Bool = false
     var isMITM: Bool = false
-    var rawBytes: Data = Data()
+    var rawChunks: [(direction: TrafficDirection, data: Data)] = []
+    var rawBytesTotal: Int = 0
 
     var label: String {
         let host = hostname ?? remoteAddr
@@ -381,7 +381,9 @@ private enum DisplayRow: Equatable {
     case netConnMeta2(pid_t, UInt64)     // pid, flowID — Connected/Status line
     case netProtocolHeader(pid_t, UInt64) // pid, flowID — protocol line (disclosable)
     case netTraffic(pid_t, UInt64, Int)  // pid, flowID, traffic index
-    case netHexDump(pid_t, UInt64, Int)  // pid, flowID, line index (16 bytes per line)
+    case netHexChunkHeader(pid_t, UInt64, Int)  // pid, flowID, chunk index
+    case netHexDump(pid_t, UInt64, Int, Int)  // pid, flowID, chunk index, line index
+    case netTextLine(pid_t, UInt64, Int, Int)  // pid, flowID, chunk index, line index
     case separator(pid_t)               // horizontal rule between info and children
     case infoBorderTop(pid_t, Int)      // pid, depth — top of info box
     case infoBorderBottom(pid_t, Int)   // pid, depth — bottom of info box
@@ -952,9 +954,7 @@ final class TUI: EventSink {
 
         // Add "Decode As" options when cursor is on a connection row
         if let fid = flowIDForRow(selectedIndex), let pid = pidForRow(selectedIndex) {
-            lock.lock()
             let currentDecode = rows[pid]?.connections[fid]?.decodedAs ?? .auto
-            lock.unlock()
             items.append(.sep())
             items.append(MenuItem(label: "Decode As: HTTP", shortcut: "", key: nil, checked: currentDecode == .http))
             items.append(MenuItem(label: "Decode As: Hexdump", shortcut: "", key: nil, checked: currentDecode == .binary))
@@ -1637,6 +1637,21 @@ final class TUI: EventSink {
     func trafficModalDown() {
         trafficModalScroll += 1
         forceRender()
+    }
+
+    func trafficModalMouse() {
+        var event = nc_MEVENT()
+        guard getmouse(&event) == 0 else { return }
+        let bs = UInt(event.bstate)
+        if bs & BUTTON4_EVENTS != 0 {
+            if trafficModalScroll > 0 {
+                trafficModalScroll = max(0, trafficModalScroll - 3)
+                forceRender()
+            }
+        } else if bs & BUTTON5_EVENTS != 0 {
+            trafficModalScroll += 3
+            forceRender()
+        }
     }
 
     func trafficModalClose() {
@@ -2749,7 +2764,11 @@ final class TUI: EventSink {
             return .netDetail(pid, key)
         case .netTraffic(let pid, let key, _):
             return .netProtocolHeader(pid, key)
-        case .netHexDump(let pid, let key, _):
+        case .netHexChunkHeader(let pid, let key, _):
+            return .netProtocolHeader(pid, key)
+        case .netHexDump(let pid, let key, _, _):
+            return .netProtocolHeader(pid, key)
+        case .netTextLine(let pid, let key, _, _):
             return .netProtocolHeader(pid, key)
         case .separator(let pid):
             return .process(pid, 0)
@@ -2777,7 +2796,7 @@ final class TUI: EventSink {
              .envHeader(let pid), .envDetail(let pid, _),
              .resourcesHeader(let pid), .resourceDetail(let pid, _),
              .filesHeader(let pid), .fileDetail(let pid, _),
-             .netHeader(let pid), .netDetail(let pid, _), .netConnMeta(let pid, _), .netConnMeta2(let pid, _), .netProtocolHeader(let pid, _), .netTraffic(let pid, _, _), .netHexDump(let pid, _, _),
+             .netHeader(let pid), .netDetail(let pid, _), .netConnMeta(let pid, _), .netConnMeta2(let pid, _), .netProtocolHeader(let pid, _), .netTraffic(let pid, _, _), .netHexChunkHeader(let pid, _, _), .netHexDump(let pid, _, _, _), .netTextLine(let pid, _, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _), .infoBorderBottom(let pid, _),
              .sampleHeader(let pid), .sampleNode(let pid, _),
@@ -2792,7 +2811,9 @@ final class TUI: EventSink {
         switch row {
         case .netDetail(_, let fid), .netConnMeta(_, let fid), .netConnMeta2(_, let fid),
              .netProtocolHeader(_, let fid), .netTraffic(_, let fid, _),
-             .netHexDump(_, let fid, _):
+             .netHexChunkHeader(_, let fid, _),
+             .netHexDump(_, let fid, _, _),
+             .netTextLine(_, let fid, _, _):
             return fid
         default:
             return nil
@@ -3045,7 +3066,7 @@ final class TUI: EventSink {
     }
 
     /// Append captured plaintext to a connection's traffic log
-    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, content: String, flowID: UInt64) {
+    func appendTraffic(pid: pid_t, remoteAddr: String, remotePort: UInt16, direction: TrafficDirection, data: Data, flowID: UInt64) {
         ensureProcess(pid: pid, ppid: 0, name: "")
 
         lock.lock()
@@ -3065,8 +3086,15 @@ final class TUI: EventSink {
         }
 
         if var conn = row.connections[flowID] {
-            let dir = direction == .up ? "up" : "down"
-            conn.httpParser.feed(direction: dir, content: content)
+            // Feed HTTP parser with sanitized text (for summary line extraction only).
+            // Non-printable bytes become '.' — sufficient for extracting GET/POST lines.
+            let sanitized = Data(data.map { byte -> UInt8 in
+                if byte >= 0x20 && byte < 0x7F { return byte }
+                if byte == 0x0A || byte == 0x0D || byte == 0x09 { return byte }
+                return 0x2E  // '.'
+            })
+            let parserString = String(data: sanitized, encoding: .ascii) ?? ""
+            conn.httpParser.feed(direction: direction, content: parserString)
 
             if let first = conn.httpParser.roundTrips.first {
                 if conn.httpRequestLine == nil && !first.requestLine.isEmpty {
@@ -3077,10 +3105,17 @@ final class TUI: EventSink {
                 }
             }
 
-            // Store raw bytes for hex dump (cap at 4KB)
-            if conn.rawBytes.count < 4096, let raw = content.data(using: .utf8) {
-                let space = 4096 - conn.rawBytes.count
-                conn.rawBytes.append(raw.prefix(space))
+            // Store raw bytes directly (cap at 64KB total per connection)
+            if conn.rawBytesTotal < 65536 {
+                let space = 65536 - conn.rawBytesTotal
+                let chunk = data.prefix(space)
+                // Merge with last chunk if same direction, otherwise start new chunk
+                if let last = conn.rawChunks.last, last.direction == direction {
+                    conn.rawChunks[conn.rawChunks.count - 1].data.append(chunk)
+                } else {
+                    conn.rawChunks.append((direction: direction, data: Data(chunk)))
+                }
+                conn.rawBytesTotal += chunk.count
             }
 
             conn.isMITM = true
@@ -3770,11 +3805,23 @@ final class TUI: EventSink {
 
             case .netDetail(let pid, let key):
                 if let row = rows[pid], let conn = row.connections[key] {
+                    // Compute max widths across all visible connections for alignment
+                    var maxNumW = 1, maxTxW = 1, maxRxW = 1
+                    for c in row.connections.values {
+                        if !showAllConnections && !c.alive { continue }
+                        maxNumW = max(maxNumW, String(c.connNumber).count)
+                        maxTxW = max(maxTxW, formatBytes(c.txBytes).count)
+                        maxRxW = max(maxRxW, formatBytes(c.rxBytes).count)
+                    }
                     lock.unlock()
                     let disc = conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}"
-                    let up = "\u{2b06}\u{00A0}\(formatBytes(conn.txBytes)) "
-                    let down = "\u{2b07}\u{00A0}\(formatBytes(conn.rxBytes)) "
-                    let line = "\(disc) [#\(conn.connNumber)] \(up)\(down) \(conn.label)"
+                    let num = String(conn.connNumber)
+                    let padNum = String(repeating: " ", count: max(0, maxNumW - num.count)) + num
+                    let txStr = formatBytes(conn.txBytes)
+                    let rxStr = formatBytes(conn.rxBytes)
+                    let padTx = txStr + String(repeating: " ", count: max(0, maxTxW - txStr.count))
+                    let padRx = rxStr + String(repeating: " ", count: max(0, maxRxW - rxStr.count))
+                    let line = "\(disc) [#\(padNum)] \u{2b06}\u{00A0}\(padTx) \u{2b07}\u{00A0}\(padRx) \(conn.label)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dimNet
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
@@ -3813,17 +3860,13 @@ final class TUI: EventSink {
             case .netTraffic(let pid, let key, let idx):
                 if let row = rows[pid], let conn = row.connections[key], idx < conn.httpParser.roundTrips.count {
                     let rt = conn.httpParser.roundTrips[idx]
+                    // Compute max request line width across all round-trips for alignment
+                    let maxReqWidth = conn.httpParser.roundTrips.reduce(0) { max($0, ($1.requestLine.isEmpty ? 1 : $1.requestLine.count)) }
                     lock.unlock()
                     let reqSummary = rt.requestLine.isEmpty ? "?" : rt.requestLine
-                    let respSummary: String
-                    if rt.responseLine.isEmpty {
-                        respSummary = "..."
-                    } else if !rt.responseComplete {
-                        respSummary = rt.responseLine
-                    } else {
-                        respSummary = rt.responseLine
-                    }
-                    let text = "\(reqSummary)  \u{2192}  \(respSummary)"
+                    let respSummary = rt.responseLine.isEmpty ? "..." : rt.responseLine
+                    let padded = reqSummary + String(repeating: " ", count: max(0, maxReqWidth - reqSummary.count))
+                    let text = "\(padded)  \u{2192}  \(respSummary)"
                     let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
                     let indent = depthIndent + 10
                     let availWidth = max(1, width - indent - currentBoxIndent - 1)
@@ -3835,18 +3878,59 @@ final class TUI: EventSink {
                     }
                 } else { lock.unlock() }
 
-            case .netHexDump(let pid, let key, let lineIdx):
+            case .netHexChunkHeader(let pid, let key, let chunkIdx):
+                if let row = rows[pid], let conn = row.connections[key],
+                   chunkIdx < conn.rawChunks.count {
+                    lock.unlock()
+                    let chunk = conn.rawChunks[chunkIdx]
+                    let arrow = chunk.direction == .up ? "\u{2b06}\u{00A0}" : "\u{2b07}\u{00A0}"
+                    let label = chunk.direction == .up ? "Upload" : "Download"
+                    let color = chunk.direction == .up
+                        ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
+                        : COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    let header = "\(arrow) \(label) (\(formatBytes(UInt64(chunk.data.count))))"
+                    drawLine(y: y, indent: depthIndent + 10, content: header, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    y += 1
+                } else { lock.unlock() }
+
+            case .netHexDump(let pid, let key, let chunkIdx, let lineIdx):
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
-                    let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
-                    if conn.rawBytes.isEmpty {
+                    if conn.rawChunks.isEmpty {
+                        let color = COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
                         drawLine(y: y, indent: depthIndent + 10, content: "(no data captured)", color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
-                    } else {
+                    } else if chunkIdx < conn.rawChunks.count {
+                        let chunk = conn.rawChunks[chunkIdx]
+                        let color = chunk.direction == .up
+                            ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
+                            : COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
                         let offset = lineIdx * 16
-                        let line = formatHexDumpLine(conn.rawBytes, offset: offset)
-                        drawLine(y: y, indent: depthIndent + 10, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                        let line = formatHexDumpLine(chunk.data, offset: offset)
+                        drawLine(y: y, indent: depthIndent + 12, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     }
                     y += 1
+                } else { lock.unlock() }
+
+            case .netTextLine(let pid, let key, let chunkIdx, let lineIdx):
+                if let row = rows[pid], let conn = row.connections[key],
+                   chunkIdx < conn.rawChunks.count {
+                    let chunk = conn.rawChunks[chunkIdx]
+                    lock.unlock()
+                    let color = chunk.direction == .up
+                        ? COLOR_PAIR(TUIColor.subFile.rawValue) | ATTR_DIM
+                        : COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_DIM
+                    let decoded = Self.decodeHTTPBody(chunk.data)
+                    let text = Self.chunkToText(decoded)
+                    let lines = text.components(separatedBy: "\n")
+                    let content = lineIdx < lines.count ? lines[lineIdx] : ""
+                    let indent = depthIndent + 12
+                    let availWidth = max(1, width - indent - currentBoxIndent - 1)
+                    let wrapped = wrapText(content, width: availWidth)
+                    for line in wrapped {
+                        drawLine(y: y, indent: indent, content: line, color: color, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                        y += 1
+                    }
+                    if wrapped.isEmpty { y += 1 }
                 } else { lock.unlock() }
 
             case .sampleHeader(let pid):
@@ -3981,7 +4065,9 @@ final class TUI: EventSink {
              .netConnMeta(let pid, _), .netConnMeta2(let pid, _),
              .netProtocolHeader(let pid, _),
              .netTraffic(let pid, _, _),
-             .netHexDump(let pid, _, _),
+             .netHexChunkHeader(let pid, _, _),
+             .netHexDump(let pid, _, _, _),
+             .netTextLine(let pid, _, _, _),
              .separator(let pid),
              .infoBorderTop(let pid, _),
              .infoBorderBottom(let pid, _),
@@ -4445,15 +4531,32 @@ final class TUI: EventSink {
                             displayRows.append(.netConnMeta2(row.pid, conn.key))
                             displayRows.append(.netProtocolHeader(row.pid, conn.key))
                             if conn.stats.protocolDisclosed {
-                                if !conn.stats.showAsHexDump {
-                                    for i in 0..<conn.stats.httpParser.roundTrips.count {
-                                        displayRows.append(.netTraffic(row.pid, conn.key, i))
-                                    }
+                                let isHex = conn.stats.showAsHexDump
+                                if conn.stats.rawChunks.isEmpty {
+                                    displayRows.append(.netHexDump(row.pid, conn.key, 0, 0))
                                 } else {
-                                    let lineCount = (conn.stats.rawBytes.count + 15) / 16
-                                    let lines = max(lineCount, 1) // at least 1 line for "(no data)"
-                                    for i in 0..<min(lines, 32) {
-                                        displayRows.append(.netHexDump(row.pid, conn.key, i))
+                                    var totalLines = 0
+                                    let maxLines = 512
+                                    for (ci, chunk) in conn.stats.rawChunks.enumerated() {
+                                        guard totalLines < maxLines else { break }
+                                        displayRows.append(.netHexChunkHeader(row.pid, conn.key, ci))
+                                        totalLines += 1
+                                        if isHex {
+                                            let lineCount = (chunk.data.count + 15) / 16
+                                            for li in 0..<lineCount {
+                                                guard totalLines < maxLines else { break }
+                                                displayRows.append(.netHexDump(row.pid, conn.key, ci, li))
+                                                totalLines += 1
+                                            }
+                                        } else {
+                                            let text = Self.chunkToText(chunk.data)
+                                            let lineCount = text.components(separatedBy: "\n").count
+                                            for li in 0..<lineCount {
+                                                guard totalLines < maxLines else { break }
+                                                displayRows.append(.netTextLine(row.pid, conn.key, ci, li))
+                                                totalLines += 1
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -4981,6 +5084,116 @@ final class TUI: EventSink {
         if bytes < 1024 * 1024 { return "\(bytes / 1024)KB" }
         if bytes < 1024 * 1024 * 1024 { return String(format: "%.1fMB", Double(bytes) / (1024 * 1024)) }
         return String(format: "%.1fGB", Double(bytes) / (1024 * 1024 * 1024))
+    }
+
+    /// Convert raw chunk Data to displayable text: printable ASCII preserved, others become '.'
+    static func chunkToText(_ data: Data) -> String {
+        var result = ""
+        result.reserveCapacity(data.count)
+        for byte in data {
+            if byte == 0x0A { result.append("\n") }
+            else if byte == 0x0D { continue }  // skip CR
+            else if byte == 0x09 { result.append("    ") }  // tab → spaces
+            else if byte >= 0x20 && byte < 0x7F { result.append(Character(UnicodeScalar(byte))) }
+            else { result.append(".") }
+        }
+        return result
+    }
+
+    /// If the data contains HTTP headers with Transfer-Encoding: chunked,
+    /// decode the chunked body framing. If Content-Encoding: gzip/deflate,
+    /// decompress the body. Returns original data if not applicable.
+    static func decodeHTTPBody(_ data: Data) -> Data {
+        // Find \r\n\r\n header/body separator
+        let sep: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        guard let sepRange = data.range(of: Data(sep)) else { return data }
+
+        let headerData = data[data.startIndex..<sepRange.lowerBound]
+        guard let headerStr = String(data: headerData, encoding: .isoLatin1)?.lowercased() else {
+            return data
+        }
+
+        let isChunked = headerStr.contains("transfer-encoding") && headerStr.contains("chunked")
+        let isGzip = headerStr.contains("content-encoding") &&
+            (headerStr.contains("gzip") || headerStr.contains("deflate"))
+
+        let bodyStart = sepRange.upperBound
+        var body = Data(data[bodyStart...])
+
+        // Step 1: Decode chunked transfer encoding
+        if isChunked {
+            var unchunked = Data()
+            var pos = body.startIndex
+            while pos < body.endIndex {
+                guard let crlfRange = body[pos...].range(of: Data([0x0D, 0x0A])) else {
+                    unchunked.append(body[pos...])
+                    break
+                }
+                let sizeLine = body[pos..<crlfRange.lowerBound]
+                let sizeStr = String(data: sizeLine, encoding: .ascii)?
+                    .components(separatedBy: ";").first?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+                guard let chunkSize = UInt64(sizeStr, radix: 16) else {
+                    // Not valid hex — append remainder as-is
+                    unchunked.append(body[pos...])
+                    break
+                }
+                if chunkSize == 0 { break }
+
+                let chunkStart = crlfRange.upperBound
+                let chunkEnd = body.index(chunkStart, offsetBy: Int(chunkSize), limitedBy: body.endIndex) ?? body.endIndex
+                unchunked.append(body[chunkStart..<chunkEnd])
+
+                let afterChunk = body.index(chunkEnd, offsetBy: 2, limitedBy: body.endIndex) ?? body.endIndex
+                pos = afterChunk
+            }
+            body = unchunked
+        }
+
+        // Step 2: Decompress gzip/deflate
+        if isGzip {
+            if let decompressed = Self.gunzip(body) {
+                body = decompressed
+            }
+        }
+
+        // Reassemble: headers + separator + decoded body
+        var result = Data(data[data.startIndex..<sepRange.upperBound])
+        result.append(body)
+        return result
+    }
+
+    /// Decompress gzip/deflate data. Strips gzip header if present, uses zlib.
+    private static func gunzip(_ data: Data) -> Data? {
+        guard data.count >= 2 else { return nil }
+        var body = data
+        // Strip gzip header (magic bytes 1f 8b)
+        if data[data.startIndex] == 0x1F && data[data.startIndex + 1] == 0x8B {
+            // Gzip format: skip 10-byte header + optional fields
+            guard data.count >= 10 else { return nil }
+            var offset = 10
+            let flags = data[data.startIndex + 3]
+            if flags & 0x04 != 0 {  // FEXTRA
+                guard offset + 2 <= data.count else { return nil }
+                let xlen = Int(data[data.startIndex + offset]) | (Int(data[data.startIndex + offset + 1]) << 8)
+                offset += 2 + xlen
+            }
+            if flags & 0x08 != 0 {  // FNAME
+                while offset < data.count && data[data.startIndex + offset] != 0 { offset += 1 }
+                offset += 1
+            }
+            if flags & 0x10 != 0 {  // FCOMMENT
+                while offset < data.count && data[data.startIndex + offset] != 0 { offset += 1 }
+                offset += 1
+            }
+            if flags & 0x02 != 0 { offset += 2 }  // FHCRC
+            guard offset < data.count else { return nil }
+            // Strip trailing 8 bytes (CRC32 + ISIZE)
+            let end = max(offset, data.count - 8)
+            body = Data(data[(data.startIndex + offset)..<(data.startIndex + end)])
+        }
+        // Decompress raw deflate using NSData
+        return try? (body as NSData).decompressed(using: .zlib) as Data
     }
 
     /// Format one line of hex dump (16 bytes per line).

@@ -156,13 +156,23 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         bufferLock.unlock()
     }
 
-    func reportTraffic(pid: Int32, host: String, port: String, direction: String, content: String, flowID: UInt64) {
-        let truncated = String(content.prefix(4096))
-        let safe = truncated.unicodeScalars.filter { $0.value >= 0x20 || $0 == "\n" || $0 == "\r" || $0 == "\t" }
-        let safeString = String(String.UnicodeScalarView(safe))
-        let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "content": safeString, "flowID": flowID]
+    func reportTraffic(pid: Int32, host: String, port: String, direction: String, data: Data, flowID: UInt64) {
+        // Split large payloads into 48KB chunks (≈65KB base64), base64-encode for JSON transport
+        let chunkSize = 49152
+        var offset = 0
         bufferLock.lock()
-        eventBuffer.append(event)
+        while offset < data.count {
+            let end = min(offset + chunkSize, data.count)
+            let slice = data[offset..<end]
+            let b64 = slice.base64EncodedString()
+            let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "contentBase64": b64, "flowID": flowID]
+            eventBuffer.append(event)
+            offset = end
+        }
+        if data.isEmpty {
+            let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "contentBase64": "", "flowID": flowID]
+            eventBuffer.append(event)
+        }
         bufferLock.unlock()
     }
 

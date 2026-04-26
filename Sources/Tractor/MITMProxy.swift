@@ -11,8 +11,8 @@ final class MITMProxy: NSObject, TractorCLIXPC {
     private let caCertPEM: String
     private let caKeyPEM: String
 
-    /// Called with plaintext traffic chunks (pid, host, port, direction "up"/"down", content)
-    var onTraffic: ((pid_t, String, UInt16, String, String, UInt64) -> Void)?
+    /// Called with plaintext traffic chunks (pid, host, port, direction "up"/"down", raw data)
+    var onTraffic: ((pid_t, String, UInt16, String, Data, UInt64) -> Void)?
     /// Send data back to sysext
     var sendToSysext: ((UInt64, Data) -> Void)?
     /// Notify sysext to close a flow
@@ -60,8 +60,8 @@ final class MITMProxy: NSObject, TractorCLIXPC {
                 self?.sessions.removeValue(forKey: id)
                 self?.sessionsLock.unlock()
             },
-            onPlaintext: { [weak self] direction, content in
-                self?.onTraffic?(pid, hostname, port, direction, content, id)
+            onPlaintext: { [weak self] direction, data in
+                self?.onTraffic?(pid, hostname, port, direction, data, id)
             }
         )
 
@@ -173,7 +173,7 @@ final class MITMSession {
     private let identity: SecIdentity
     private let sendToSysext: (Data) -> Void
     private let onClose: () -> Void
-    private let onPlaintext: (String, String) -> Void  // (direction "up"/"down", content)
+    private let onPlaintext: (String, Data) -> Void  // (direction "up"/"down", raw data)
 
     private var sslContext: SSLContext?
     var sslReadBuffer = Data()       // accessed by C callbacks
@@ -188,7 +188,7 @@ final class MITMSession {
          identity: SecIdentity,
          sendToSysext: @escaping (Data) -> Void,
          onClose: @escaping () -> Void,
-         onPlaintext: @escaping (String, String) -> Void) {
+         onPlaintext: @escaping (String, Data) -> Void) {
         self.id = id
         self.hostname = hostname
         self.port = port
@@ -293,10 +293,8 @@ final class MITMSession {
         }
 
         if !allPlaintext.isEmpty {
-            // Report plaintext to TUI
-            if let text = String(data: allPlaintext, encoding: .utf8) {
-                onPlaintext("up", text)
-            }
+            // Report raw plaintext to TUI
+            onPlaintext("up", allPlaintext)
 
             // Forward plaintext to real server
             serverConnection?.send(content: allPlaintext, completion: .contentProcessed { [weak self] error in
@@ -327,10 +325,8 @@ final class MITMSession {
                 return
             }
 
-            // Report plaintext to TUI
-            if let text = String(data: data, encoding: .utf8) {
-                self.onPlaintext("down", text)
-            }
+            // Report raw plaintext to TUI
+            self.onPlaintext("down", data)
 
             // Encrypt via SSL and send to app
             guard let ctx = self.sslContext else { return }
