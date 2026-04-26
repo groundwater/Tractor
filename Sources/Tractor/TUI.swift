@@ -1670,13 +1670,27 @@ final class TUI: EventSink {
         mvaddstr(Int32(height - 1), 0, footer + footerPad)
         attroff(COLOR_PAIR(TUIColor.exited.rawValue) | ATTR_DIM)
 
-        // Build content lines: request (up) then response (down)
+        // Build content lines: request (up) then response (down), wrapping long lines
         enum LineDir { case up, down, separator }
         var lines: [(String, LineDir)] = []
 
+        func appendWrapped(_ text: String, _ dir: LineDir) {
+            let clean = text.replacingOccurrences(of: "\r", with: "")
+            if clean.count <= innerW {
+                lines.append((clean, dir))
+            } else {
+                var remaining = clean[clean.startIndex...]
+                while !remaining.isEmpty {
+                    let chunk = remaining.prefix(innerW)
+                    lines.append((String(chunk), dir))
+                    remaining = remaining.dropFirst(chunk.count)
+                }
+            }
+        }
+
         // Request
         for line in rt.request.components(separatedBy: "\n") {
-            lines.append((line.replacingOccurrences(of: "\r", with: ""), .up))
+            appendWrapped(line, .up)
         }
 
         // Separator
@@ -1687,7 +1701,7 @@ final class TUI: EventSink {
             lines.append(("(no response captured)", .separator))
         } else {
             for line in rt.response.components(separatedBy: "\n") {
-                lines.append((line.replacingOccurrences(of: "\r", with: ""), .down))
+                appendWrapped(line, .down)
             }
         }
 
@@ -1715,8 +1729,7 @@ final class TUI: EventSink {
                 case .down: color = downColor
                 case .separator: color = borderAttr
                 }
-                let truncated = String(text.prefix(innerW))
-                let padded = truncated + String(repeating: " ", count: max(0, innerW - truncated.count))
+                let padded = text + String(repeating: " ", count: max(0, innerW - text.count))
                 attron(color)
                 mvaddstr(y, 1, padded)
                 attroff(color)
