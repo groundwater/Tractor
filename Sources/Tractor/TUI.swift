@@ -3751,7 +3751,7 @@ final class TUI: EventSink {
                     let autoIndicator = row.netAuto ? "~ " : ""
                     lock.unlock()
                     let triIndent = depthIndent + 2
-                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2b06}\(formatBytes(totalTx)) \u{2b07}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
+                    drawBoxHeader(y: y, disc: disc, title: "\(autoIndicator)Network (\(connCount) conn \u{2b06}\(formatBytes(totalTx))  \u{2b07}\(formatBytes(totalRx)))", triIndent: triIndent, color: COLOR_PAIR(TUIColor.subNet.rawValue) | ATTR_BOLD, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
                     y += 1
                 } else { lock.unlock() }
 
@@ -3760,9 +3760,9 @@ final class TUI: EventSink {
                     lock.unlock()
                     let disc = conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}"
                     let up = "\u{2b06}\(formatBytes(conn.txBytes))"
-                    let upPad = String(repeating: " ", count: max(1, 10 - up.count))
+                    let upPad = String(repeating: " ", count: max(1, 12 - up.count))
                     let down = "\u{2b07}\(formatBytes(conn.rxBytes))"
-                    let downPad = String(repeating: " ", count: max(1, 10 - down.count))
+                    let downPad = String(repeating: " ", count: max(1, 12 - down.count))
                     let line = "\(disc) [#\(conn.connNumber)] \(up)\(upPad)\(down)\(downPad)\(conn.label)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dimNet
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
