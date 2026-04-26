@@ -125,7 +125,6 @@ struct ConnectionStats {
     var protocolDisclosed: Bool = false
     var isMITM: Bool = false
     var rawChunks: [(direction: TrafficDirection, data: Data)] = []
-    var rawBytesTotal: Int = 0
 
     var label: String {
         let host = hostname ?? remoteAddr
@@ -3149,17 +3148,19 @@ final class TUI: EventSink {
                 }
             }
 
-            // Store raw bytes directly (cap at 64KB total per connection)
-            if conn.rawBytesTotal < 65536 {
-                let space = 65536 - conn.rawBytesTotal
-                let chunk = data.prefix(space)
-                // Merge with last chunk if same direction, otherwise start new chunk
-                if let last = conn.rawChunks.last, last.direction == direction {
-                    conn.rawChunks[conn.rawChunks.count - 1].data.append(chunk)
-                } else {
-                    conn.rawChunks.append((direction: direction, data: Data(chunk)))
+            // Store raw bytes: cap each chunk at 64KB, but always allow new chunks
+            let maxChunkSize = 65536
+            if let last = conn.rawChunks.last, last.direction == direction {
+                // Same direction — append to current chunk, truncating if over cap
+                let currentSize = last.data.count
+                if currentSize < maxChunkSize {
+                    let space = maxChunkSize - currentSize
+                    conn.rawChunks[conn.rawChunks.count - 1].data.append(data.prefix(space))
                 }
-                conn.rawBytesTotal += chunk.count
+                // else: chunk already at cap, silently drop continuation data
+            } else {
+                // New direction = new HTTP message — always start a new chunk
+                conn.rawChunks.append((direction: direction, data: Data(data.prefix(maxChunkSize))))
             }
 
             conn.isMITM = true
