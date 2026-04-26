@@ -3759,8 +3759,8 @@ final class TUI: EventSink {
                 if let row = rows[pid], let conn = row.connections[key] {
                     lock.unlock()
                     let disc = conn.trafficDisclosed ? "\u{25BC}" : "\u{25B6}"
-                    let up = "\u{2b06}\(formatBytes(conn.txBytes))  "
-                    let down = "\u{2b07}\(formatBytes(conn.rxBytes))  "
+                    let up = "\u{2b06} \(formatBytes(conn.txBytes)) "
+                    let down = "\u{2b07} \(formatBytes(conn.rxBytes)) "
                     let line = "\(disc) [#\(conn.connNumber)] \(up)\(down) \(conn.label)"
                     let connColor = conn.alive ? TUIColor.subNet : TUIColor.dimNet
                     drawLine(y: y, indent: depthIndent + 4, content: line, color: COLOR_PAIR(connColor.rawValue) | ATTR_DIM, highlighted: isHighlighted, width: width, boxIndent: currentBoxIndent)
