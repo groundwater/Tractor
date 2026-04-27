@@ -9,7 +9,7 @@
 Tractor is a real-time process monitor for AI coding agents on macOS. It traces an agent's process tree, file activity, and network connections — then presents everything in an interactive terminal UI. Optionally intercept TLS traffic to inspect the actual HTTP requests your agent is making.
 
 <p align="center">
-  <img src="screenshots/hero-process-tree.png" width="720" alt="Tractor tracing Claude Code — process tree with network connections and subprocess activity" />
+  <img src="screenshots/01-hero-process-tree.png" width="720" alt="Tractor process tree showing Terminal with nested subprocesses, file activity, and resource usage" />
 </p>
 
 ## Why?
@@ -23,10 +23,14 @@ AI coding agents spawn dozens of subprocesses, write to files across your filesy
 **Process inspection** — full path, working directory, arguments, environment variables, and resource usage.
 
 <p align="center">
-  <img src="screenshots/detail-view.png" width="720" alt="Process info panel showing path, args, env, file writes, and network connections" />
+  <img src="screenshots/02-process-detail.png" width="720" alt="Process info panel showing path, args, env, and resource usage" />
 </p>
 
-**File tracking** — real-time observation of file writes, renames, and deletes per process.
+**File tracking** — real-time observation of file writes, renames, and deletes per process with write counts and byte sizes.
+
+<p align="center">
+  <img src="screenshots/03-file-tracking.png" width="720" alt="File tracking panel showing active file writes with paths and byte counts" />
+</p>
 
 **Network connections** — per-connection TX/RX byte counters with hostname resolution.
 
@@ -51,12 +55,16 @@ AI coding agents spawn dozens of subprocesses, write to files across your filesy
 **CPU sampling** — capture CPU profiles displayed as a bottom-up call tree.
 
 <p align="center">
-  <img src="screenshots/cpu-sample.png" width="720" alt="CPU sample results with bottom-up call tree" />
+  <img src="screenshots/04-cpu-sample.png" width="720" alt="CPU sample results with bottom-up call tree" />
 </p>
 
 **Wait diagnosis** — find out why a process is blocked (I/O, locks, network, sleep).
 
 **Signal delivery** — send signals or pause/resume any traced process.
+
+<p align="center">
+  <img src="screenshots/05-signal-modal.png" width="720" alt="Send Signal modal with SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGKILL" />
+</p>
 
 **JSON output** — stream events as newline-delimited JSON for scripting.
 
