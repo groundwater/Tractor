@@ -1,6 +1,9 @@
 .claude
 AGENTS.md
 
+# Local signing config
+Local.xcconfig
+
 # Xcode
 build/
 DerivedData/
