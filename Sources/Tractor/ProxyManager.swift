@@ -37,35 +37,26 @@ final class ProxyManager: NSObject {
             }
             fputs("Tractor: found \(managers?.count ?? 0) configs\n", stderr)
 
-            if let existing = managers?.first, existing.protocolConfiguration != nil {
-                fputs("Tractor: existing config found, updating...\n", stderr)
-                existing.isEnabled = true
-                existing.isOnDemandEnabled = false
-                existing.saveToPreferences { saveError in
-                    if let saveError = saveError {
-                        fputs("Tractor: save error: \(saveError)\n", stderr)
-                        existing.removeFromPreferences { _ in
-                            self.createFreshProxy(completion: completion)
-                        }
-                        return
+            // Always remove and recreate. The saved config pins the provider's
+            // designated requirement (specifically the cdhash) at save time;
+            // when we re-sign the sysext on rebuild the cdhash changes and the
+            // pinned DR no longer matches the binary. `nesessionmanager` then
+            // rejects startProxy with "Plugin was disabled". Recreating forces
+            // the DR to be derived from the current binary's signature.
+            let managers = managers ?? []
+            let group = DispatchGroup()
+            for m in managers {
+                group.enter()
+                m.removeFromPreferences { err in
+                    if let err = err {
+                        fputs("Tractor: removeFromPreferences error: \(err)\n", stderr)
                     }
-                    existing.loadFromPreferences { _ in
-                        fputs("Tractor: starting tunnel...\n", stderr)
-                        do {
-                            try (existing.connection as? NETunnelProviderSession)?.startTunnel()
-                            fputs("Tractor: tunnel started\n", stderr)
-                            completion(nil)
-                        } catch {
-                            fputs("Tractor: startTunnel error: \(error)\n", stderr)
-                            completion(error)
-                        }
-                    }
+                    group.leave()
                 }
-                return
             }
-
-            fputs("Tractor: no existing config, creating fresh\n", stderr)
-            self.createFreshProxy(completion: completion)
+            group.notify(queue: .main) {
+                self.createFreshProxy(completion: completion)
+            }
         }
     }
 
@@ -75,7 +66,8 @@ final class ProxyManager: NSObject {
 
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.neBundleID
-        proto.serverAddress = "localhost"
+        proto.serverAddress = "Tractor Transparent Proxy"
+        proto.providerConfiguration = [:]
 
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Tractor Network Monitor"

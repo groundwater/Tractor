@@ -69,16 +69,21 @@ release: preflight-release bump-sysext-version
 	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Release \
 		-archivePath "$(ARCHIVE_PATH)" \
 		MARKETING_VERSION=$(VERSION) \
+		CODE_SIGN_IDENTITY="Apple Development" \
+		DEVELOPMENT_TEAM=$(DEV_TEAM) \
 		-allowProvisioningUpdates \
 		archive
-	@# Apple's recommended workflow for sysext Developer ID distribution skips
-	@# `xcodebuild -exportArchive` because exportArchive can't reconcile the
-	@# entitlement variant difference: the build-time entitlements file uses
-	@# `app-proxy-provider` (so the Apple Development profile validates), but
-	@# Developer ID Direct profiles only allow `app-proxy-provider-systemextension`.
-	@# See https://developer.apple.com/forums/thread/737894 (radar 108838909).
-	@# Instead we copy the archived .app and re-sign it ourselves below using
-	@# pkg/TractorNE.dist.entitlements (which has the -systemextension variant).
+	@# exportArchive does two things for us: it auto-creates / refreshes the
+	@# Developer ID ("Direct") provisioning profiles for any bundle in the
+	@# archive that doesn't already have one, and it re-signs with Developer
+	@# ID. We don't actually use the export output (the codesign re-sign step
+	@# below substitutes -systemextension entitlements for NE), but running
+	@# exportArchive is how we get the profile cache populated.
+	xcodebuild -exportArchive \
+		-archivePath "$(ARCHIVE_PATH)" \
+		-exportPath "$(EXPORT_DIR).pre" \
+		-exportOptionsPlist pkg/ExportOptions.plist \
+		-allowProvisioningUpdates || true
 	mkdir -p "$(EXPORT_DIR)"
 	ditto "$(ARCHIVE_PATH)/Products/Applications/Tractor.app" "$(APP_BUILT)"
 	@# Embed the Xcode-managed Developer ID profiles for the app and both sysexts.
@@ -114,7 +119,7 @@ release: preflight-release bump-sysext-version
 		"$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension"
 	codesign --force \
 		--sign "$(DEV_ID_APP)" \
-		--entitlements Sources/Tractor/TractorApp.entitlements \
+		--entitlements pkg/TractorApp.dist.entitlements \
 		--options runtime --timestamp \
 		"$(APP_BUILT)"
 	@echo ""
