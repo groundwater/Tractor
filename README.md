@@ -91,6 +91,21 @@ sudo tractor activate endpoint-security
 sudo tractor activate network-extension
 ```
 
+Or install with Homebrew from the dedicated tap, which uses a notarized DMG instead of the privileged `.pkg`:
+
+```bash
+brew tap groundwater/tractor https://github.com/groundwater/homebrew-tractor
+brew install --cask tractor
+sudo tractor activate endpoint-security
+sudo tractor activate network-extension
+```
+
+Enable MITM only if you need it:
+
+```bash
+sudo tractor activate certificate-root
+```
+
 Then start tracing:
 
 ```bash
