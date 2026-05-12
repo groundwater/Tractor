@@ -7,8 +7,16 @@
 
 Tractor is a real-time process monitor for macOS. It traces the full process tree, file activity, and network connections, then presents everything in an interactive terminal UI. 
 
-> [!NOTE]
-> Tractor captures all child-processes, including very short-lived subprocesses.
+## Quick Start
+
+```sh
+brew tap groundwater/tractor https://github.com/groundwater/Tractor                    
+brew install --cask tractor
+tractor activate endpoint-security
+
+# Example
+tractor trace --name Terminal
+```
 
 <p align="center">
   <img src="screenshots/01-hero-process-tree.png" width="720" alt="Tractor process tree showing Terminal with nested subprocesses, file activity, and resource usage" />
