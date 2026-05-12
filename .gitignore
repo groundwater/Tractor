@@ -1,8 +1,9 @@
 .claude
 AGENTS.md
 
-# Local signing config
+# Local signing / release config
 Local.xcconfig
+Local.mk
 
 # Xcode
 build/

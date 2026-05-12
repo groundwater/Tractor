@@ -1,0 +1,15 @@
+# Copy to Local.mk and fill in. Local.mk is gitignored.
+# Used by the `make pkg` / `make notarize` / `make dist` targets.
+
+# Developer ID Installer identity used to sign the .pkg. Run
+#   security find-identity -v -p basic
+# and copy the common-name string, e.g.
+#   Developer ID Installer: Your Name (TEAMID)
+INSTALLER_SIGN_IDENTITY =
+
+# notarytool keychain profile. Create it once with:
+#   xcrun notarytool store-credentials AC_PASSWORD \
+#     --apple-id you@example.com \
+#     --team-id TEAMID \
+#     --password <app-specific-password>
+NOTARYTOOL_KEYCHAIN_PROFILE = AC_PASSWORD

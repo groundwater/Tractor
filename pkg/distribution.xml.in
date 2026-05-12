@@ -14,5 +14,5 @@ This installer will:
     <choice id="default" title="Tractor">
         <pkg-ref id="com.jacobgroundwater.Tractor"/>
     </choice>
-    <pkg-ref id="com.jacobgroundwater.Tractor" version="0.1.0" onConclusion="none">Tractor-component.pkg</pkg-ref>
+    <pkg-ref id="com.jacobgroundwater.Tractor" version="@VERSION@" onConclusion="none">Tractor-component.pkg</pkg-ref>
 </installer-gui-script>

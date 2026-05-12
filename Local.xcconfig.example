@@ -1,4 +1,11 @@
-// Copy to Local.xcconfig and fill in your Apple Developer Team ID.
-// Find it at https://developer.apple.com/account under Membership.
+// Copy to Local.xcconfig and fill in. Local.xcconfig is gitignored.
 
+// Apple Developer Team ID (10-char). Required for Release builds.
+// Find it at https://developer.apple.com/account under Membership.
 DEVELOPMENT_TEAM =
+
+// Debug uses ad-hoc ("-") so devs without a Developer ID cert can still
+// iterate (requires SIP disabled). Release archive runs unsigned and
+// `xcodebuild -exportArchive` does the real Developer ID signing via
+// pkg/ExportOptions.plist (signingStyle = automatic).
+CODE_SIGN_IDENTITY = -

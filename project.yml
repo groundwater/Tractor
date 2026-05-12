@@ -4,6 +4,17 @@ options:
     macOS: "15.0"
   bundleIdPrefix: com.jacobgroundwater
 
+configFiles:
+  Debug: Local.xcconfig
+  Release: Local.xcconfig
+
+settings:
+  configs:
+    Release:
+      ENABLE_HARDENED_RUNTIME: YES
+      CODE_SIGN_STYLE: Automatic
+      OTHER_CODE_SIGN_FLAGS: --timestamp
+
 packages:
   swift-argument-parser:
     url: https://github.com/apple/swift-argument-parser
@@ -45,7 +56,7 @@ targetTemplates:
         com.apple.developer.endpoint-security.client: true
         com.apple.developer.system-extension.install: true
         com.apple.developer.networking.networkextension:
-          - app-proxy-provider
+          - app-proxy-provider-systemextension
         com.apple.security.temporary-exception.mach-lookup.global-name:
           - group.com.jacobgroundwater.Tractor
 
@@ -57,6 +68,12 @@ targets:
     settings:
       base:
         CODE_SIGN_IDENTITY: "-"
+      configs:
+        Release:
+          CODE_SIGN_IDENTITY: "-"
+          ENABLE_HARDENED_RUNTIME: NO
+          CODE_SIGN_STYLE: Automatic
+          OTHER_CODE_SIGN_FLAGS: ""
 
   TractorNE:
     type: bundle
@@ -75,7 +92,7 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.8.0"
-        CFBundleVersion: "132"
+        CFBundleVersion: "145"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -87,13 +104,14 @@ targets:
         PRODUCT_NAME: com.jacobgroundwater.Tractor.NE
         PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor.NE
         SWIFT_VERSION: "5.9"
-        CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_ENTITLEMENTS: Sources/TractorNE/TractorNE.entitlements
         INFOPLIST_FILE: Sources/TractorNE/Info.plist
         SKIP_INSTALL: "YES"
         WRAPPER_EXTENSION: systemextension
         MACH_O_TYPE: mh_execute
-        PROVISIONING_PROFILE_SPECIFIER: ""
+      configs:
+        Debug:
+          PROVISIONING_PROFILE_SPECIFIER: ""
 
   TractorApp:
     type: application
@@ -111,11 +129,31 @@ targets:
         embed: false
     postBuildScripts:
       - script: |
-          SYSEXT_SRC="${TARGET_BUILD_DIR}/com.jacobgroundwater.Tractor.NE.systemextension"
+          set -e
+          SYSEXT_NAME="com.jacobgroundwater.Tractor.NE.systemextension"
+          # TARGET_BUILD_DIR works for plain builds; during archive, sysexts
+          # (SKIP_INSTALL=YES) land elsewhere — fall back to searching the build root.
+          if [ -d "${TARGET_BUILD_DIR}/${SYSEXT_NAME}" ]; then
+            SYSEXT_SRC="${TARGET_BUILD_DIR}/${SYSEXT_NAME}"
+          else
+            SYSEXT_SRC="$(find "${OBJROOT}" "${SYMROOT}" -type d -name "${SYSEXT_NAME}" -not -path "*/${WRAPPER_NAME}/*" 2>/dev/null | head -1)"
+          fi
+          if [ -z "${SYSEXT_SRC}" ] || [ ! -d "${SYSEXT_SRC}" ]; then
+            echo "error: could not locate built ${SYSEXT_NAME}"; exit 1
+          fi
           SYSEXT_DST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Library/SystemExtensions"
           mkdir -p "${SYSEXT_DST}"
-          ditto "${SYSEXT_SRC}" "${SYSEXT_DST}/com.jacobgroundwater.Tractor.NE.systemextension"
-          /usr/bin/codesign --force --sign - --entitlements "${SRCROOT}/Sources/Tractor/TractorApp.entitlements" --timestamp=none "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
+          ditto "${SYSEXT_SRC}" "${SYSEXT_DST}/${SYSEXT_NAME}"
+          # Debug: ad-hoc resign so the outer app's seal covers the embedded sysext.
+          # Release: skip — `xcodebuild -exportArchive` re-signs everything from
+          # scratch with Developer ID and the hardened runtime.
+          if [ "${CONFIGURATION}" != "Release" ]; then
+            /usr/bin/codesign --force \
+              --sign - \
+              --entitlements "${SRCROOT}/Sources/Tractor/TractorApp.entitlements" \
+              --timestamp=none \
+              "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
+          fi
         name: "Embed System Extension"
     entitlements:
       path: Sources/Tractor/TractorApp.entitlements
@@ -123,7 +161,7 @@ targets:
         com.apple.developer.endpoint-security.client: true
         com.apple.developer.system-extension.install: true
         com.apple.developer.networking.networkextension:
-          - app-proxy-provider
+          - app-proxy-provider-systemextension
         com.apple.security.application-groups:
           - group.com.jacobgroundwater.Tractor
     info:
@@ -145,7 +183,6 @@ targets:
       base:
         PRODUCT_NAME: Tractor
         SWIFT_VERSION: "5.9"
-        CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_ENTITLEMENTS: Sources/Tractor/TractorApp.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
