@@ -1,6 +1,6 @@
 cask "tractor" do
   version "0.2.0"
-  sha256 "4eb3d7ddba110f528d2abde5326322edcda900405bd3e1ae5b65b7d186fca524"
+  sha256 "ee1e2e3ffa1d6879525e8870f66b0b785b9eeae614fc647d63b78aecc3cf375d"
 
   url "https://github.com/groundwater/Tractor/releases/download/v#{version}/Tractor-#{version}.pkg",
       verified: "github.com/groundwater/Tractor/"
