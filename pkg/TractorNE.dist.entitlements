@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Distribution-time entitlements for the TractorNE sysext.
+  Apple Development provisioning profiles only support plain `app-proxy-provider`,
+  but Developer ID Direct profiles only support the `-systemextension` variant.
+  The source entitlements file in Sources/TractorNE/ uses plain (so xcodebuild
+  archive succeeds against the dev profile); the Makefile re-signs with this
+  file when applying Developer ID + hardened runtime for distribution.
+  See: https://developer.apple.com/forums/thread/737894
+-->
 <plist version="1.0">
 <dict>
     <key>com.apple.security.app-sandbox</key>
@@ -10,7 +19,7 @@
     <true/>
     <key>com.apple.developer.networking.networkextension</key>
     <array>
-        <string>app-proxy-provider</string>
+        <string>app-proxy-provider-systemextension</string>
     </array>
     <key>com.apple.security.application-groups</key>
     <array>

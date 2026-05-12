@@ -6,19 +6,13 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
 
 /// XPC protocol: CLI calls these methods on the sysext
 @objc protocol TractorNEXPC {
+    func updateWatchList(_ pids: [Int32])
     func pollEvents(reply: @escaping (Data) -> Void)
     func setMITMEnabled(_ enabled: Bool)
     func getCACertPEM(reply: @escaping (String) -> Void)
     // Flow streaming: CLI sends data back to a flow
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
-    // Endpoint Security: CLI seeds initial PIDs and patterns; sysext extends the
-    // tree on AUTH_EXEC and streams events back via pollEvents.
-    func addTrackedPids(_ pids: [Int32])
-    func setTrackerPatterns(names: [String], paths: [String])
-    // When false (default), NE flow interception stays off even with tracked PIDs.
-    // The CLI sets this to true only when --net or --mitm is requested.
-    func setNetworkWatchingEnabled(_ enabled: Bool)
 }
 
 /// Reverse XPC protocol: sysext calls these methods on the CLI
@@ -35,8 +29,6 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
 final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
     private var listener: NSXPCListener?
     private let pidLock = NSLock()
-    /// Mirror of the ESDaemon's tracked set. The ES daemon owns the source of
-    /// truth and calls `didUpdateTrackedPids` whenever it changes.
     private var watchedPids: Set<Int32> = []
     private let bufferLock = NSLock()
     private var eventBuffer: [[String: Any]] = []
@@ -49,13 +41,6 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
     private let relayLock = NSLock()
 
     private var excludedPids: Set<Int32> = []
-
-    /// Endpoint Security daemon — created on first connect, owns process tracking.
-    private var esDaemon: ESDaemon?
-
-    /// Whether the proxy should intercept network flows for tracked PIDs.
-    /// Off by default — CLI opts in with `setNetworkWatchingEnabled(true)`.
-    private var networkWatchingEnabled = false
 
     func isWatched(_ pid: Int32) -> Bool {
         pidLock.lock()
@@ -83,8 +68,6 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
     func disconnect() {
         listener?.invalidate()
         listener = nil
-        esDaemon?.stop()
-        esDaemon = nil
         pidLock.lock()
         watchedPids.removeAll()
         pidLock.unlock()
@@ -101,9 +84,7 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         connection.remoteObjectInterface = NSXPCInterface(with: TractorCLIXPC.self)
         connection.invalidationHandler = { [weak self] in
             guard let self = self else { return }
-            os_log("CLI disconnected — clearing watch list and stopping ES", log: xpcLog, type: .default)
-            self.esDaemon?.stop()
-            self.esDaemon = nil
+            os_log("CLI disconnected — clearing watch list", log: xpcLog, type: .default)
             self.pidLock.lock()
             self.watchedPids.removeAll()
             self.pidLock.unlock()
@@ -119,13 +100,6 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         cliProxy = connection.remoteObjectProxyWithErrorHandler { error in
             os_log("CLI reverse proxy error: %{public}@", log: xpcLog, type: .error, error.localizedDescription)
         } as? TractorCLIXPC
-        // Start ES on first CLI connection so the daemon is ready before the
-        // CLI seeds tracked PIDs / patterns.
-        if esDaemon == nil {
-            let daemon = ESDaemon(reporter: self)
-            esDaemon = daemon
-            daemon.start()
-        }
         os_log("CLI connected via XPC", log: xpcLog, type: .default)
         return true
     }
@@ -135,35 +109,13 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
     /// Called when the watch list changes — set by TransparentProxy
     var onWatchListChanged: ((Bool) -> Void)?
 
-    /// Invoked by ESDaemon whenever its tracked-PID set changes. Mirrors the
-    /// set into `watchedPids` (used by `isWatched`) and — only if the CLI
-    /// has opted into network watching — notifies the proxy to refresh rules.
-    func didUpdateTrackedPids(_ pids: Set<Int32>) {
+    func updateWatchList(_ pids: [Int32]) {
         pidLock.lock()
-        watchedPids = pids
+        watchedPids = Set(pids)
         let count = watchedPids.count
-        let netEnabled = networkWatchingEnabled
         pidLock.unlock()
-        if netEnabled {
-            onWatchListChanged?(count > 0)
-        }
-    }
-
-    func addTrackedPids(_ pids: [Int32]) {
-        esDaemon?.addTrackedPids(pids)
-    }
-
-    func setTrackerPatterns(names: [String], paths: [String]) {
-        esDaemon?.setTrackerPatterns(names: names, paths: paths)
-    }
-
-    func setNetworkWatchingEnabled(_ enabled: Bool) {
-        pidLock.lock()
-        networkWatchingEnabled = enabled
-        let hasPids = !watchedPids.isEmpty
-        pidLock.unlock()
-        os_log("network watching %{public}@", log: xpcLog, type: .default, enabled ? "enabled" : "disabled")
-        onWatchListChanged?(enabled && hasPids)
+        os_log("watch list updated — %d PIDs", log: xpcLog, type: .default, count)
+        onWatchListChanged?(count > 0)
     }
 
     func pollEvents(reply: @escaping (Data) -> Void) {
@@ -225,39 +177,6 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
             let event: [String: Any] = ["pid": pid, "host": host, "port": port, "traffic": direction, "contentBase64": "", "flowID": flowID]
             eventBuffer.append(event)
         }
-        bufferLock.unlock()
-    }
-
-    // MARK: - ES event buffering (called from ESDaemon)
-
-    func reportExec(pid: Int32, ppid: Int32, process: String, argv: String, user: UInt32) {
-        let event: [String: Any] = [
-            "kind": "exec", "pid": pid, "ppid": ppid,
-            "process": process, "argv": argv, "user": user,
-        ]
-        bufferLock.lock()
-        eventBuffer.append(event)
-        bufferLock.unlock()
-    }
-
-    func reportFileOp(type: String, pid: Int32, ppid: Int32, process: String, user: UInt32, details: [String: String]) {
-        var event: [String: Any] = [
-            "kind": "fileop", "fileop": type, "pid": pid, "ppid": ppid,
-            "process": process, "user": user,
-        ]
-        for (k, v) in details { event[k] = v }
-        bufferLock.lock()
-        eventBuffer.append(event)
-        bufferLock.unlock()
-    }
-
-    func reportExit(pid: Int32, ppid: Int32, process: String, user: UInt32, exitStatus: Int32) {
-        let event: [String: Any] = [
-            "kind": "exit", "pid": pid, "ppid": ppid,
-            "process": process, "user": user, "exitStatus": exitStatus,
-        ]
-        bufferLock.lock()
-        eventBuffer.append(event)
         bufferLock.unlock()
     }
 

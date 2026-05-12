@@ -2,22 +2,29 @@ import Foundation
 import NetworkExtension
 import SystemExtensions
 
-/// Manages the TractorNE system extension lifecycle.
-/// Used by the `activate` subcommand to install and start the sysext.
+/// Manages both Tractor system extensions' lifecycles (ES + NE).
+/// Used by the `activate` subcommand.
 final class ProxyManager: NSObject {
-    static let sysextBundleID = "com.jacobgroundwater.Tractor.NE"
+    static let esBundleID = "com.jacobgroundwater.Tractor.ES"
+    static let neBundleID = "com.jacobgroundwater.Tractor.NE"
 
     private var activationCompletion: ((Error?) -> Void)?
+    /// Tracks which sysexts have finished activation; once both are done we
+    /// proceed to enable the NE tunnel and call the completion.
+    private var pending: Set<String> = []
 
-    /// Activate the system extension and start the proxy tunnel.
+    /// Activate both system extensions and start the NE proxy tunnel.
     func activate(completion: @escaping (Error?) -> Void) {
         activationCompletion = completion
-        let request = OSSystemExtensionRequest.activationRequest(
-            forExtensionWithIdentifier: Self.sysextBundleID,
-            queue: .main
-        )
-        request.delegate = self
-        OSSystemExtensionManager.shared.submitRequest(request)
+        pending = [Self.esBundleID, Self.neBundleID]
+        for bundleID in pending {
+            let request = OSSystemExtensionRequest.activationRequest(
+                forExtensionWithIdentifier: bundleID,
+                queue: .main
+            )
+            request.delegate = self
+            OSSystemExtensionManager.shared.submitRequest(request)
+        }
     }
 
     private func enableProxy(completion: @escaping (Error?) -> Void) {
@@ -67,7 +74,7 @@ final class ProxyManager: NSObject {
         let manager = NETransparentProxyManager()
 
         let proto = NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = Self.sysextBundleID
+        proto.providerBundleIdentifier = Self.neBundleID
         proto.serverAddress = "localhost"
 
         manager.protocolConfiguration = proto
@@ -108,6 +115,9 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        pending.remove(request.identifier)
+        guard pending.isEmpty else { return }
+        // Both sysexts done — now bring up the NE tunnel.
         retryEnableProxy(attemptsLeft: 5)
     }
 

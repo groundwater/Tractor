@@ -2,17 +2,17 @@ import EndpointSecurity
 import Foundation
 import os.log
 
-private let esLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.NE", category: "es")
+private let esLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.ES", category: "es")
 
-/// Endpoint Security client hosted inside the sysext. The CLI seeds initial
-/// tracked PIDs and tracker patterns via XPC; the daemon then extends the tree
-/// itself on AUTH_EXEC (no synchronous round-trip to the CLI), and streams
-/// exec/file/exit events back through the FlowReporter event buffer.
+/// Endpoint Security client hosted inside the TractorES sysext. The CLI seeds
+/// initial tracked PIDs and tracker patterns via XPC; the daemon then extends
+/// the tree itself on AUTH_EXEC (no synchronous round-trip to the CLI), and
+/// streams exec/file/exit events back through the ESReporter event buffer.
 ///
 /// Running ES inside the sysext means the user doesn't have to grant Full Disk
 /// Access — the sysext's approval flow already authorises the ES entitlement.
 final class ESDaemon {
-    private weak var reporter: FlowReporter?
+    private weak var reporter: ESReporter?
     private var client: OpaquePointer?
 
     private let lock = NSLock()
@@ -20,7 +20,7 @@ final class ESDaemon {
     private var namePatterns: [String] = []
     private var pathPatterns: [String] = []
 
-    init(reporter: FlowReporter) {
+    init(reporter: ESReporter) {
         self.reporter = reporter
     }
 

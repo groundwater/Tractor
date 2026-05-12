@@ -11,13 +11,15 @@ private var activeTUI: TUI?
 private var activeInputSource: DispatchSourceTimer?
 private var activeSQLiteLog: SQLiteLog?
 private var activeFlowClient: FlowXPCClient?
+private var activeESClient: ESXPCClient?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
     activeSQLiteLog?.close()
-    // Close the XPC connection — the sysext detects the disconnect
-    // and stops the ES daemon, clearing tracked PIDs.
+    // Close XPC connections — sysexts see the disconnects and stop their daemons.
+    activeESClient?.stop()
+    activeESClient = nil
     activeFlowClient?.stop()
     activeFlowClient = nil
     if !message.isEmpty {
@@ -167,14 +169,13 @@ struct Trace: ParsableCommand {
             }
         }
 
-        // ES events arrive via XPC from the sysext; FlowXPCClient is the
-        // single transport for both ES and NE flow events.
-        let flowClient = FlowXPCClient(sink: sink)
-        activeFlowClient = flowClient
+        // ES events come from the TractorES sysext; NE flow events from TractorNE.
+        let esClient = ESXPCClient()
+        activeESClient = esClient
         activeTUI = tui
 
         // ES exec → mirror into local ProcessTree and feed the sink (TUI + SQLite + JSON)
-        flowClient.onExec = { [weak tree, weak tui] pid, ppid, process, argv, user in
+        esClient.onExec = { [weak tree, weak tui] pid, ppid, process, argv, user in
             tree?.trackIfChild(pid: pid, ppid: ppid)
             tree?.addRoots([pid])
             if let t = tui {
@@ -184,49 +185,29 @@ struct Trace: ParsableCommand {
             }
             sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
-        flowClient.onFileOp = { type, pid, ppid, process, user, details in
+        esClient.onFileOp = { type, pid, ppid, process, user, details in
             sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
-        flowClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
+        esClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
             sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
             tree?.remove(pid)
         }
 
-        // Optional MITM setup before starting — we have to set up the exported
-        // MITMProxy object on the XPC connection before resume.
-        if mitm {
-            let caDir = TrustCA.caDir
-            let caCertPath = TrustCA.caCertPath
-            let caKeyPath = TrustCA.caKeyPath
-            guard let certPEM = try? String(contentsOfFile: caCertPath, encoding: .utf8),
-                  let keyPEM = try? String(contentsOfFile: caKeyPath, encoding: .utf8) else {
-                fatalError("Tractor: MITM requires CA files at \(caDir). Run 'sudo tractor trust-ca' first.")
-            }
-            flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
-        }
-
-        flowClient.start()
-
-        // Seed the sysext's ES daemon with initial tracked PIDs and patterns.
-        let initialNames = tui?.trackerGroups.compactMap { $0.kind == .name ? $0.value : nil }
-            ?? name
-        let initialPaths = tui?.trackerGroups.compactMap { $0.kind == .path ? $0.value : nil }
-            ?? path
-        flowClient.setTrackerPatterns(names: initialNames, paths: initialPaths)
-        flowClient.addTrackedPids(tree.snapshot)
+        esClient.start()
+        esClient.setTrackerPatterns(
+            names: tui?.trackerGroups.compactMap { $0.kind == .name ? $0.value : nil } ?? name,
+            paths: tui?.trackerGroups.compactMap { $0.kind == .path ? $0.value : nil } ?? path
+        )
+        esClient.addTrackedPids(tree.snapshot)
 
         // Push pattern updates whenever the TUI's tracker groups change.
         if let t = tui {
-            t.onTrackersChanged = { [weak flowClient] trackers in
+            t.onTrackersChanged = { [weak esClient] trackers in
                 let names = trackers.compactMap { $0.kind == .name ? $0.value : nil }
                 let paths = trackers.compactMap { $0.kind == .path ? $0.value : nil }
-                flowClient?.setTrackerPatterns(names: names, paths: paths)
-                let pids: [Int32] = trackers.compactMap {
-                    $0.kind == .pid ? Int32($0.value) : nil
-                }
-                if !pids.isEmpty {
-                    flowClient?.addTrackedPids(Set(pids))
-                }
+                esClient?.setTrackerPatterns(names: names, paths: paths)
+                let pids: [Int32] = trackers.compactMap { $0.kind == .pid ? Int32($0.value) : nil }
+                if !pids.isEmpty { esClient?.addTrackedPids(Set(pids)) }
             }
         }
 
@@ -243,10 +224,28 @@ struct Trace: ParsableCommand {
 
         // Activate network extension flow interception (--mitm implies --net).
         if net || mitm {
-            flowClient.setNetworkWatchingEnabled(true)
+            let flowClient = FlowXPCClient(sink: sink)
+            activeFlowClient = flowClient
+
+            // Set up MITM exported object BEFORE start (NSXPCConnection requires
+            // exportedObject to be configured pre-resume).
+            if mitm {
+                guard let certPEM = try? String(contentsOfFile: TrustCA.caCertPath, encoding: .utf8),
+                      let keyPEM = try? String(contentsOfFile: TrustCA.caKeyPath, encoding: .utf8) else {
+                    fatalError("Tractor: MITM requires CA files at \(TrustCA.caDir). Run 'sudo tractor trust-ca' first.")
+                }
+                flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
+            }
+
+            flowClient.start()
+            flowClient.updateWatchList(tree.snapshot)
+
+            // Mirror ES daemon's tracked-PID set into the NE proxy's watch list.
+            esClient.onTrackedPidsChanged = { [weak flowClient] pids in
+                flowClient?.updateWatchList(pids)
+            }
 
             if mitm {
-                // Give XPC a moment to connect, then tell sysext to enable MITM
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     flowClient.setMITMEnabled(true)
                     if let t = tui {

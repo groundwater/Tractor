@@ -2,16 +2,14 @@ import Foundation
 
 private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
 
-/// XPC protocol matching the sysext's exported interface
+/// XPC protocol matching the TractorNE sysext's exported interface
 @objc protocol TractorNEXPC {
+    func updateWatchList(_ pids: [Int32])
     func pollEvents(reply: @escaping (Data) -> Void)
     func setMITMEnabled(_ enabled: Bool)
     func getCACertPEM(reply: @escaping (String) -> Void)
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
-    func addTrackedPids(_ pids: [Int32])
-    func setTrackerPatterns(names: [String], paths: [String])
-    func setNetworkWatchingEnabled(_ enabled: Bool)
 }
 
 /// Reverse XPC protocol: sysext calls these methods on the CLI
@@ -33,13 +31,6 @@ final class FlowXPCClient {
     var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64, UInt64) -> Void)?
     var onConnectionClosed: ((pid_t, String, UInt16, UInt64) -> Void)?
     var onTraffic: ((pid_t, String, UInt16, String, Data, UInt64) -> Void)?
-    /// ES exec event — the sysext signals that a new PID was added to the tracked tree.
-    var onExec: ((pid_t, pid_t, String, String, uid_t) -> Void)?
-    /// ES file operation event (open/write/unlink/rename/close).
-    var onFileOp: ((String, pid_t, pid_t, String, uid_t, [String: String]) -> Void)?
-    /// ES exit event.
-    var onExit: ((pid_t, pid_t, String, uid_t, Int32) -> Void)?
-    // Local endpoint not available from NEAppProxyTCPFlow API
 
     init(sink: EventSink) {
         self.sink = sink
@@ -98,18 +89,8 @@ final class FlowXPCClient {
         proxy = nil
     }
 
-    /// Seed the sysext's tracked-PID set. The daemon extends the tree itself
-    /// from there via AUTH_EXEC; the CLI does not push subsequent updates.
-    func addTrackedPids(_ pids: Set<pid_t>) {
-        proxy?.addTrackedPids(Array(pids))
-    }
-
-    func setTrackerPatterns(names: [String], paths: [String]) {
-        proxy?.setTrackerPatterns(names: names, paths: paths)
-    }
-
-    func setNetworkWatchingEnabled(_ enabled: Bool) {
-        proxy?.setNetworkWatchingEnabled(enabled)
+    func updateWatchList(_ pids: Set<pid_t>) {
+        proxy?.updateWatchList(Array(pids))
     }
 
     func setMITMEnabled(_ enabled: Bool) {
@@ -137,38 +118,6 @@ final class FlowXPCClient {
 
         for event in events {
             let pid = (event["pid"] as? Int).map { Int32($0) } ?? -1
-
-            // ES events (carry an explicit "kind" field)
-            switch event["kind"] as? String {
-            case "exec":
-                let ppid = (event["ppid"] as? Int).map { Int32($0) } ?? 0
-                let process = event["process"] as? String ?? ""
-                let argv = event["argv"] as? String ?? ""
-                let user = (event["user"] as? Int).map { uid_t($0) } ?? 0
-                onExec?(pid, ppid, process, argv, user)
-                continue
-            case "fileop":
-                let ppid = (event["ppid"] as? Int).map { Int32($0) } ?? 0
-                let process = event["process"] as? String ?? ""
-                let user = (event["user"] as? Int).map { uid_t($0) } ?? 0
-                let type = event["fileop"] as? String ?? ""
-                var details: [String: String] = [:]
-                for k in ["path", "from", "to"] {
-                    if let v = event[k] as? String { details[k] = v }
-                }
-                onFileOp?(type, pid, ppid, process, user, details)
-                continue
-            case "exit":
-                let ppid = (event["ppid"] as? Int).map { Int32($0) } ?? 0
-                let process = event["process"] as? String ?? ""
-                let user = (event["user"] as? Int).map { uid_t($0) } ?? 0
-                let exitStatus = (event["exitStatus"] as? Int).map { Int32($0) } ?? 0
-                onExit?(pid, ppid, process, user, exitStatus)
-                continue
-            default:
-                break
-            }
-
             let host = event["host"] as? String ?? ""
             let port = UInt16(event["port"] as? String ?? "0") ?? 0
             let flowID = (event["flowID"] as? UInt64) ?? (event["flowID"] as? Int).map { UInt64($0) } ?? 0

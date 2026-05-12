@@ -2,7 +2,6 @@ PROJECT      = Tractor
 BUILD_DIR    = $(CURDIR)/.build
 DIST_DIR     = $(BUILD_DIR)/dist
 PKG_DIR      = $(BUILD_DIR)/pkg
-INSTALL_APP  = /Applications/Tractor.app
 
 VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 DEV_TEAM      := $(shell awk -F= '/^DEVELOPMENT_TEAM[[:space:]]*=/{gsub(/[[:space:]]/,"",$$2); print $$2}' Local.xcconfig 2>/dev/null)
@@ -16,7 +15,7 @@ PKG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).pkg
 # See Local.mk.example. Optional for `make debug` / `make release`.
 -include Local.mk
 
-.PHONY: debug release pkg notarize dist install uninstall clean activate \
+.PHONY: debug release pkg notarize dist clean \
         preflight-release preflight-pkg preflight-notarize bump-sysext-version \
         ensure-local-config
 
@@ -28,11 +27,16 @@ ensure-local-config:
 		cp Local.xcconfig.example Local.xcconfig; \
 	}
 
-# Debug: bare tool binary, works with SIP disabled (development/testing)
+# Debug: build the .app bundle (with both sysexts embedded) ad-hoc signed.
+# Useful for local iteration with SIP disabled. Output at .build/Debug/Tractor.app.
 debug: ensure-local-config
 	xcodegen generate
-	xcodebuild -project $(PROJECT).xcodeproj -scheme $(PROJECT) -configuration Debug \
-		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) build
+	@for t in TractorNE TractorES; do \
+		sed -i '' "/$$t/,/productType/{s/productType = \"com.apple.product-type.bundle\";/productType = \"com.apple.product-type.system-extension\";/;}" $(PROJECT).xcodeproj/project.pbxproj; \
+	done
+	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Debug \
+		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) \
+		CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-" build
 
 # Auto-increment sysext build number so macOS recognizes replacement
 bump-sysext-version:
@@ -49,51 +53,65 @@ preflight-release: ensure-local-config
 		|| { echo "ERROR: no 'Developer ID Application' identity in keychain."; exit 1; }
 
 # Release: signed .app bundle (Developer ID + hardened runtime + secure timestamp).
-# Archive runs unsigned (CODE_SIGNING_ALLOWED=NO) so xcodebuild doesn't trip on
-# entitlement-vs-profile mismatches between the dev profile and the sysext
-# entitlement values. exportArchive then signs everything with Developer ID
-# using the Xcode-managed profiles (driven by pkg/ExportOptions.plist).
+# Archive runs with normal signing against the auto-managed Apple Development
+# profile (entitlements files use the plain `app-proxy-provider` value that
+# the dev profile authorises). exportArchive then auto-creates / refreshes the
+# Developer ID Direct profiles and re-signs. We re-sign once more after that
+# to substitute the distribution-time entitlements (-systemextension variant
+# for NE) and apply hardened runtime + secure timestamp.
 release: preflight-release bump-sysext-version
 	xcodegen generate
-	@# XcodeGen creates a bundle for TractorNE, but sysexts need system-extension product type
-	@sed -i '' '/TractorNE/,/productType/{s/productType = "com.apple.product-type.bundle";/productType = "com.apple.product-type.system-extension";/;}' $(PROJECT).xcodeproj/project.pbxproj
+	@# XcodeGen creates bundles for both sysexts, but they need system-extension product type.
+	@for t in TractorNE TractorES; do \
+		sed -i '' "/$$t/,/productType/{s/productType = \"com.apple.product-type.bundle\";/productType = \"com.apple.product-type.system-extension\";/;}" $(PROJECT).xcodeproj/project.pbxproj; \
+	done
 	rm -rf "$(ARCHIVE_PATH)" "$(EXPORT_DIR)"
 	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Release \
 		-archivePath "$(ARCHIVE_PATH)" \
 		MARKETING_VERSION=$(VERSION) \
-		CODE_SIGNING_ALLOWED=NO \
-		CODE_SIGNING_REQUIRED=NO \
-		ENTITLEMENTS_REQUIRED=NO \
+		-allowProvisioningUpdates \
 		archive
-	xcodebuild -exportArchive \
-		-archivePath "$(ARCHIVE_PATH)" \
-		-exportPath "$(EXPORT_DIR)" \
-		-exportOptionsPlist pkg/ExportOptions.plist \
-		-allowProvisioningUpdates
-	@# Embed the Xcode-managed Developer ID profiles. exportArchive normally
-	@# embeds them, but archive ran with CODE_SIGNING_ALLOWED=NO so the profile
-	@# wiring is skipped. Without these, AMFI rejects the ES entitlement at exec.
+	@# Apple's recommended workflow for sysext Developer ID distribution skips
+	@# `xcodebuild -exportArchive` because exportArchive can't reconcile the
+	@# entitlement variant difference: the build-time entitlements file uses
+	@# `app-proxy-provider` (so the Apple Development profile validates), but
+	@# Developer ID Direct profiles only allow `app-proxy-provider-systemextension`.
+	@# See https://developer.apple.com/forums/thread/737894 (radar 108838909).
+	@# Instead we copy the archived .app and re-sign it ourselves below using
+	@# pkg/TractorNE.dist.entitlements (which has the -systemextension variant).
+	mkdir -p "$(EXPORT_DIR)"
+	ditto "$(ARCHIVE_PATH)/Products/Applications/Tractor.app" "$(APP_BUILT)"
+	@# Embed the Xcode-managed Developer ID profiles for the app and both sysexts.
+	@# exportArchive normally embeds them, but archive ran with CODE_SIGNING_ALLOWED=NO,
+	@# so the profile wiring is skipped. AMFI rejects restricted entitlements without them.
 	@PROFILES_DIR="$$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; \
-	APP_PROFILE=""; SYSEXT_PROFILE=""; \
+	APP_PROFILE=""; NE_PROFILE=""; ES_PROFILE=""; \
 	for p in "$$PROFILES_DIR"/*.provisionprofile; do \
 		name=$$(security cms -D -i "$$p" 2>/dev/null | plutil -extract Name raw -o - -); \
 		case "$$name" in \
 			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor") APP_PROFILE="$$p" ;; \
-			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor.NE") SYSEXT_PROFILE="$$p" ;; \
+			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor.NE") NE_PROFILE="$$p" ;; \
+			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor.ES") ES_PROFILE="$$p" ;; \
 		esac; \
 	done; \
-	test -n "$$APP_PROFILE" && test -n "$$SYSEXT_PROFILE" \
-		|| { echo "ERROR: missing Developer ID profile for Tractor or Tractor.NE in $$PROFILES_DIR"; exit 1; }; \
+	test -n "$$APP_PROFILE" && test -n "$$NE_PROFILE" && test -n "$$ES_PROFILE" \
+		|| { echo "ERROR: missing Developer ID profile for Tractor / .NE / .ES in $$PROFILES_DIR"; exit 1; }; \
 	cp "$$APP_PROFILE" "$(APP_BUILT)/Contents/embedded.provisionprofile"; \
-	cp "$$SYSEXT_PROFILE" "$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension/Contents/embedded.provisionprofile"
+	cp "$$NE_PROFILE" "$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension/Contents/embedded.provisionprofile"; \
+	cp "$$ES_PROFILE" "$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension/Contents/embedded.provisionprofile"
 	@# exportArchive doesn't re-apply hardened runtime when archive ran with
-	@# CODE_SIGNING_ALLOWED=NO, so re-sign with --options runtime + timestamp.
-	@# Sysext first (inside-out), then the outer app so its seal covers it.
+	@# CODE_SIGNING_ALLOWED=NO, so re-sign each binary with --options runtime + timestamp.
+	@# Sysexts first (inside-out), then the outer app so its seal covers them.
 	codesign --force \
 		--sign "$(DEV_ID_APP)" \
-		--entitlements Sources/TractorNE/TractorNE.entitlements \
+		--entitlements pkg/TractorNE.dist.entitlements \
 		--options runtime --timestamp \
 		"$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension"
+	codesign --force \
+		--sign "$(DEV_ID_APP)" \
+		--entitlements Sources/TractorES/TractorES.entitlements \
+		--options runtime --timestamp \
+		"$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension"
 	codesign --force \
 		--sign "$(DEV_ID_APP)" \
 		--entitlements Sources/Tractor/TractorApp.entitlements \
@@ -158,21 +176,6 @@ dist: pkg notarize
 	@echo "  gh release create v$(VERSION) --generate-notes \\"
 	@echo "    \"$(PKG_OUT)\" \\"
 	@echo "    \"$(PKG_OUT).sha256\""
-
-# Install: copy the Release .app to /Applications (already properly signed)
-install: release
-	sudo rm -rf "$(INSTALL_APP)"
-	sudo cp -R "$(APP_BUILT)" "$(INSTALL_APP)"
-	@echo ""
-	@echo "Installed: $(INSTALL_APP)"
-
-activate:
-	@test -d "$(INSTALL_APP)" || $(MAKE) install
-	sudo "$(INSTALL_APP)/Contents/MacOS/Tractor" activate
-
-uninstall:
-	sudo rm -rf "$(INSTALL_APP)"
-	@echo "Uninstalled."
 
 clean:
 	rm -rf $(BUILD_DIR)
