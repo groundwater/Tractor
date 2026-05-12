@@ -12,7 +12,9 @@ Tractor is a real-time process monitor for macOS. It traces the full process tre
 ```sh
 brew tap groundwater/tractor
 brew install --cask tractor
-tractor activate endpoint-security
+
+# One-time only activation
+sudo tractor activate endpoint-security
 
 # Example
 tractor trace --name Terminal
