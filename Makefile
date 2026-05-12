@@ -2,6 +2,7 @@ PROJECT      = Tractor
 BUILD_DIR    = $(CURDIR)/.build
 DIST_DIR     = $(BUILD_DIR)/dist
 PKG_DIR      = $(BUILD_DIR)/pkg
+DMG_DIR      = $(BUILD_DIR)/dmg
 
 VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 DEV_TEAM      := $(shell awk -F= '/^DEVELOPMENT_TEAM[[:space:]]*=/{gsub(/[[:space:]]/,"",$$2); print $$2}' Local.xcconfig 2>/dev/null)
@@ -10,14 +11,15 @@ ARCHIVE_PATH   = $(BUILD_DIR)/Tractor.xcarchive
 EXPORT_DIR     = $(BUILD_DIR)/Release
 APP_BUILT      = $(EXPORT_DIR)/Tractor.app
 PKG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).pkg
+DMG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).dmg
 
 # Makefile-only release config (signing identity, notarytool profile).
 # See Local.mk.example. Optional for `make debug` / `make release`.
 -include Local.mk
 
-.PHONY: debug release pkg notarize dist clean \
-        preflight-release preflight-pkg preflight-notarize bump-sysext-version \
-        ensure-local-config
+.PHONY: debug release pkg pkg-from-release notarize dmg dmg-from-release \
+        notarize-dmg dist dist-homebrew clean preflight-release preflight-pkg \
+        preflight-dmg preflight-notarize bump-sysext-version ensure-local-config
 
 # Auto-create Local.xcconfig from the example if it's missing so xcodegen
 # doesn't fail for contributors who only want to run `make debug`.
@@ -133,7 +135,11 @@ preflight-pkg:
 		|| { echo "ERROR: no 'Developer ID Installer' identity in keychain."; exit 1; }
 
 # Pkg: signed .pkg installer wrapping the Release .app
-pkg: release preflight-pkg
+pkg: release pkg-from-release
+
+pkg-from-release: preflight-pkg
+	@test -d "$(APP_BUILT)" \
+		|| { echo "ERROR: $(APP_BUILT) not found — run 'make release' first."; exit 1; }
 	rm -rf "$(PKG_DIR)"
 	mkdir -p "$(PKG_DIR)/payload/Library/Application Support/Tractor"
 	mkdir -p "$(DIST_DIR)"
@@ -154,6 +160,25 @@ pkg: release preflight-pkg
 	@echo "Signed pkg: $(PKG_OUT)"
 	@pkgutil --check-signature "$(PKG_OUT)" | head -8
 
+preflight-dmg:
+	@test -d "$(APP_BUILT)" \
+		|| { echo "ERROR: $(APP_BUILT) not found — run 'make release' first."; exit 1; }
+
+# Dmg: Homebrew-friendly disk image containing the Release .app
+dmg: release dmg-from-release
+
+dmg-from-release: preflight-dmg
+	rm -rf "$(DMG_DIR)"
+	mkdir -p "$(DMG_DIR)"
+	mkdir -p "$(DIST_DIR)"
+	cp -R "$(APP_BUILT)" "$(DMG_DIR)/Tractor.app"
+	hdiutil create -volname "Tractor" \
+		-srcfolder "$(DMG_DIR)" \
+		-ov -format UDZO \
+		"$(DMG_OUT)"
+	@echo ""
+	@echo "Unsigned dmg: $(DMG_OUT)"
+
 preflight-notarize:
 	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
 		|| { echo "ERROR: NOTARYTOOL_KEYCHAIN_PROFILE is not set (see Local.mk.example)."; exit 1; }
@@ -170,6 +195,19 @@ notarize: preflight-notarize
 	@echo ""
 	@echo "Notarized + stapled: $(PKG_OUT)"
 
+notarize-dmg:
+	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
+		|| { echo "ERROR: NOTARYTOOL_KEYCHAIN_PROFILE is not set (see Local.mk.example)."; exit 1; }
+	@test -f "$(DMG_OUT)" \
+		|| { echo "ERROR: $(DMG_OUT) not found — run 'make dmg' first."; exit 1; }
+	xcrun notarytool submit "$(DMG_OUT)" \
+		--keychain-profile "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
+		--wait
+	xcrun stapler staple "$(DMG_OUT)"
+	xcrun stapler validate "$(DMG_OUT)"
+	@echo ""
+	@echo "Notarized + stapled: $(DMG_OUT)"
+
 # Dist: produce final release artifacts (signed, notarized, stapled, checksummed)
 dist: pkg notarize
 	cd "$(DIST_DIR)" && shasum -a 256 "Tractor-$(VERSION).pkg" > "Tractor-$(VERSION).pkg.sha256"
@@ -181,6 +219,17 @@ dist: pkg notarize
 	@echo "  gh release create v$(VERSION) --generate-notes \\"
 	@echo "    \"$(PKG_OUT)\" \\"
 	@echo "    \"$(PKG_OUT).sha256\""
+
+dist-homebrew: dmg notarize-dmg
+	cd "$(DIST_DIR)" && shasum -a 256 "Tractor-$(VERSION).dmg" > "Tractor-$(VERSION).dmg.sha256"
+	@echo ""
+	@echo "Homebrew release artifacts in $(DIST_DIR):"
+	@ls -lh "$(DIST_DIR)"
+	@echo ""
+	@echo "Upload manually, e.g.:"
+	@echo "  gh release create v$(VERSION) --generate-notes \\"
+	@echo "    \"$(DMG_OUT)\" \\"
+	@echo "    \"$(DMG_OUT).sha256\""
 
 clean:
 	rm -rf $(BUILD_DIR)
