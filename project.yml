@@ -56,7 +56,7 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.8.0"
-        CFBundleVersion: "150"
+        CFBundleVersion: "154"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -87,7 +87,6 @@ targets:
     entitlements:
       path: Sources/TractorES/TractorES.entitlements
       properties:
-        com.apple.security.app-sandbox: true
         com.apple.developer.endpoint-security.client: true
         com.apple.security.application-groups:
           - group.com.jacobgroundwater.Tractor

@@ -2,7 +2,10 @@ import Foundation
 import os.log
 
 private let xpcLog = OSLog(subsystem: "com.jacobgroundwater.Tractor.ES", category: "xpc")
-private let xpcServiceName = "group.com.jacobgroundwater.Tractor.ES"
+// `endpointsecurityd` auto-registers each ES sysext's mach service with
+// launchd as `<team-id>.<bundle-id>.xpc`. The team ID prefix is added by
+// the system at sysext activation time — we have to match that exact name.
+private let xpcServiceName = "3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc"
 
 /// XPC protocol: CLI calls these methods on the ES sysext.
 @objc protocol TractorESXPC {

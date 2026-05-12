@@ -1,6 +1,7 @@
 import Foundation
 
-private let esXPCServiceName = "group.com.jacobgroundwater.Tractor.ES"
+// endpointsecurityd auto-registers <team-id>.<bundle-id>.xpc on activation.
+private let esXPCServiceName = "3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc"
 
 /// XPC protocol matching the TractorES sysext's exported interface.
 @objc protocol TractorESXPC {
