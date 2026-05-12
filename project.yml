@@ -43,8 +43,6 @@ targetTemplates:
         CODE_SIGN_ENTITLEMENTS: Sources/Tractor/Tractor.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
         OTHER_LDFLAGS:
-          - "-lEndpointSecurity"
-          - "-lbsm"
           - "-lsqlite3"
           - "-framework"
           - "NetworkExtension"
@@ -53,10 +51,7 @@ targetTemplates:
     entitlements:
       path: Sources/Tractor/Tractor.entitlements
       properties:
-        com.apple.developer.endpoint-security.client: true
         com.apple.developer.system-extension.install: true
-        com.apple.developer.networking.networkextension:
-          - app-proxy-provider-systemextension
         com.apple.security.temporary-exception.mach-lookup.global-name:
           - group.com.jacobgroundwater.Tractor
 
@@ -87,12 +82,24 @@ targets:
         product: Crypto
       - package: swift-crypto
         product: _CryptoExtras
+    entitlements:
+      path: Sources/TractorNE/TractorNE.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+        com.apple.developer.endpoint-security.client: true
+        com.apple.developer.system-extension.install: true
+        com.apple.developer.networking.networkextension:
+          - app-proxy-provider-systemextension
+        com.apple.security.application-groups:
+          - group.com.jacobgroundwater.Tractor
     info:
       path: Sources/TractorNE/Info.plist
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.8.0"
-        CFBundleVersion: "145"
+        CFBundleVersion: "146"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -109,6 +116,9 @@ targets:
         SKIP_INSTALL: "YES"
         WRAPPER_EXTENSION: systemextension
         MACH_O_TYPE: mh_execute
+        OTHER_LDFLAGS:
+          - "-lEndpointSecurity"
+          - "-lbsm"
       configs:
         Debug:
           PROVISIONING_PROFILE_SPECIFIER: ""
@@ -158,10 +168,7 @@ targets:
     entitlements:
       path: Sources/Tractor/TractorApp.entitlements
       properties:
-        com.apple.developer.endpoint-security.client: true
         com.apple.developer.system-extension.install: true
-        com.apple.developer.networking.networkextension:
-          - app-proxy-provider-systemextension
         com.apple.security.application-groups:
           - group.com.jacobgroundwater.Tractor
     info:
@@ -189,8 +196,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor
         INFOPLIST_FILE: Sources/Tractor/Info.plist
         OTHER_LDFLAGS:
-          - "-lEndpointSecurity"
-          - "-lbsm"
           - "-lsqlite3"
           - "-framework"
           - "NetworkExtension"

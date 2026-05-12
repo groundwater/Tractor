@@ -8,7 +8,6 @@ private let KEY_MOUSE: Int32 = 0o631
 
 /// Globals for signal-safe cleanup
 private var activeTUI: TUI?
-private var activeESClient: ESClient?
 private var activeInputSource: DispatchSourceTimer?
 private var activeSQLiteLog: SQLiteLog?
 private var activeFlowClient: FlowXPCClient?
@@ -16,10 +15,9 @@ private var activeFlowClient: FlowXPCClient?
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
-    activeESClient?.stop()
     activeSQLiteLog?.close()
     // Close the XPC connection — the sysext detects the disconnect
-    // and clears its watch list, stopping all interception.
+    // and stops the ES daemon, clearing tracked PIDs.
     activeFlowClient?.stop()
     activeFlowClient = nil
     if !message.isEmpty {
@@ -169,27 +167,68 @@ struct Trace: ParsableCommand {
             }
         }
 
-        // Start ES client
-        let esClient = ESClient(tree: tree, sink: sink)
+        // ES events arrive via XPC from the sysext; FlowXPCClient is the
+        // single transport for both ES and NE flow events.
+        let flowClient = FlowXPCClient(sink: sink)
+        activeFlowClient = flowClient
+        activeTUI = tui
 
-        // Build initial patterns from all trackers
-        if let t = tui {
-            esClient.updatePatterns(trackers: t.trackerGroups)
-            // Wire up dynamic pattern updates when trackers change
-            t.onTrackersChanged = { [weak esClient] trackers in
-                esClient?.updatePatterns(trackers: trackers)
+        // ES exec → mirror into local ProcessTree and feed the sink (TUI + SQLite + JSON)
+        flowClient.onExec = { [weak tree, weak tui] pid, ppid, process, argv, user in
+            tree?.trackIfChild(pid: pid, ppid: ppid)
+            tree?.addRoots([pid])
+            if let t = tui {
+                t.inheritGroupMembership(child: pid, parent: ppid)
+                let name = (process as NSString).lastPathComponent
+                t.matchProcessToGroups(pid: pid, name: name, path: process)
             }
-            // Network connections are now reported via the NE proxy through
-            // FlowSocket → EventSink.onConnect, which reaches both TUI and SQLiteLog
-        } else {
-            // JSON mode — set patterns directly
-            esClient.tracePatterns = name.map { $0.lowercased() }
-            esClient.pathPatterns = path
+            sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
+        }
+        flowClient.onFileOp = { type, pid, ppid, process, user, details in
+            sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
+        }
+        flowClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
+            sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
+            tree?.remove(pid)
         }
 
-        // Store refs for signal handler cleanup
-        activeTUI = tui
-        activeESClient = esClient
+        // Optional MITM setup before starting — we have to set up the exported
+        // MITMProxy object on the XPC connection before resume.
+        if mitm {
+            let caDir = TrustCA.caDir
+            let caCertPath = TrustCA.caCertPath
+            let caKeyPath = TrustCA.caKeyPath
+            guard let certPEM = try? String(contentsOfFile: caCertPath, encoding: .utf8),
+                  let keyPEM = try? String(contentsOfFile: caKeyPath, encoding: .utf8) else {
+                fatalError("Tractor: MITM requires CA files at \(caDir). Run 'sudo tractor trust-ca' first.")
+            }
+            flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
+        }
+
+        flowClient.start()
+
+        // Seed the sysext's ES daemon with initial tracked PIDs and patterns.
+        let initialNames = tui?.trackerGroups.compactMap { $0.kind == .name ? $0.value : nil }
+            ?? name
+        let initialPaths = tui?.trackerGroups.compactMap { $0.kind == .path ? $0.value : nil }
+            ?? path
+        flowClient.setTrackerPatterns(names: initialNames, paths: initialPaths)
+        flowClient.addTrackedPids(tree.snapshot)
+
+        // Push pattern updates whenever the TUI's tracker groups change.
+        if let t = tui {
+            t.onTrackersChanged = { [weak flowClient] trackers in
+                let names = trackers.compactMap { $0.kind == .name ? $0.value : nil }
+                let paths = trackers.compactMap { $0.kind == .path ? $0.value : nil }
+                flowClient?.setTrackerPatterns(names: names, paths: paths)
+                let pids: [Int32] = trackers.compactMap {
+                    $0.kind == .pid ? Int32($0.value) : nil
+                }
+                if !pids.isEmpty {
+                    flowClient?.addTrackedPids(Set(pids))
+                }
+            }
+        }
 
         signal(SIGINT, SIG_IGN)
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -198,35 +237,13 @@ struct Trace: ParsableCommand {
         }
         sigintSource.resume()
 
-        do {
-            try esClient.start()
-        } catch {
-            tui?.stop()
-            throw error
-        }
-
         if json {
             fputs("Tractor: tracing started. JSON output on stdout.\n", stderr)
         }
 
-        // Activate network extension if requested (--mitm implies --net)
+        // Activate network extension flow interception (--mitm implies --net).
         if net || mitm {
-            let flowClient = FlowXPCClient(sink: sink)
-            activeFlowClient = flowClient
-
-            if mitm {
-                // Read CA PEM files from the app group container (generated by trust-ca)
-                let caDir = TrustCA.caDir
-                let caCertPath = TrustCA.caCertPath
-                let caKeyPath = TrustCA.caKeyPath
-                guard let certPEM = try? String(contentsOfFile: caCertPath, encoding: .utf8),
-                      let keyPEM = try? String(contentsOfFile: caKeyPath, encoding: .utf8) else {
-                    fatalError("Tractor: MITM requires CA files at \(caDir). Run 'sudo tractor trust-ca' first.")
-                }
-                flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
-            }
-
-            flowClient.start()
+            flowClient.setNetworkWatchingEnabled(true)
 
             if mitm {
                 // Give XPC a moment to connect, then tell sysext to enable MITM
@@ -250,20 +267,11 @@ struct Trace: ParsableCommand {
                     let dir: TrafficDirection = direction == "up" ? .up : .down
                     t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
                                     direction: dir, data: data, flowID: flowID)
-                    // SQLite log gets a best-effort text representation
                     let logContent = String(data: data, encoding: .utf8)
                         ?? String(data: data, encoding: .isoLatin1) ?? "<binary>"
                     activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
                                                 direction: direction, content: logContent)
                 }
-                // Local endpoint not available from NEAppProxyTCPFlow API
-            }
-
-            flowClient.updateWatchList(tree.snapshot)
-
-            esClient.onBeforeAllow = { [weak flowClient, weak tree] pid in
-                guard let fc = flowClient, let t = tree else { return }
-                fc.updateWatchList(t.snapshot)
             }
         }
 
