@@ -37,26 +37,39 @@ final class ProxyManager: NSObject {
             }
             fputs("Tractor: found \(managers?.count ?? 0) configs\n", stderr)
 
-            // Always remove and recreate. The saved config pins the provider's
-            // designated requirement (specifically the cdhash) at save time;
-            // when we re-sign the sysext on rebuild the cdhash changes and the
-            // pinned DR no longer matches the binary. `nesessionmanager` then
-            // rejects startProxy with "Plugin was disabled". Recreating forces
-            // the DR to be derived from the current binary's signature.
-            let managers = managers ?? []
-            let group = DispatchGroup()
-            for m in managers {
-                group.enter()
-                m.removeFromPreferences { err in
-                    if let err = err {
-                        fputs("Tractor: removeFromPreferences error: \(err)\n", stderr)
+            // Reuse the existing config if there is one — saving a fresh config
+            // triggers a "Tractor would like to add proxy configurations" prompt
+            // every time. Updating an existing one doesn't re-prompt. If the
+            // existing config has a stale designated requirement (e.g. cdhash
+            // baked in by a previous install), the save below fails and we fall
+            // through to creating a fresh one.
+            if let existing = managers?.first {
+                fputs("Tractor: existing config found, updating...\n", stderr)
+                existing.isEnabled = true
+                existing.isOnDemandEnabled = false
+                existing.saveToPreferences { saveError in
+                    if let saveError = saveError {
+                        fputs("Tractor: update save failed (\(saveError)); recreating\n", stderr)
+                        existing.removeFromPreferences { _ in
+                            self.createFreshProxy(completion: completion)
+                        }
+                        return
                     }
-                    group.leave()
+                    existing.loadFromPreferences { _ in
+                        do {
+                            try (existing.connection as? NETunnelProviderSession)?.startTunnel()
+                            fputs("Tractor: tunnel started\n", stderr)
+                            completion(nil)
+                        } catch {
+                            fputs("Tractor: startTunnel error: \(error)\n", stderr)
+                            completion(error)
+                        }
+                    }
                 }
+                return
             }
-            group.notify(queue: .main) {
-                self.createFreshProxy(completion: completion)
-            }
+
+            self.createFreshProxy(completion: completion)
         }
     }
 
