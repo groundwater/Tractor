@@ -1,5 +1,6 @@
 # Copy to Local.mk and fill in. Local.mk is gitignored.
-# Used by the `make pkg` / `make notarize` / `make dist` targets.
+# Used by the release targets, including `make pkg`, `make notarize`,
+# `make dmg`, `make notarize-dmg`, `make dist`, and `make dist-homebrew`.
 
 # Developer ID Installer identity used to sign the .pkg. Run
 #   security find-identity -v -p basic
