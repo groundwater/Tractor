@@ -2,11 +2,13 @@
 
 <p align="center">
   <img src="icon/Tractor_1024.png" width="192" alt="Tractor icon" />
+<br/>
 </p>
 
-**Know what your AI agents are up to.**
+Tractor is a real-time process monitor for macOS. It traces the full process tree, file activity, and network connections, then presents everything in an interactive terminal UI. 
 
-Tractor is a real-time process monitor for AI coding agents on macOS. It traces an agent's process tree, file activity, and network connections — then presents everything in an interactive terminal UI. Optionally intercept TLS traffic to inspect the actual HTTP requests your agent is making.
+> [!NOTE]
+> Tractor captures all child-processes, including very short-lived subprocesses.
 
 <p align="center">
   <img src="screenshots/01-hero-process-tree.png" width="720" alt="Tractor process tree showing Terminal with nested subprocesses, file activity, and resource usage" />
@@ -14,11 +16,13 @@ Tractor is a real-time process monitor for AI coding agents on macOS. It traces 
 
 ## Why?
 
-AI coding agents spawn dozens of subprocesses, write to files across your filesystem, and make network requests — all in seconds. Tractor gives you visibility into this activity with low overhead.
+With AI and agent development, thousands of processes can get spawned during a session without human oversight.
+
+Tractor creates a full audit log of agent activity, for archive and analysis.
 
 ## Features
 
-**Process tree** — live hierarchical view of all traced processes with PID, runtime, CPU, memory, and full command line. Auto-discovers new agent instances and captures their entire subtree.
+**Process tree** — live hierarchical view of all traced processes with PID, runtime, CPU, memory, and full command line. Auto-discovers matching processes and captures 100% of their child processes, no matter how short-lived.
 
 **Process inspection** — full path, working directory, arguments, environment variables, and resource usage.
 
@@ -72,29 +76,56 @@ AI coding agents spawn dozens of subprocesses, write to files across your filesy
 
 ## Quick Start
 
+Install a signed, notarized release from the [Releases page](https://github.com/groundwater/Tractor/releases) and open the included `.pkg`, then activate the required system components:
+
+```bash
+sudo tractor activate endpoint-security
+sudo tractor activate network-extension
+```
+
+Then start tracing:
+
+```bash
+tractor trace --name Terminal
+```
+
+> [!NOTE]
+> Tractor's release builds are signed, provisioned with the required Endpoint Security entitlement, and notarized. You do not need to disable SIP to use the packaged release build.
+
+If you want to build from source for local development:
+
 ```bash
 git clone https://github.com/groundwater/Tractor.git
 cd Tractor
 make debug
-sudo .build/Debug/Tractor trace --name Terminal
+sudo .build/Debug/Tractor activate endpoint-security
+.build/Debug/Tractor trace --name Terminal
 ```
 
-> [!WARNING]
-> Tractor uses Apple's Endpoint Security framework, which requires SIP to be disabled for unsigned builds. See [Development Setup](#development-setup) for details.
-
 Requires Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and macOS 15+.
+
+> [!TIP]
+> Tractor is especially useful for agent workflows where one top-level command fans out into many subprocesses. For example, to trace Claude and inspect its HTTPS traffic:
+>
+> ```bash
+> tractor trace --name claude --mitm
+> ```
 
 ### TLS Interception Setup
 
 ```bash
-make install && make activate
-sudo tractor trust-ca
-sudo tractor trace --name claude --mitm
+make install
+sudo tractor activate endpoint-security
+sudo tractor activate network-extension
+sudo tractor activate certificate-root
+tractor trace --name claude --mitm
 ```
 
 ## Development Setup
 
-Tractor requires special entitlements for Endpoint Security. For local development, use a macOS VM with SIP disabled.
+Tractor uses Apple's Endpoint Security framework, which is gated by a restricted entitlement. The packaged release build is signed, provisioned, and notarized correctly, so it runs normally on macOS.
+
+For local development, `make debug` produces an ad-hoc signed build for iteration. Because that build does not ship with the production signing and provisioning chain, you should use a macOS VM with SIP disabled.
 
 <details>
 <summary>VM setup</summary>
@@ -106,7 +137,7 @@ Using [GhostVM](https://github.com/groundwater/GhostVM) or any macOS VM, boot in
 <details>
 <summary>Production distribution</summary>
 
-Requires a provisioning profile with the Endpoint Security entitlement, Developer ID signing, hardened runtime, notarization, and Full Disk Access.
+Production distribution requires a provisioning profile with the Endpoint Security entitlement, Developer ID signing, hardened runtime, notarization, and Full Disk Access.
 
 </details>
 
@@ -114,10 +145,9 @@ Requires a provisioning profile with the Endpoint Security entitlement, Develope
 
 | Target | Description |
 |--------|-------------|
-| `make debug` | Unsigned Debug binary (requires SIP disabled) |
+| `make debug` | Ad-hoc signed Debug build for local development (use with SIP disabled in a VM) |
 | `make release` | Release .app bundle with embedded system extension |
 | `make install` | Install to `/Applications/Tractor.app` |
-| `make activate` | Activate the network system extension |
 
 ## License
 

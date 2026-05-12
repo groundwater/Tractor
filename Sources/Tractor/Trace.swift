@@ -43,6 +43,9 @@ struct Trace: ParsableCommand {
     @Option(name: .long, help: "Exact executable path to trace (repeatable)")
     var path: [String] = []
 
+    @Option(name: .long, help: "Spawn a command and trace it (repeatable). Shell metacharacters trigger /bin/sh -c.")
+    var exec: [String] = []
+
     @Argument(help: "PIDs to trace (all remaining arguments are treated as PIDs until --)")
     var pids: [Int32] = []
 
@@ -52,10 +55,10 @@ struct Trace: ParsableCommand {
     @Option(name: .long, help: "Auto-expand criteria (e.g. file:cud,proc:e,net:crw)")
     var expand: String?
 
-    @Flag(name: .long, help: "Log events to a SQLite database in the current directory")
+    @Flag(name: .long, help: "Log events to Tractor's shared SQLite database in the app group container")
     var log: Bool = false
 
-    @Option(name: .long, help: "Path to SQLite database file (implies --log)")
+    @Option(name: .long, help: "Explicit SQLite database path (implies --log)")
     var logFile: String?
 
     @Flag(name: .long, help: "Activate network extension to intercept all TCP/UDP flows")
@@ -65,9 +68,13 @@ struct Trace: ParsableCommand {
     var mitm: Bool = false
 
     func run() throws {
-        guard !name.isEmpty || !pid.isEmpty || !path.isEmpty else {
-            throw ValidationError("Provide at least one --name, --pid, or --path")
+        guard !name.isEmpty || !pid.isEmpty || !path.isEmpty || !pids.isEmpty || !exec.isEmpty else {
+            throw ValidationError("Provide at least one --name, --pid, --path, or --exec")
         }
+        guard ESXPCClient.isAvailable() else {
+            throw ValidationError("Endpoint Security extension is not active. Run 'sudo tractor activate endpoint-security', approve it in System Settings if prompted, then retry.")
+        }
+        let mitmCAPaths = mitm ? try TrustCA.requiredExistingCAPaths() : nil
 
         let tree = ProcessTree()
 
@@ -77,6 +84,7 @@ struct Trace: ParsableCommand {
         for p in pid { labels.append("PID \(p)") }
         for p in pids { labels.append("PID \(p)") }
         for p in path { labels.append(p) }
+        for cmd in exec { labels.append(cmd) }
         let agentLabel = labels.joined(separator: ", ")
 
         // Create sink: TUI or JSON
@@ -105,11 +113,7 @@ struct Trace: ParsableCommand {
             if let explicit = logFile {
                 dbPath = explicit
             } else {
-                let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = [.withInternetDateTime]
-                let stamp = formatter.string(from: Date())
-                    .replacingOccurrences(of: ":", with: "-")
-                dbPath = "trace-\(stamp).db"
+                dbPath = try TractorPaths.sharedLogPath()
             }
             let sqliteLog = try SQLiteLog(path: dbPath)
             activeSQLiteLog = sqliteLog
@@ -173,6 +177,12 @@ struct Trace: ParsableCommand {
         let esClient = ESXPCClient()
         activeESClient = esClient
         activeTUI = tui
+        esClient.onConnectionError = { error in
+            exitAfterRestoringTerminal(
+                message: "Tractor: lost Endpoint Security connection: \(error.localizedDescription)",
+                code: 1
+            )
+        }
 
         // ES exec → mirror into local ProcessTree and feed the sink (TUI + SQLite + JSON)
         esClient.onExec = { [weak tree, weak tui] pid, ppid, process, argv, user in
@@ -200,6 +210,24 @@ struct Trace: ParsableCommand {
         )
         esClient.addTrackedPids(tree.snapshot)
 
+        // --exec: fork each command, register its PID with the sysext, then release
+        // it to call execve. The pipe gate guarantees the sysext sees AUTH_EXEC for
+        // a PID that's already in its tracked set.
+        for cmd in exec {
+            let argv = SpawnedChild.argv(for: cmd)
+            guard !argv.isEmpty else {
+                throw ValidationError("--exec value is empty")
+            }
+            let pending = try SpawnedChild.fork(argv: argv, stdio: .devNull)
+            tree.addRoots([pending.pid])
+            if let t = tui {
+                t.addTrackerGroup(kind: .exec, value: "\(pending.pid)", label: cmd)
+            }
+            esClient.addTrackedPidsSync([pending.pid])
+            pending.release()
+            fputs("Tractor: spawned [\(pending.pid)] \(cmd)\n", stderr)
+        }
+
         // Push pattern updates whenever the TUI's tracker groups change.
         if let t = tui {
             t.onTrackersChanged = { [weak esClient] trackers in
@@ -224,53 +252,71 @@ struct Trace: ParsableCommand {
 
         // Activate network extension flow interception (--mitm implies --net).
         if net || mitm {
-            let flowClient = FlowXPCClient(sink: sink)
-            activeFlowClient = flowClient
+            if FlowXPCClient.isAvailable() {
+                let flowClient = FlowXPCClient(sink: sink)
+                activeFlowClient = flowClient
 
-            // Set up MITM exported object BEFORE start (NSXPCConnection requires
-            // exportedObject to be configured pre-resume).
-            if mitm {
-                guard let certPEM = try? String(contentsOfFile: TrustCA.caCertPath, encoding: .utf8),
-                      let keyPEM = try? String(contentsOfFile: TrustCA.caKeyPath, encoding: .utf8) else {
-                    fatalError("Tractor: MITM requires CA files at \(TrustCA.caDir). Run 'sudo tractor trust-ca' first.")
+                // Set up MITM exported object BEFORE start (NSXPCConnection requires
+                // exportedObject to be configured pre-resume).
+                if mitm {
+                    guard let caPaths = mitmCAPaths else {
+                        throw ValidationError("MITM requires CA files. Run 'sudo tractor activate certificate-root' first.")
+                    }
+                    let certPEM = try String(contentsOfFile: caPaths.certPath, encoding: .utf8)
+                    let keyPEM = try String(contentsOfFile: caPaths.keyPath, encoding: .utf8)
+                    flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
                 }
-                flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
-            }
 
-            flowClient.start()
-            flowClient.updateWatchList(tree.snapshot)
+                flowClient.onConnectionError = { error in
+                    fputs("Tractor: network extension unavailable, continuing without network capture (\(error.localizedDescription)).\n", stderr)
+                    activeFlowClient?.stop()
+                    activeFlowClient = nil
+                    esClient.onTrackedPidsChanged = nil
+                }
 
-            // Mirror ES daemon's tracked-PID set into the NE proxy's watch list.
-            esClient.onTrackedPidsChanged = { [weak flowClient] pids in
-                flowClient?.updateWatchList(pids)
-            }
+                flowClient.start()
+                flowClient.updateWatchList(tree.snapshot)
 
-            if mitm {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    flowClient.setMITMEnabled(true)
-                    if let t = tui {
-                        t.flash("MITM enabled — intercepting TLS on port 443", duration: 5.0)
+                // Mirror ES daemon's tracked-PID set into the NE proxy's watch list.
+                esClient.onTrackedPidsChanged = { [weak flowClient] pids in
+                    flowClient?.updateWatchList(pids)
+                }
+
+                if mitm {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        flowClient.setMITMEnabled(true)
+                        if let t = tui {
+                            t.flash("MITM enabled — intercepting TLS on port 443", duration: 5.0)
+                        }
                     }
                 }
-            }
 
-            if let t = tui {
-                flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn, flowID in
-                    t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
-                                            txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn), flowID: flowID)
+                if let t = tui {
+                    flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn, flowID in
+                        t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
+                                                txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn), flowID: flowID)
+                    }
+                    flowClient.onConnectionClosed = { pid, host, port, flowID in
+                        t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
+                    }
+                    flowClient.onTraffic = { pid, host, port, direction, data, flowID in
+                        let dir: TrafficDirection = direction == "up" ? .up : .down
+                        t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
+                                        direction: dir, data: data, flowID: flowID)
+                        let logContent = String(data: data, encoding: .utf8)
+                            ?? String(data: data, encoding: .isoLatin1) ?? "<binary>"
+                        activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
+                                                    direction: direction, content: logContent)
+                    }
                 }
-                flowClient.onConnectionClosed = { pid, host, port, flowID in
-                    t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
+            } else {
+                let msg = mitm
+                    ? "Tractor: network extension is not active; continuing without network capture or MITM. Run 'sudo tractor activate network-extension' to enable it."
+                    : "Tractor: network extension is not active; continuing without network capture. Run 'sudo tractor activate network-extension' to enable it."
+                if let t = tui {
+                    t.flash(msg, duration: 5.0)
                 }
-                flowClient.onTraffic = { pid, host, port, direction, data, flowID in
-                    let dir: TrafficDirection = direction == "up" ? .up : .down
-                    t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
-                                    direction: dir, data: data, flowID: flowID)
-                    let logContent = String(data: data, encoding: .utf8)
-                        ?? String(data: data, encoding: .isoLatin1) ?? "<binary>"
-                    activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
-                                                direction: direction, content: logContent)
-                }
+                fputs("\(msg)\n", stderr)
             }
         }
 
@@ -431,7 +477,7 @@ private func findPidsForTrackerGroup(_ group: TrackerGroup) -> [pid_t] {
     switch group.kind {
     case .name:
         return findProcessesByName(group.value)
-    case .pid:
+    case .pid, .exec:
         if let p = Int32(group.value), p > 0 { return [p] }
         return []
     case .path:

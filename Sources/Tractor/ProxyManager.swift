@@ -2,29 +2,45 @@ import Foundation
 import NetworkExtension
 import SystemExtensions
 
-/// Manages both Tractor system extensions' lifecycles (ES + NE).
-/// Used by the `activate` subcommand.
+enum TractorSystemExtension: String {
+    case endpointSecurity = "com.jacobgroundwater.Tractor.ES"
+    case networkExtension = "com.jacobgroundwater.Tractor.NE"
+
+    var approvalName: String {
+        switch self {
+        case .endpointSecurity:
+            return "Endpoint Security extension"
+        case .networkExtension:
+            return "network extension"
+        }
+    }
+}
+
+/// Manages Tractor system extension activation and the NE tunnel lifecycle.
 final class ProxyManager: NSObject {
     static let esBundleID = "com.jacobgroundwater.Tractor.ES"
     static let neBundleID = "com.jacobgroundwater.Tractor.NE"
 
     private var activationCompletion: ((Error?) -> Void)?
-    /// Tracks which sysexts have finished activation; once both are done we
-    /// proceed to enable the NE tunnel and call the completion.
-    private var pending: Set<String> = []
+    private var extensionToActivate: TractorSystemExtension?
 
-    /// Activate both system extensions and start the NE proxy tunnel.
-    func activate(completion: @escaping (Error?) -> Void) {
+    func activateES(completion: @escaping (Error?) -> Void) {
+        activate(.endpointSecurity, completion: completion)
+    }
+
+    func activateNetwork(completion: @escaping (Error?) -> Void) {
+        activate(.networkExtension, completion: completion)
+    }
+
+    private func activate(_ sysext: TractorSystemExtension, completion: @escaping (Error?) -> Void) {
         activationCompletion = completion
-        pending = [Self.esBundleID, Self.neBundleID]
-        for bundleID in pending {
-            let request = OSSystemExtensionRequest.activationRequest(
-                forExtensionWithIdentifier: bundleID,
-                queue: .main
-            )
-            request.delegate = self
-            OSSystemExtensionManager.shared.submitRequest(request)
-        }
+        extensionToActivate = sysext
+        let request = OSSystemExtensionRequest.activationRequest(
+            forExtensionWithIdentifier: sysext.rawValue,
+            queue: .main
+        )
+        request.delegate = self
+        OSSystemExtensionManager.shared.submitRequest(request)
     }
 
     private func enableProxy(completion: @escaping (Error?) -> Void) {
@@ -120,10 +136,17 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        pending.remove(request.identifier)
-        guard pending.isEmpty else { return }
-        // Both sysexts done — now bring up the NE tunnel.
-        retryEnableProxy(attemptsLeft: 5)
+        guard let sysext = extensionToActivate else {
+            activationCompletion?(nil)
+            activationCompletion = nil
+            return
+        }
+        if sysext == .networkExtension {
+            retryEnableProxy(attemptsLeft: 5)
+            return
+        }
+        activationCompletion?(nil)
+        activationCompletion = nil
     }
 
     private func retryEnableProxy(attemptsLeft: Int) {
@@ -152,7 +175,8 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        fputs("Tractor: approve network extension in System Settings\n", stderr)
+        let name = extensionToActivate?.approvalName ?? "system extension"
+        fputs("Tractor: approve \(name) in System Settings\n", stderr)
     }
 
     func request(_ request: OSSystemExtensionRequest,

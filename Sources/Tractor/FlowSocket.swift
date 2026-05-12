@@ -31,9 +31,30 @@ final class FlowXPCClient {
     var onBytesUpdate: ((pid_t, String, UInt16, Int64, Int64, UInt64) -> Void)?
     var onConnectionClosed: ((pid_t, String, UInt16, UInt64) -> Void)?
     var onTraffic: ((pid_t, String, UInt16, String, Data, UInt64) -> Void)?
+    var onConnectionError: ((Error) -> Void)?
 
     init(sink: EventSink) {
         self.sink = sink
+    }
+
+    static func isAvailable(timeout: TimeInterval = 1.0) -> Bool {
+        let sem = DispatchSemaphore(value: 0)
+        var available = false
+
+        let conn = NSXPCConnection(machServiceName: xpcServiceName, options: .privileged)
+        conn.remoteObjectInterface = NSXPCInterface(with: TractorNEXPC.self)
+        conn.resume()
+
+        let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
+            sem.signal()
+        } as? TractorNEXPC
+        proxy?.pollEvents { _ in
+            available = true
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout)
+        conn.invalidate()
+        return available
     }
 
     func start() {
@@ -45,11 +66,18 @@ final class FlowXPCClient {
         if let mitmProxy = mitmProxy {
             conn.exportedObject = mitmProxy
         }
-        conn.invalidationHandler = { /* XPC invalidated — normal on shutdown */ }
+        conn.invalidationHandler = { [weak self] in
+            let err = NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSXPCConnectionInvalid,
+                userInfo: [NSLocalizedDescriptionKey: "Network extension connection was invalidated."]
+            )
+            self?.onConnectionError?(err)
+        }
         conn.resume()
         connection = conn
-        proxy = conn.remoteObjectProxyWithErrorHandler { error in
-            // Silently retry on next poll
+        proxy = conn.remoteObjectProxyWithErrorHandler { [weak self] error in
+            self?.onConnectionError?(error)
         } as? TractorNEXPC
 
         // Start polling

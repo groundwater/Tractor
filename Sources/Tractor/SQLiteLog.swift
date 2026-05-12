@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// EventSink that writes events to a SQLite database
@@ -28,12 +29,15 @@ final class SQLiteLog: EventSink {
         let ownerUid = ProcessInfo.processInfo.environment["SUDO_UID"].flatMap { uid_t($0) } ?? getuid()
         let ownerGid = ProcessInfo.processInfo.environment["SUDO_GID"].flatMap { gid_t($0) } ?? getgid()
         chown(path, ownerUid, ownerGid)
+        chmod(path, S_IRUSR | S_IWUSR)
 
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nil, nil, nil)
 
         // WAL creates sidecar files — own them too
         chown(path + "-wal", ownerUid, ownerGid)
         chown(path + "-shm", ownerUid, ownerGid)
+        chmod(path + "-wal", S_IRUSR | S_IWUSR)
+        chmod(path + "-shm", S_IRUSR | S_IWUSR)
 
         let create = """
             CREATE TABLE IF NOT EXISTS events (

@@ -10,6 +10,9 @@ private let xpcServiceName = "3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc"
 /// XPC protocol: CLI calls these methods on the ES sysext.
 @objc protocol TractorESXPC {
     func addTrackedPids(_ pids: [Int32])
+    /// Synchronous variant — used by `--exec` so we don't release the spawned
+    /// child until the sysext has the pid in its tracked set.
+    func addTrackedPidsSync(_ pids: [Int32], reply: @escaping () -> Void)
     func setTrackerPatterns(names: [String], paths: [String])
     func pollEvents(reply: @escaping (Data) -> Void)
     /// CLI subscribes to PID-set changes so it can mirror them into the NE
@@ -75,6 +78,11 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
 
     func addTrackedPids(_ pids: [Int32]) {
         esDaemon?.addTrackedPids(pids)
+    }
+
+    func addTrackedPidsSync(_ pids: [Int32], reply: @escaping () -> Void) {
+        esDaemon?.addTrackedPids(pids)
+        reply()
     }
 
     func setTrackerPatterns(names: [String], paths: [String]) {

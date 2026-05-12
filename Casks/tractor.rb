@@ -1,6 +1,6 @@
 cask "tractor" do
-  version "0.1.0"
-  sha256 "674d624db6c473a5922a67e292d967dc5cf3db103d4d78ff7dcbed541dd93d0e"
+  version "0.2.0"
+  sha256 "REPLACE_WITH_0_2_0_PKG_SHA256"
 
   url "https://github.com/groundwater/Tractor/releases/download/v#{version}/Tractor-#{version}.pkg",
       verified: "github.com/groundwater/Tractor/"
@@ -27,9 +27,13 @@ cask "tractor" do
   ]
 
   caveats <<~EOS
-    Tractor installs two system extensions (TractorES + TractorNE).
-    Approve them once in System Settings → Privacy & Security, then run:
+    Tractor can activate two system extensions after install:
+      1. Endpoint Security (required for `tractor trace`)
+      2. Network Extension (optional, for `--net` / `--mitm`)
 
-      sudo tractor activate
+    Explicit post-install steps:
+
+      sudo tractor activate endpoint-security
+      sudo tractor activate network-extension
   EOS
 end

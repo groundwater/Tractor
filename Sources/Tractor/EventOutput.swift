@@ -10,7 +10,7 @@ struct AgentEvent: Encodable {
     let details: [String: String]
 }
 
-/// Thread-safe JSON-line output to stdout
+/// Thread-safe JSON-line output to stdout (or a file, when `output` is set)
 final class EventOutput: EventSink {
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -25,17 +25,31 @@ final class EventOutput: EventSink {
     }()
 
     private let lock = NSLock()
+    private let output: FileHandle?     // nil = stdout
+
+    init(output: FileHandle? = nil) {
+        self.output = output
+    }
+
+    func close() {
+        if let output = output, output !== FileHandle.standardOutput {
+            try? output.close()
+        }
+    }
 
     func now() -> String {
         dateFormatter.string(from: Date())
     }
 
     private func emit(_ event: AgentEvent) {
-        guard let data = try? encoder.encode(event),
-              let line = String(data: data, encoding: .utf8) else { return }
+        guard var data = try? encoder.encode(event) else { return }
+        data.append(0x0A) // newline
         lock.lock()
-        print(line)
-        fflush(stdout)
+        if let output = output {
+            try? output.write(contentsOf: data)
+        } else {
+            FileHandle.standardOutput.write(data)
+        }
         lock.unlock()
     }
 

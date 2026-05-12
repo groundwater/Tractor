@@ -224,13 +224,15 @@ enum TrackerKind: Equatable {
     case name       // substring match on process name/path
     case pid        // specific PID
     case path       // exact executable path match
+    case exec       // spawned by `--exec` — root is a specific PID, label is the command string
 }
 
 struct TrackerGroup {
     let id: Int
     let kind: TrackerKind
-    let value: String           // the name pattern, PID string, or path
+    let value: String           // for .exec: stringified root PID
     var disclosed: Bool = true
+    var label: String? = nil    // for .exec: the original command string the user typed
 }
 
 // MARK: - Process row model
@@ -1392,8 +1394,8 @@ final class TUI: EventSink {
     // MARK: - Tracker groups
 
     @discardableResult
-    func addTrackerGroup(kind: TrackerKind, value: String) -> TrackerGroup {
-        let group = TrackerGroup(id: nextTrackerGroupId, kind: kind, value: value)
+    func addTrackerGroup(kind: TrackerKind, value: String, label: String? = nil) -> TrackerGroup {
+        let group = TrackerGroup(id: nextTrackerGroupId, kind: kind, value: value, label: label)
         nextTrackerGroupId += 1
         trackerGroups.append(group)
 
@@ -1452,7 +1454,7 @@ final class TUI: EventSink {
         switch group.kind {
         case .name:
             return findProcessesByName(group.value)
-        case .pid:
+        case .pid, .exec:
             if let p = Int32(group.value), p > 0 {
                 return [p]
             }
@@ -1472,7 +1474,7 @@ final class TUI: EventSink {
                 if name.lowercased().contains(lower) || path.lowercased().contains(lower) {
                     pidToGroups[pid, default: []].insert(group.id)
                 }
-            case .pid:
+            case .pid, .exec:
                 if let targetPid = Int32(group.value), targetPid == pid {
                     pidToGroups[pid, default: []].insert(group.id)
                 }
@@ -1540,6 +1542,8 @@ final class TUI: EventSink {
                     let path = pathLen > 0 ? String(cString: pathBuf) : name
                     if !search.isEmpty && !path.lowercased().contains(search.lowercased()) { continue }
                     trackModalItems.append((name: "\(path) (\(p))", pid: p, isAgent: false))
+                case .exec:
+                    continue  // .exec is only created by the --exec CLI flag, not selectable here
                 }
             }
         }
@@ -1570,6 +1574,7 @@ final class TUI: EventSink {
             case .name: trackModalMode = .pid
             case .pid:  trackModalMode = .path
             case .path: trackModalMode = .name
+            case .exec: trackModalMode = .name
             }
             buildTrackList()
             trackModalIndex = -1
@@ -4310,15 +4315,17 @@ final class TUI: EventSink {
         guard let group = trackerGroups.first(where: { $0.id == groupId }) else { return y }
         let disc = group.disclosed ? "\u{25BC}" : "\u{25B6}"
         let kindLabel: String
+        let valueLabel: String
         switch group.kind {
-        case .name: kindLabel = "Name"
-        case .pid:  kindLabel = "PID"
-        case .path: kindLabel = "Path"
+        case .name: kindLabel = "Name"; valueLabel = group.value
+        case .pid:  kindLabel = "PID";  valueLabel = group.value
+        case .path: kindLabel = "Path"; valueLabel = group.value
+        case .exec: kindLabel = "Exec"; valueLabel = group.label ?? group.value
         }
 
         let processCount = pidsForGroup(groupId).count
         let countStr = group.disclosed ? "" : "  (\(processCount) processes)"
-        let label = "\(disc) \(kindLabel): \(group.value)\(countStr)"
+        let label = "\(disc) \(kindLabel): \(valueLabel)\(countStr)"
         let padding = max(0, width - label.count)
 
         let headerColor = COLOR_PAIR(TUIColor.header.rawValue) | ATTR_BOLD
@@ -4370,6 +4377,7 @@ final class TUI: EventSink {
         case .name: searchLabel = "Name"
         case .pid:  searchLabel = "PID"
         case .path: searchLabel = "Path"
+        case .exec: searchLabel = "Exec"
         }
         let inputText = "\(searchLabel): \(trackCustomInput)\(cursor)"
         let inputAttr = isInputFocused ? hlAttr : barAttr

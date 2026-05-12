@@ -6,6 +6,7 @@ private let esXPCServiceName = "3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc"
 /// XPC protocol matching the TractorES sysext's exported interface.
 @objc protocol TractorESXPC {
     func addTrackedPids(_ pids: [Int32])
+    func addTrackedPidsSync(_ pids: [Int32], reply: @escaping () -> Void)
     func setTrackerPatterns(names: [String], paths: [String])
     func pollEvents(reply: @escaping (Data) -> Void)
     func pollTrackedPids(reply: @escaping ([Int32]) -> Void)
@@ -29,14 +30,44 @@ final class ESXPCClient {
     var onExit: ((pid_t, pid_t, String, uid_t, Int32) -> Void)?
     /// Called whenever the tracked-PID set changes on the sysext side.
     var onTrackedPidsChanged: ((Set<pid_t>) -> Void)?
+    var onConnectionError: ((Error) -> Void)?
+
+    static func isAvailable(timeout: TimeInterval = 1.0) -> Bool {
+        let sem = DispatchSemaphore(value: 0)
+        var available = false
+
+        let conn = NSXPCConnection(machServiceName: esXPCServiceName, options: .privileged)
+        conn.remoteObjectInterface = NSXPCInterface(with: TractorESXPC.self)
+        conn.resume()
+
+        let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
+            sem.signal()
+        } as? TractorESXPC
+        proxy?.pollTrackedPids { _ in
+            available = true
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout)
+        conn.invalidate()
+        return available
+    }
 
     func start() {
         let conn = NSXPCConnection(machServiceName: esXPCServiceName, options: .privileged)
         conn.remoteObjectInterface = NSXPCInterface(with: TractorESXPC.self)
-        conn.invalidationHandler = { /* normal on shutdown */ }
+        conn.invalidationHandler = { [weak self] in
+            let err = NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSXPCConnectionInvalid,
+                userInfo: [NSLocalizedDescriptionKey: "Endpoint Security extension connection was invalidated."]
+            )
+            self?.onConnectionError?(err)
+        }
         conn.resume()
         connection = conn
-        proxy = conn.remoteObjectProxyWithErrorHandler { _ in } as? TractorESXPC
+        proxy = conn.remoteObjectProxyWithErrorHandler { [weak self] error in
+            self?.onConnectionError?(error)
+        } as? TractorESXPC
 
         let events = DispatchSource.makeTimerSource(queue: .main)
         events.schedule(deadline: .now() + 0.5, repeating: .milliseconds(200))
@@ -61,6 +92,19 @@ final class ESXPCClient {
 
     func addTrackedPids(_ pids: Set<pid_t>) {
         proxy?.addTrackedPids(Array(pids))
+    }
+
+    /// Synchronous variant — blocks until the sysext acknowledges. Used by
+    /// `--exec` to guarantee the child PID is in the tracked set before the
+    /// child calls execve(), so the sysext's AUTH_EXEC handler sees it.
+    func addTrackedPidsSync(_ pids: [pid_t], timeout: TimeInterval = 2.0) {
+        let sem = DispatchSemaphore(value: 0)
+        let syncProxy = connection?.synchronousRemoteObjectProxyWithErrorHandler { _ in
+            sem.signal()
+        } as? TractorESXPC
+        guard let syncProxy = syncProxy else { return }
+        syncProxy.addTrackedPidsSync(pids) { sem.signal() }
+        _ = sem.wait(timeout: .now() + timeout)
     }
 
     func setTrackerPatterns(names: [String], paths: [String]) {
