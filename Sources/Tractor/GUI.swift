@@ -581,19 +581,16 @@ private struct MainView: View {
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 16) {
-                    FilterField(text: $filter, placeholder: "Find")
-                        .frame(width: 200)
-                    Divider()
-                        .frame(height: 18)
-                    Picker("View", selection: $selection) {
-                        Text("Trace").tag(Tab.trace)
-                        Text("Setup").tag(Tab.setup)
-                    }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
+                FilterField(text: $filter, placeholder: "Find")
+                    .frame(width: 200)
+            }
+            ToolbarItem(placement: .principal) {
+                Picker("View", selection: $selection) {
+                    Text("Trace").tag(Tab.trace)
+                    Text("Setup").tag(Tab.setup)
                 }
-                .padding(.horizontal, 16)
+                .pickerStyle(.segmented)
+                .fixedSize()
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
