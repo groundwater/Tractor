@@ -49,6 +49,10 @@ enum TractorGUIEntry {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Find",
+                         action: #selector(AppDelegate.focusFilter(_:)),
+                         keyEquivalent: "f")
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
@@ -109,6 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     @objc func toggleHideExited(_ sender: NSMenuItem) {
         AppPrefs.shared.hideExited.toggle()
+    }
+
+    @MainActor
+    @objc func focusFilter(_ sender: Any?) {
+        NotificationCenter.default.post(name: .focusFilterField, object: nil)
     }
 
     @MainActor
@@ -555,6 +564,7 @@ private struct MainView: View {
     enum Tab: Hashable, CaseIterable { case trace, setup }
     @State private var selection: Tab = .trace
     @State private var filter: String = ""
+    @FocusState private var filterFocused: Bool
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
@@ -564,9 +574,32 @@ private struct MainView: View {
             case .setup: SetupView()
             }
         }
-        .searchable(text: $filter, prompt: "Filter processes")
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                    TextField("Filter processes", text: $filter)
+                        .textFieldStyle(.plain)
+                        .focused($filterFocused)
+                        .frame(minWidth: 160, maxWidth: 240)
+                    if !filter.isEmpty {
+                        Button {
+                            filter = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $selection) {
                     Text("Trace").tag(Tab.trace)
@@ -583,7 +616,14 @@ private struct MainView: View {
                 .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusFilterField)) { _ in
+            filterFocused = true
+        }
     }
+}
+
+extension Notification.Name {
+    static let focusFilterField = Notification.Name("tractor.focusFilterField")
 }
 
 private struct RootView: View {
