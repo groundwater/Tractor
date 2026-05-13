@@ -193,7 +193,7 @@ private struct ProcessTableView: View {
                         .truncationMode(.middle)
                 }
             }
-            .width(min: 160, ideal: 280)
+            .width(min: 160)
             TableColumn("PID") { row in
                 Text(row.pidLabel).foregroundStyle(.secondary)
             }
