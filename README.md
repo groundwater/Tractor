@@ -86,14 +86,7 @@ Tractor creates a full audit log of agent activity, for archive and analysis.
 
 ## Quick Start
 
-Install a signed, notarized release from the [Releases page](https://github.com/groundwater/Tractor/releases) and open the included `.pkg`, then activate the required system components:
-
-```bash
-sudo tractor activate endpoint-security
-sudo tractor activate network-extension
-```
-
-Or install with Homebrew from the dedicated tap, which uses a notarized DMG instead of the privileged `.pkg`:
+Install with Homebrew from the dedicated tap (recommended — also installs the `tractor` CLI):
 
 ```bash
 brew tap groundwater/tractor https://github.com/groundwater/homebrew-tractor
@@ -101,6 +94,8 @@ brew install --cask tractor
 sudo tractor activate endpoint-security
 sudo tractor activate network-extension
 ```
+
+Or download the signed, notarized DMG from the [Releases page](https://github.com/groundwater/Tractor/releases) and drag `Tractor.app` to `/Applications`. The drag-install ships the GUI only; the `tractor` CLI shim at `/usr/local/bin/tractor` is installed by the Homebrew cask. To activate without the CLI, launch the app and use the in-app activation flow.
 
 Enable MITM only if you need it:
 

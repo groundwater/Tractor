@@ -1,12 +1,5 @@
 # Copy to Local.mk and fill in. Local.mk is gitignored.
-# Used by the release targets, including `make pkg`, `make notarize`,
-# `make dmg`, `make notarize-dmg`, `make dist`, and `make dist-homebrew`.
-
-# Developer ID Installer identity used to sign the .pkg. Run
-#   security find-identity -v -p basic
-# and copy the common-name string, e.g.
-#   Developer ID Installer: Your Name (TEAMID)
-INSTALLER_SIGN_IDENTITY =
+# Used by the release targets: `make dmg`, `make notarize-dmg`, `make dist`.
 
 # notarytool keychain profile. Create it once with:
 #   xcrun notarytool store-credentials AC_PASSWORD \

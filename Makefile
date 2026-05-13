@@ -1,7 +1,6 @@
 PROJECT      = Tractor
 BUILD_DIR    = $(CURDIR)/.build
 DIST_DIR     = $(BUILD_DIR)/dist
-PKG_DIR      = $(BUILD_DIR)/pkg
 DMG_DIR      = $(BUILD_DIR)/dmg
 
 VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
@@ -10,16 +9,14 @@ DEV_ID_APP    := $(shell security find-identity -v -p codesigning 2>/dev/null | 
 ARCHIVE_PATH   = $(BUILD_DIR)/Tractor.xcarchive
 EXPORT_DIR     = $(BUILD_DIR)/Release
 APP_BUILT      = $(EXPORT_DIR)/Tractor.app
-PKG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).pkg
 DMG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).dmg
 
 # Makefile-only release config (signing identity, notarytool profile).
 # See Local.mk.example. Optional for `make debug` / `make release`.
 -include Local.mk
 
-.PHONY: debug release pkg pkg-from-release notarize dmg dmg-from-release \
-        notarize-dmg dist dist-homebrew clean preflight-release preflight-pkg \
-        preflight-dmg preflight-notarize bump-sysext-version ensure-local-config
+.PHONY: debug release dmg dmg-from-release notarize-dmg dist clean \
+        preflight-release preflight-dmg bump-sysext-version ensure-local-config
 
 # Auto-create Local.xcconfig from the example if it's missing so xcodegen
 # doesn't fail for contributors who only want to run `make debug`.
@@ -134,43 +131,13 @@ release: preflight-release bump-sysext-version
 	@echo "Release app: $(APP_BUILT)"
 	@codesign -dv --verbose=2 "$(APP_BUILT)" 2>&1 | grep -E "Authority|TeamIdentifier|Runtime|flags" || true
 
-preflight-pkg:
-	@test -n "$(INSTALLER_SIGN_IDENTITY)" \
-		|| { echo "ERROR: INSTALLER_SIGN_IDENTITY is not set (see Local.mk.example)."; exit 1; }
-	@security find-identity -v -p basic | grep -q "Developer ID Installer" \
-		|| { echo "ERROR: no 'Developer ID Installer' identity in keychain."; exit 1; }
-
-# Pkg: signed .pkg installer wrapping the Release .app
-pkg: release pkg-from-release
-
-pkg-from-release: preflight-pkg
-	@test -d "$(APP_BUILT)" \
-		|| { echo "ERROR: $(APP_BUILT) not found — run 'make release' first."; exit 1; }
-	rm -rf "$(PKG_DIR)"
-	mkdir -p "$(PKG_DIR)/payload/Library/Application Support/Tractor"
-	mkdir -p "$(DIST_DIR)"
-	cp -R "$(APP_BUILT)" "$(PKG_DIR)/payload/Library/Application Support/Tractor/"
-	sed -e 's/@VERSION@/$(VERSION)/g' pkg/distribution.xml.in > "$(PKG_DIR)/distribution.xml"
-	pkgbuild --root "$(PKG_DIR)/payload" \
-		--scripts pkg/scripts \
-		--identifier com.jacobgroundwater.Tractor \
-		--version $(VERSION) \
-		--install-location / \
-		"$(PKG_DIR)/Tractor-component.pkg"
-	productbuild --distribution "$(PKG_DIR)/distribution.xml" \
-		--package-path "$(PKG_DIR)" \
-		--sign "$(INSTALLER_SIGN_IDENTITY)" \
-		--timestamp \
-		"$(PKG_OUT)"
-	@echo ""
-	@echo "Signed pkg: $(PKG_OUT)"
-	@pkgutil --check-signature "$(PKG_OUT)" | head -8
-
 preflight-dmg:
 	@test -d "$(APP_BUILT)" \
 		|| { echo "ERROR: $(APP_BUILT) not found — run 'make release' first."; exit 1; }
 
-# Dmg: Homebrew-friendly disk image containing the Release .app
+# Dmg: drag-install disk image containing the Release .app + /Applications symlink.
+# This is the single distribution artifact — Homebrew cask installs from the
+# same DMG and symlinks `tractor` directly at Contents/Resources/tractor.
 dmg: release dmg-from-release
 
 dmg-from-release: preflight-dmg
@@ -178,28 +145,13 @@ dmg-from-release: preflight-dmg
 	mkdir -p "$(DMG_DIR)"
 	mkdir -p "$(DIST_DIR)"
 	cp -R "$(APP_BUILT)" "$(DMG_DIR)/Tractor.app"
+	ln -s /Applications "$(DMG_DIR)/Applications"
 	hdiutil create -volname "Tractor" \
 		-srcfolder "$(DMG_DIR)" \
 		-ov -format UDZO \
 		"$(DMG_OUT)"
 	@echo ""
 	@echo "Unsigned dmg: $(DMG_OUT)"
-
-preflight-notarize:
-	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
-		|| { echo "ERROR: NOTARYTOOL_KEYCHAIN_PROFILE is not set (see Local.mk.example)."; exit 1; }
-	@test -f "$(PKG_OUT)" \
-		|| { echo "ERROR: $(PKG_OUT) not found — run 'make pkg' first."; exit 1; }
-
-# Notarize: submit the signed pkg, wait, then staple
-notarize: preflight-notarize
-	xcrun notarytool submit "$(PKG_OUT)" \
-		--keychain-profile "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
-		--wait
-	xcrun stapler staple "$(PKG_OUT)"
-	xcrun stapler validate "$(PKG_OUT)"
-	@echo ""
-	@echo "Notarized + stapled: $(PKG_OUT)"
 
 notarize-dmg:
 	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
@@ -214,22 +166,14 @@ notarize-dmg:
 	@echo ""
 	@echo "Notarized + stapled: $(DMG_OUT)"
 
-# Dist: produce final release artifacts (signed, notarized, stapled, checksummed)
-dist: pkg notarize
-	cd "$(DIST_DIR)" && shasum -a 256 "Tractor-$(VERSION).pkg" > "Tractor-$(VERSION).pkg.sha256"
-	@echo ""
-	@echo "Release artifacts in $(DIST_DIR):"
-	@ls -lh "$(DIST_DIR)"
-	@echo ""
-	@echo "Upload manually, e.g.:"
-	@echo "  gh release create v$(VERSION) --generate-notes \\"
-	@echo "    \"$(PKG_OUT)\" \\"
-	@echo "    \"$(PKG_OUT).sha256\""
-
-dist-homebrew: dmg notarize-dmg
+# Dist: produce final release artifacts (signed, notarized, stapled, checksummed).
+# Single artifact: a notarized DMG. Drag-to-install for end users; Homebrew
+# cask consumes the same DMG and adds the /usr/local/bin/tractor shim via
+# its own postflight.
+dist: dmg notarize-dmg
 	cd "$(DIST_DIR)" && shasum -a 256 "Tractor-$(VERSION).dmg" > "Tractor-$(VERSION).dmg.sha256"
 	@echo ""
-	@echo "Homebrew release artifacts in $(DIST_DIR):"
+	@echo "Release artifacts in $(DIST_DIR):"
 	@ls -lh "$(DIST_DIR)"
 	@echo ""
 	@echo "Upload manually, e.g.:"
