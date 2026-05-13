@@ -335,6 +335,7 @@ final class TraceRunner: ObservableObject {
 
 private enum StoredActiveTarget: Codable, Hashable {
     case recommended(bundleID: String)
+    case application(bundleID: String, name: String)
     case custom(id: UUID)
 }
 
@@ -486,8 +487,9 @@ final class PickerModel: ObservableObject {
         let stored: [StoredActiveTarget] = active.compactMap { target in
             switch target.kind {
             case .recommended(let bid): return .recommended(bundleID: bid)
+            case .application(let bid): return .application(bundleID: bid, name: target.label)
             case .custom(let id): return .custom(id: id)
-            case .application, .pid: return nil
+            case .pid: return nil // ephemeral, can't survive relaunch
             }
         }
         activeStore.save(stored)
@@ -508,6 +510,14 @@ final class PickerModel: ObservableObject {
                 }) {
                     restored.append(t)
                 }
+            case .application(let bid, let name):
+                restored.append(TraceTarget(
+                    id: "app:\(bid)",
+                    kind: .application(bundleID: bid),
+                    label: name,
+                    detail: bid,
+                    icon: iconForBundleID(bid)
+                ))
             case .custom(let id):
                 if let stored = customByID[id] {
                     restored.append(stored.asTarget())
@@ -669,11 +679,10 @@ private struct RecordButton: View {
 }
 
 private enum PickerCategory: Hashable, CaseIterable {
-    case targets, recommended, applications, pids, custom
+    case recommended, applications, pids, custom
 
     var title: String {
         switch self {
-        case .targets:      return "Trace Targets"
         case .recommended:  return "Recommended"
         case .applications: return "Applications"
         case .pids:         return "PIDs"
@@ -683,7 +692,6 @@ private enum PickerCategory: Hashable, CaseIterable {
 
     var systemImage: String {
         switch self {
-        case .targets:      return "scope"
         case .recommended:  return "star.fill"
         case .applications: return "app.fill"
         case .pids:         return "number"
@@ -694,92 +702,35 @@ private enum PickerCategory: Hashable, CaseIterable {
 
 private struct PickerPane: View {
     @ObservedObject var model: PickerModel
-    @State private var category: PickerCategory = .recommended
+    @Binding var category: PickerCategory
+    @Binding var pickSelection: TraceTarget.ID?
 
     var body: some View {
         HSplitView {
             List(PickerCategory.allCases, id: \.self, selection: $category) { cat in
-                HStack {
-                    Label(cat.title, systemImage: cat.systemImage)
-                    Spacer()
-                    if case .targets = cat, !model.active.isEmpty {
-                        Text("\(model.active.count)")
-                            .foregroundStyle(.secondary)
-                            .font(.caption.monospacedDigit())
-                    }
-                }
-                .tag(cat)
+                Label(cat.title, systemImage: cat.systemImage).tag(cat)
             }
             .listStyle(.sidebar)
             .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
             Group {
                 switch category {
-                case .targets:      TargetsCategoryView(model: model)
-                case .recommended:  RecommendedCategoryView(model: model)
-                case .applications: ApplicationsCategoryView(model: model)
+                case .recommended:  RecommendedCategoryView(model: model, selection: $pickSelection)
+                case .applications: ApplicationsCategoryView(model: model, selection: $pickSelection)
                 case .pids:         PIDsCategoryView(model: model)
-                case .custom:       CustomCategoryView(model: model)
+                case .custom:       CustomCategoryView(model: model, selection: $pickSelection)
                 }
             }
             .frame(minWidth: 380, idealWidth: 520)
         }
+        .onChange(of: category) { _, _ in pickSelection = nil }
     }
 }
 
 // MARK: - Category views (one Table each)
 
-private struct TargetsCategoryView: View {
-    @ObservedObject var model: PickerModel
-    @State private var selection: Set<TraceTarget.ID> = []
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if model.active.isEmpty {
-                ContentUnavailableView("No trace targets",
-                                       systemImage: "scope",
-                                       description: Text("Pick targets from Recommended, Applications, PIDs, or Custom."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Table(model.active, selection: $selection) {
-                    TableColumn("Name") { t in
-                        Label(t.label, systemImage: iconName(for: t.kind))
-                    }
-                    TableColumn("Detail") { t in
-                        Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    }
-                }
-                Divider()
-                HStack {
-                    Spacer()
-                    Button(role: .destructive) {
-                        for id in selection {
-                            if let t = model.active.first(where: { $0.id == id }) { model.remove(t) }
-                        }
-                        selection.removeAll()
-                    } label: {
-                        Label("Remove", systemImage: "minus")
-                    }
-                    .disabled(selection.isEmpty)
-                }
-                .padding(8)
-                .background(.bar)
-            }
-        }
-    }
-
-    private func iconName(for kind: TargetKind) -> String {
-        switch kind {
-        case .recommended: return "star.fill"
-        case .application: return "app.fill"
-        case .pid: return "number"
-        case .custom: return "doc.fill"
-        }
-    }
-}
-
 private struct RecommendedCategoryView: View {
     @ObservedObject var model: PickerModel
-    @State private var selection: TraceTarget.ID? = nil
+    @Binding var selection: TraceTarget.ID?
 
     var body: some View {
         let rows = model.recommendedTargets()
@@ -788,15 +739,17 @@ private struct RecommendedCategoryView: View {
                 HStack {
                     statusDot(for: t)
                     Text(t.label)
+                    if model.contains(t) {
+                        Label("Added", systemImage: "checkmark")
+                            .labelStyle(.iconOnly)
+                            .foregroundStyle(.secondary)
+                            .help("Already added")
+                    }
                 }
             }
             TableColumn("Bundle ID") { t in
                 Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            TableColumn("") { t in
-                addOrAddedButton(for: t)
-            }
-            .width(min: 90, ideal: 90)
         }
     }
 
@@ -807,25 +760,12 @@ private struct RecommendedCategoryView: View {
             .fill(running ? Color.green : Color.secondary.opacity(0.4))
             .frame(width: 8, height: 8)
     }
-
-    @ViewBuilder
-    private func addOrAddedButton(for t: TraceTarget) -> some View {
-        if model.contains(t) {
-            Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
-        } else {
-            let running: Bool = {
-                if case .recommended(let bid) = t.kind { return model.isRunning(bundleID: bid) }
-                return false
-            }()
-            Button("Add") { model.add(t) }.controlSize(.small).disabled(!running)
-        }
-    }
 }
 
 private struct ApplicationsCategoryView: View {
     @ObservedObject var model: PickerModel
+    @Binding var selection: TraceTarget.ID?
     @State private var search = ""
-    @State private var selection: TraceTarget.ID? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -841,19 +781,17 @@ private struct ApplicationsCategoryView: View {
                     HStack {
                         Circle().fill(Color.green).frame(width: 8, height: 8)
                         Text(t.label)
+                        if model.contains(t) {
+                            Label("Added", systemImage: "checkmark")
+                                .labelStyle(.iconOnly)
+                                .foregroundStyle(.secondary)
+                                .help("Already added")
+                        }
                     }
                 }
                 TableColumn("Bundle ID") { t in
                     Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
-                TableColumn("") { t in
-                    if model.contains(t) {
-                        Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
-                    } else {
-                        Button("Add") { model.add(t) }.controlSize(.small)
-                    }
-                }
-                .width(min: 90, ideal: 90)
             }
         }
     }
@@ -936,7 +874,7 @@ private struct PIDsCategoryView: View {
 
 private struct CustomCategoryView: View {
     @ObservedObject var model: PickerModel
-    @State private var selection: TraceTarget.ID? = nil
+    @Binding var selection: TraceTarget.ID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -974,18 +912,18 @@ private struct CustomCategoryView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Table(savedTargets, selection: $selection) {
-                    TableColumn("Name") { Text($0.label) }
-                    TableColumn("Path") { Text($0.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
-                    TableColumn("") { t in
+                    TableColumn("Name") { t in
                         HStack {
+                            Text(t.label)
                             if model.contains(t) {
-                                Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
-                            } else {
-                                Button("Add") { model.add(t) }.controlSize(.small)
+                                Label("Added", systemImage: "checkmark")
+                                    .labelStyle(.iconOnly)
+                                    .foregroundStyle(.secondary)
+                                    .help("Already added")
                             }
                         }
                     }
-                    .width(min: 90, ideal: 90)
+                    TableColumn("Path") { Text($0.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
                 }
             }
         }
@@ -1014,18 +952,46 @@ private struct CustomCategoryView: View {
 private struct PickerSheet: View {
     @ObservedObject var model: PickerModel
     var onClose: () -> Void
+    @State private var category: PickerCategory = .recommended
+    @State private var pickSelection: TraceTarget.ID? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("Add targets").font(.headline)
                 Spacer()
-                Button("Done", action: onClose)
+                Button("Cancel", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+                Button("Add", action: addSelected)
                     .keyboardShortcut(.return, modifiers: [.command])
+                    .disabled(resolvedSelection() == nil)
             }
             .padding()
             Divider()
-            PickerPane(model: model)
+            PickerPane(model: model, category: $category, pickSelection: $pickSelection)
+        }
+    }
+
+    private func addSelected() {
+        guard let target = resolvedSelection() else { return }
+        model.add(target)
+        onClose()
+    }
+
+    /// Maps the current `pickSelection` ID to a TraceTarget by looking it up
+    /// in whatever list the current category renders. Returns nil when the
+    /// category has no row-based selection (PIDs) or when nothing is selected.
+    private func resolvedSelection() -> TraceTarget? {
+        guard let id = pickSelection else { return nil }
+        switch category {
+        case .recommended:
+            return model.recommendedTargets().first { $0.id == id }
+        case .applications:
+            return model.runningApplications.first { $0.id == id }
+        case .custom:
+            return model.savedCustom.map { $0.asTarget() }.first { $0.id == id }
+        case .pids:
+            return nil
         }
     }
 }
