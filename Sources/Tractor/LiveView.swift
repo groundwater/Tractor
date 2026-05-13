@@ -2,141 +2,155 @@ import SwiftUI
 
 struct LiveView: View {
     @ObservedObject var model: LiveModel
-    @State private var selection: pid_t? = nil
+    @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: DetailTab = .files
 
     enum DetailTab: Hashable { case files, connections }
 
     var body: some View {
         HSplitView {
-            ProcessTreeView(model: model, selection: $selection)
-                .frame(minWidth: 280, idealWidth: 340)
-            DetailPane(model: model, selection: selection, tab: $detailTab)
+            ProcessTableView(model: model, selection: $selection)
+                .frame(minWidth: 480, idealWidth: 640)
+            DetailPane(model: model, selection: selectedPid, tab: $detailTab)
                 .frame(minWidth: 360)
         }
     }
+
+    private var selectedPid: pid_t? {
+        guard let id = selection, id.hasPrefix("p:") else { return nil }
+        return pid_t(id.dropFirst(2))
+    }
 }
 
-// MARK: - Tree
+// MARK: - Hierarchical row model
 
-private struct ProcessTreeView: View {
+struct ProcessTableRow: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case group(String)        // group id
+        case process(pid_t)
+    }
+    let id: String                // "g:<group_id>" or "p:<pid>"
+    let kind: Kind
+    let name: String              // process name or group label
+    let pidLabel: String          // "1234" for processes, "" for groups
+    let fileOpCount: Int
+    let connectionCount: Int
+    let exited: Bool
+    let exitStatus: Int32?
+    let isGroup: Bool
+    let placeholder: Bool         // empty-group "(waiting for matches…)" row
+    let children: [ProcessTableRow]?
+
+    @MainActor
+    static func process(_ pid: pid_t, model: LiveModel) -> ProcessTableRow {
+        let node = model.processes[pid]
+        let kids = model.sortedChildren(pid).map { process($0, model: model) }
+        return ProcessTableRow(
+            id: "p:\(pid)",
+            kind: .process(pid),
+            name: node?.name ?? "pid \(pid)",
+            pidLabel: "\(pid)",
+            fileOpCount: node?.fileOpCount ?? 0,
+            connectionCount: node?.connectionCount ?? 0,
+            exited: node?.exitStatus != nil,
+            exitStatus: node?.exitStatus,
+            isGroup: false,
+            placeholder: false,
+            children: kids.isEmpty ? nil : kids
+        )
+    }
+
+    static func emptyGroupPlaceholder(groupID: String) -> ProcessTableRow {
+        ProcessTableRow(
+            id: "g:\(groupID):empty",
+            kind: .process(0),
+            name: "(waiting for matches…)",
+            pidLabel: "",
+            fileOpCount: 0, connectionCount: 0,
+            exited: false, exitStatus: nil,
+            isGroup: false, placeholder: true,
+            children: nil
+        )
+    }
+
+    @MainActor
+    static func group(_ group: TraceGroup, model: LiveModel) -> ProcessTableRow {
+        let roots = model.rootsForGroup(group.id)
+        let kids = roots.isEmpty
+            ? [emptyGroupPlaceholder(groupID: group.id)]
+            : roots.map { process($0, model: model) }
+        return ProcessTableRow(
+            id: "g:\(group.id)",
+            kind: .group(group.id),
+            name: group.label,
+            pidLabel: roots.isEmpty ? "" : "\(roots.count)",
+            fileOpCount: 0, connectionCount: 0,
+            exited: false, exitStatus: nil,
+            isGroup: true, placeholder: false,
+            children: kids
+        )
+    }
+}
+
+extension LiveModel {
+    func buildRows() -> [ProcessTableRow] {
+        if groups.isEmpty {
+            return sortedRoots().map { ProcessTableRow.process($0, model: self) }
+        }
+        return groups.map { ProcessTableRow.group($0, model: self) }
+    }
+}
+
+// MARK: - Table
+
+private struct ProcessTableView: View {
     @ObservedObject var model: LiveModel
-    @Binding var selection: pid_t?
+    @Binding var selection: ProcessTableRow.ID?
 
     var body: some View {
-        List(selection: $selection) {
-            if model.groups.isEmpty {
-                ForEach(model.sortedRoots(), id: \.self) { pid in
-                    ProcessTreeRow(pid: pid, model: model)
-                }
-            } else {
-                ForEach(model.groups) { group in
-                    Section {
-                        let roots = model.rootsForGroup(group.id)
-                        if roots.isEmpty {
-                            Text("(waiting for matches…)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(roots, id: \.self) { pid in
-                                ProcessTreeRow(pid: pid, model: model)
-                            }
-                        }
-                    } header: {
-                        GroupHeader(group: group, rootCount: model.rootsForGroup(group.id).count)
+        Table(model.buildRows(), children: \.children, selection: $selection) {
+            TableColumn("Process") { row in
+                HStack(spacing: 6) {
+                    if row.isGroup {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                    } else if row.placeholder {
+                        // no leading dot
+                    } else {
+                        Image(systemName: row.exited ? "circle" : "circle.fill")
+                            .font(.system(size: 6))
+                            .foregroundStyle(row.exited ? Color.secondary : Color.green)
                     }
+                    Text(row.name)
+                        .font(row.isGroup ? .body.weight(.semibold) : .body)
+                        .foregroundStyle(row.placeholder ? .secondary : .primary)
+                        .lineLimit(1)
                 }
             }
-        }
-        .listStyle(.sidebar)
-    }
-}
-
-private struct GroupHeader: View {
-    let group: TraceGroup
-    let rootCount: Int
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: iconName)
-                .foregroundStyle(.secondary)
-            Text(group.label)
-                .font(.headline)
-            Spacer()
-            Text("\(rootCount)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var iconName: String {
-        switch group.kind {
-        case .pid: return "number"
-        case .path: return "doc"
-        case .name: return "magnifyingglass"
-        }
-    }
-}
-
-private struct ProcessTreeRow: View {
-    let pid: pid_t
-    @ObservedObject var model: LiveModel
-    @State private var expanded: Bool = true
-
-    var body: some View {
-        let kids = model.sortedChildren(pid)
-        if kids.isEmpty {
-            ProcessRowLabel(pid: pid, model: model)
-                .tag(pid)
-        } else {
-            DisclosureGroup(isExpanded: $expanded) {
-                ForEach(kids, id: \.self) { child in
-                    ProcessTreeRow(pid: child, model: model)
-                }
-            } label: {
-                ProcessRowLabel(pid: pid, model: model)
-                    .tag(pid)
+            TableColumn("PID") { row in
+                Text(row.pidLabel).foregroundStyle(.secondary)
             }
-        }
-    }
-}
-
-private struct ProcessRowLabel: View {
-    let pid: pid_t
-    @ObservedObject var model: LiveModel
-
-    var body: some View {
-        if let node = model.processes[pid] {
-            HStack(spacing: 6) {
-                Image(systemName: node.exitStatus == nil ? "circle.fill" : "circle")
-                    .font(.system(size: 6))
-                    .foregroundStyle(node.exitStatus == nil ? .green : .secondary)
-                Text(node.name)
-                    .lineLimit(1)
-                Text("\(pid)")
-                    .font(.caption)
+            .width(min: 50, ideal: 70)
+            TableColumn("Files") { row in
+                Text(row.isGroup || row.placeholder ? "" : "\(row.fileOpCount)")
                     .foregroundStyle(.secondary)
-                Spacer()
-                if node.fileOpCount > 0 || node.connectionCount > 0 {
-                    HStack(spacing: 6) {
-                        if node.fileOpCount > 0 {
-                            Label("\(node.fileOpCount)", systemImage: "doc")
-                                .labelStyle(.titleAndIcon)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if node.connectionCount > 0 {
-                            Label("\(node.connectionCount)", systemImage: "network")
-                                .labelStyle(.titleAndIcon)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+            }
+            .width(min: 50, ideal: 70)
+            TableColumn("Connections") { row in
+                Text(row.isGroup || row.placeholder ? "" : "\(row.connectionCount)")
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 60, ideal: 100)
+            TableColumn("Status") { row in
+                if row.isGroup || row.placeholder {
+                    Text("").foregroundStyle(.secondary)
+                } else if let code = row.exitStatus {
+                    Text("exited \(code)").foregroundStyle(.secondary)
+                } else {
+                    Text("running").foregroundStyle(.secondary)
                 }
             }
-        } else {
-            Text("pid \(pid)")
-                .foregroundStyle(.secondary)
+            .width(min: 70, ideal: 100)
         }
     }
 }
