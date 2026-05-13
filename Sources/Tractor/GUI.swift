@@ -576,36 +576,18 @@ private struct MainView: View {
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: 4) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                    TextField("Filter processes", text: $filter)
-                        .textFieldStyle(.plain)
-                        .focused($filterFocused)
-                        .frame(minWidth: 160, maxWidth: 240)
-                    if !filter.isEmpty {
-                        Button {
-                            filter = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(Color(NSColor.controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $selection) {
                     Text("Trace").tag(Tab.trace)
                     Text("Setup").tag(Tab.setup)
                 }
                 .pickerStyle(.segmented)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                TextField("Filter", text: $filter, prompt: Text("Filter"))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($filterFocused)
+                    .frame(width: 200)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
