@@ -315,6 +315,8 @@ struct DetailPane: View {
                 .strokeBorder(Color(NSColor.separatorColor).opacity(0.6), lineWidth: 1)
         )
         .padding(8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.windowBackgroundColor))
     }
 }
 
