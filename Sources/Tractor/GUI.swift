@@ -791,32 +791,95 @@ private struct RootView: View {
 
     @ViewBuilder
     private var footer: some View {
-        HStack {
-            TimelineView(.periodic(from: .now, by: 1.0)) { _ in
-                HStack(spacing: 6) {
-                    if runner.isRecording {
-                        Circle().fill(Color.red).frame(width: 8, height: 8)
-                        Text("Recording — \(runner.recordedEventCount) events, \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    } else if runner.isRunning {
-                        Text("Tracing — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else if let msg = runner.lastMessage {
-                        Text(msg).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Spacer()
+        HStack(spacing: 10) {
+            TimelineMock()
+                .frame(maxWidth: .infinity)
             Button("Options…") { optionsSheetShown = true }
             RecordButton(isRecording: runner.isRecording) {
                 runner.isRecording.toggle()
             }
             .keyboardShortcut(.return, modifiers: [.command])
         }
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+}
+
+/// Visual-only mock of the playback timeline. No wiring to LiveModel /
+/// SQLite yet — it's just a scrubbable bar so we can iterate on the
+/// interaction shape before committing to the underlying replay engine.
+private struct TimelineMock: View {
+    @State private var isPlaying: Bool = false
+    @State private var atLive: Bool = true
+    @State private var playhead: CGFloat = 1.0  // 0…1 along the bar
+
+    // Hard-coded chunks expressed as fractional ranges of the total span.
+    private let chunks: [(CGFloat, CGFloat)] = [
+        (0.05, 0.28),
+        (0.36, 0.62),
+        (0.71, 0.94),
+    ]
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                isPlaying.toggle()
+                if isPlaying { atLive = false }
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.35))
+                    ForEach(chunks.indices, id: \.self) { i in
+                        let (start, end) = chunks[i]
+                        Capsule()
+                            .fill(Color.accentColor.opacity(0.55))
+                            .frame(width: max(0, geo.size.width * (end - start)))
+                            .offset(x: geo.size.width * start)
+                    }
+                    let headX = (atLive ? geo.size.width : geo.size.width * playhead)
+                    Capsule()
+                        .fill(Color.primary)
+                        .frame(width: 2, height: 14)
+                        .offset(x: headX - 1, y: -4)
+                }
+                .frame(height: 6)
+                .contentShape(Rectangle())
+                .onTapGesture { location in
+                    let frac = min(1, max(0, location.x / geo.size.width))
+                    playhead = frac
+                    atLive = false
+                }
+            }
+            .frame(height: 18)
+
+            Button {
+                atLive = true
+                isPlaying = false
+                playhead = 1.0
+            } label: {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(atLive ? Color.red : Color.secondary.opacity(0.4))
+                        .frame(width: 7, height: 7)
+                    Text(verbatim: "Live")
+                        .font(.caption.weight(.semibold))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(atLive ? Color.secondary.opacity(0.15) : Color.clear,
+                            in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
     }
 }
 
