@@ -321,6 +321,45 @@ private struct ProcessTableView: View {
             }
             .width(min: 70, ideal: 80, max: 110)
         }
+        .onKeyPress(.leftArrow) { handleLeftArrow(flat: flat) }
+        .onKeyPress(.rightArrow) { handleRightArrow(flat: flat) }
+    }
+
+    /// Left arrow: collapse an expanded parent. If row is a leaf or already
+    /// collapsed, jump selection up to its parent row.
+    private func handleLeftArrow(flat: [FlatProcessRow]) -> KeyPress.Result {
+        guard let id = selection,
+              let idx = flat.firstIndex(where: { $0.id == id }) else { return .ignored }
+        let entry = flat[idx]
+        if entry.hasChildren && !collapsed.contains(id) {
+            collapsed.insert(id)
+            return .handled
+        }
+        if entry.depth > 0 {
+            for i in stride(from: idx - 1, through: 0, by: -1) where flat[i].depth < entry.depth {
+                selection = flat[i].id
+                return .handled
+            }
+        }
+        return .ignored
+    }
+
+    /// Right arrow: expand a collapsed parent. If already expanded, jump
+    /// selection down to its first child.
+    private func handleRightArrow(flat: [FlatProcessRow]) -> KeyPress.Result {
+        guard let id = selection,
+              let idx = flat.firstIndex(where: { $0.id == id }) else { return .ignored }
+        let entry = flat[idx]
+        guard entry.hasChildren else { return .ignored }
+        if collapsed.contains(id) {
+            collapsed.remove(id)
+            return .handled
+        }
+        if idx + 1 < flat.count, flat[idx + 1].depth > entry.depth {
+            selection = flat[idx + 1].id
+            return .handled
+        }
+        return .ignored
     }
 }
 
