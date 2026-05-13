@@ -27,7 +27,6 @@ struct LiveView: View {
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
                 Divider()
                 HStack {
-                    Spacer()
                     Button(action: onAddTarget) {
                         Label("Add Target", systemImage: "plus")
                             .padding(.horizontal, 12)

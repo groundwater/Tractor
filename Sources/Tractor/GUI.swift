@@ -183,6 +183,11 @@ struct TraceTarget: Identifiable, Hashable {
 @MainActor
 final class TraceRunner: ObservableObject {
     @Published private(set) var isRunning = false
+    /// Whether events are being persisted to the SQLite trace DB. Independent
+    /// of tracing — tracing is always on once started; recording is the
+    /// user-controlled "save to disk" switch.
+    /// TODO: wire to TraceSession to actually gate SQLite writes.
+    @Published var isRecording = false
     @Published private(set) var lastMessage: String?
     let live = LiveModel()
 
@@ -190,6 +195,13 @@ final class TraceRunner: ObservableObject {
     private var sink: LiveSink?
     private var appliedPids: Set<pid_t> = []
     private var appliedPaths: Set<String> = []
+
+    /// Idempotent — starts the trace session if it isn't running yet. Safe to
+    /// call eagerly on app launch and again later when targets are added.
+    func ensureStarted() {
+        guard !isRunning else { return }
+        start(active: [], runningByBundleID: [:])
+    }
 
     func start(active: [TraceTarget], runningByBundleID: [String: pid_t]) {
         guard !isRunning else { return }
@@ -266,6 +278,9 @@ final class TraceRunner: ObservableObject {
     /// sysext doesn't support pid removal yet, so existing tracked PIDs keep
     /// emitting until their process exits).
     func apply(active: [TraceTarget], runningByBundleID: [String: pid_t]) {
+        if !isRunning {
+            ensureStarted()
+        }
         guard let session = session, isRunning else { return }
         var pids: Set<pid_t> = []
         var paths: Set<String> = []
@@ -579,13 +594,9 @@ private struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if runner.isRunning {
-                LiveView(model: runner.live,
-                         selection: $selection,
-                         onAddTarget: { pickerSheetShown = true })
-            } else {
-                PickerPane(model: model)
-            }
+            LiveView(model: runner.live,
+                     selection: $selection,
+                     onAddTarget: { pickerSheetShown = true })
             Divider()
             footer
         }
@@ -600,6 +611,7 @@ private struct RootView: View {
             }
             .frame(minWidth: 640, minHeight: 560)
         }
+        .onAppear { runner.ensureStarted() }
         .onChange(of: model.active) { _, _ in
             runner.apply(active: model.active, runningByBundleID: model.runningByBundleID)
         }
@@ -608,29 +620,25 @@ private struct RootView: View {
     @ViewBuilder
     private var footer: some View {
         HStack {
-            if runner.isRunning {
-                HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                if runner.isRecording {
                     Circle().fill(Color.red).frame(width: 8, height: 8)
-                    Text("Recording — \(model.active.count) target\(model.active.count == 1 ? "" : "s"), \(runner.live.processes.count) processes")
+                    Text("Recording — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if let msg = runner.lastMessage {
+                    Text(msg).font(.caption).foregroundStyle(.secondary)
+                } else if runner.isRunning {
+                    Text("Tracing — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-            } else if let msg = runner.lastMessage {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Spacer()
-            if runner.isRunning {
-                RecordButton(isRecording: true) { runner.stop() }
-                    .keyboardShortcut(.return, modifiers: [.command])
-            } else {
-                RecordButton(isRecording: false) {
-                    runner.start(active: model.active, runningByBundleID: model.runningByBundleID)
-                }
-                .keyboardShortcut(.return, modifiers: [.command])
-                .disabled(model.active.isEmpty)
+            RecordButton(isRecording: runner.isRecording) {
+                runner.isRecording.toggle()
             }
+            .keyboardShortcut(.return, modifiers: [.command])
         }
         .padding()
     }
