@@ -646,13 +646,9 @@ private struct MainView: View {
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        RootView(filter: filter)
+        RootView(filter: $filter)
             .frame(minWidth: 720, minHeight: 580)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    FilterField(text: $filter, placeholder: "Find")
-                        .frame(width: 200)
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         prefs.inspectorShown.toggle()
@@ -737,7 +733,7 @@ struct FilterField: NSViewRepresentable {
 }
 
 private struct RootView: View {
-    let filter: String
+    @Binding var filter: String
     @StateObject private var model = PickerModel()
     @StateObject private var runner = TraceRunner()
     @ObservedObject private var prefs = AppPrefs.shared
@@ -749,7 +745,7 @@ private struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             LiveView(model: runner.live,
-                     filter: filter,
+                     filter: $filter,
                      selection: $selection,
                      onAddTarget: { pickerSheetShown = true },
                      onDeleteGroup: { groupID in

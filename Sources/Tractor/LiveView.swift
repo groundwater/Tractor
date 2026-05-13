@@ -60,7 +60,7 @@ final class AppPrefs: ObservableObject {
 struct LiveView: View {
     @ObservedObject var model: LiveModel
     @ObservedObject private var prefs = AppPrefs.shared
-    let filter: String
+    @Binding var filter: String
     @Binding var selection: ProcessTableRow.ID?
     var onAddTarget: () -> Void
     var onDeleteGroup: (String) -> Void
@@ -72,6 +72,15 @@ struct LiveView: View {
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
+                HStack {
+                    FilterField(text: $filter, placeholder: "Find")
+                        .frame(maxWidth: 320)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.bar)
+                Divider()
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, filter: filter, selection: $selection)
                     .onDeleteCommand {
                         // Top-level group row ids look like "g:<group_id>" with
