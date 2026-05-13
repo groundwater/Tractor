@@ -581,9 +581,11 @@ private struct MainView: View {
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 24) {
+                HStack(spacing: 16) {
                     FilterField(text: $filter, placeholder: "Find")
-                        .frame(width: 220)
+                        .frame(width: 200)
+                    Divider()
+                        .frame(height: 18)
                     Picker("View", selection: $selection) {
                         Text("Trace").tag(Tab.trace)
                         Text("Setup").tag(Tab.setup)
