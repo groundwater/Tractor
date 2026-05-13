@@ -244,16 +244,16 @@ private struct ProcessTableView: View {
                 Text(entry.row.pidLabel).foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
-            TableColumn("Files") { entry in
+            TableColumn("Disk") { entry in
                 Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
                     .foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
-            TableColumn("Connections") { entry in
+            TableColumn("Network") { entry in
                 Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
                     .foregroundStyle(.secondary)
             }
-            .width(min: 60, ideal: 90, max: 110)
+            .width(min: 60, ideal: 80, max: 110)
             TableColumn("Status") { entry in
                 if entry.row.isGroup || entry.row.placeholder {
                     Text("").foregroundStyle(.secondary)
