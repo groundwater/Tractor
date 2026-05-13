@@ -45,6 +45,12 @@ final class TraceSession {
     // Public state
     let tree: ProcessTree
     private(set) var sqliteLog: SQLiteLog?
+
+    /// Gate SQLite writes at runtime without restarting the session.
+    /// Used by the GUI's Record toggle.
+    func setSQLiteRecordingEnabled(_ enabled: Bool) {
+        sqliteLog?.isEnabled = enabled
+    }
     private(set) var isRunning = false
     private var initialOrdered: [pid_t] = []
 

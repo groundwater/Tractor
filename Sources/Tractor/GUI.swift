@@ -185,9 +185,10 @@ final class TraceRunner: ObservableObject {
     @Published private(set) var isRunning = false
     /// Whether events are being persisted to the SQLite trace DB. Independent
     /// of tracing — tracing is always on once started; recording is the
-    /// user-controlled "save to disk" switch.
-    /// TODO: wire to TraceSession to actually gate SQLite writes.
-    @Published var isRecording = false
+    /// user-controlled "save to disk" switch, gated by SQLiteLog.isEnabled.
+    @Published var isRecording = false {
+        didSet { session?.setSQLiteRecordingEnabled(isRecording) }
+    }
     @Published private(set) var lastMessage: String?
     let live = LiveModel()
 
@@ -252,6 +253,7 @@ final class TraceRunner: ObservableObject {
 
         do {
             try session.start(roots: roots, options: options)
+            session.setSQLiteRecordingEnabled(isRecording)
             session.seedSinkFromTree()
             self.session = session
             self.sink = sink

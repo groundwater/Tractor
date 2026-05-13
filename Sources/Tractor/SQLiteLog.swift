@@ -13,6 +13,11 @@ final class SQLiteLog: EventSink {
         return e
     }()
 
+    /// When false, every event handler short-circuits without writing.
+    /// Lets the GUI's Record toggle gate SQLite writes without tearing down
+    /// the trace session.
+    var isEnabled: Bool = true
+
     let path: String
 
     init(path: String) throws {
@@ -153,6 +158,7 @@ final class SQLiteLog: EventSink {
 
     /// Log captured HTTP traffic (called from MITM flow)
     func logTraffic(pid: pid_t, host: String, port: UInt16, direction: String, content: String) {
+        guard isEnabled else { return }
         lock.lock()
         defer { lock.unlock() }
         guard let stmt = trafficStmt else { return }
@@ -171,18 +177,22 @@ final class SQLiteLog: EventSink {
     // MARK: - EventSink
 
     func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
+        guard isEnabled else { return }
         insert(timestamp: now(), type: "exec", pid: pid, ppid: ppid, process: process, user: user, details: ["argv": argv])
     }
 
     func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
+        guard isEnabled else { return }
         insert(timestamp: now(), type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
     }
 
     func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
+        guard isEnabled else { return }
         insert(timestamp: now(), type: "connect", pid: pid, ppid: ppid, process: process, user: user, details: ["addr": remoteAddr, "port": "\(remotePort)", "flowID": "\(flowID)"])
     }
 
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
+        guard isEnabled else { return }
         insert(timestamp: now(), type: "exit", pid: pid, ppid: ppid, process: process, user: user, details: [:])
     }
 }
