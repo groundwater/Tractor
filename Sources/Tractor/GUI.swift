@@ -569,7 +569,6 @@ private struct MainView: View {
     enum Tab: Hashable, CaseIterable { case trace, setup }
     @State private var selection: Tab = .trace
     @State private var filter: String = ""
-    @FocusState private var filterFocused: Bool
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
@@ -581,18 +580,16 @@ private struct MainView: View {
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                TextField("Filter", text: $filter, prompt: Text("Filter"))
-                    .textFieldStyle(.roundedBorder)
-                    .focused($filterFocused)
-                    .frame(width: 200)
-            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $selection) {
                     Text("Trace").tag(Tab.trace)
                     Text("Setup").tag(Tab.setup)
                 }
                 .pickerStyle(.segmented)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                FilterField(text: $filter, placeholder: "Filter")
+                    .frame(width: 200)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -603,14 +600,79 @@ private struct MainView: View {
                 .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .focusFilterField)) { _ in
-            filterFocused = true
-        }
     }
 }
 
 extension Notification.Name {
     static let focusFilterField = Notification.Name("tractor.focusFilterField")
+}
+
+/// NSTextField-backed search field. We don't use SwiftUI's TextField + @FocusState
+/// here because @FocusState bindings don't reliably propagate into views that
+/// live inside a SwiftUI ToolbarItem on macOS — toolbar items render in a
+/// detached hosting view. With a real NSTextField we can call
+/// `window.makeFirstResponder(field)` directly from the .focusFilterField
+/// notification handler.
+struct FilterField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.placeholderString = placeholder
+        field.bezelStyle = .roundedBezel
+        field.isBordered = true
+        field.focusRingType = .default
+        field.delegate = context.coordinator
+        context.coordinator.attach(field: field)
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        let text: Binding<String>
+        private var observer: NSObjectProtocol?
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        deinit {
+            if let observer = observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        func attach(field: NSTextField) {
+            observer = NotificationCenter.default.addObserver(
+                forName: .focusFilterField,
+                object: nil,
+                queue: .main
+            ) { [weak field] _ in
+                guard let field = field, let window = field.window else { return }
+                window.makeFirstResponder(field)
+                // Select all so typing replaces existing text — matches the
+                // expected ⌘F behavior in most macOS apps.
+                if let editor = field.currentEditor() as? NSTextView {
+                    editor.selectAll(nil)
+                }
+            }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
 }
 
 private struct RootView: View {
