@@ -286,7 +286,9 @@ struct DetailPane: View {
     @Binding var tab: LiveView.DetailTab
     @State private var cwd: String = ""
     @State private var args: [String] = []
-    @State private var env: [String] = []
+    @State private var env: [(key: String, value: String)] = []
+    @State private var argsExpanded: Bool = true
+    @State private var envExpanded: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -294,52 +296,35 @@ struct DetailPane: View {
                 DetailHeader(node: node)
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        section("Working Directory") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        LabeledContent {
                             Text(verbatim: cwd.isEmpty ? "—" : cwd)
-                                .font(.system(.body, design: .monospaced))
+                                .font(.system(.callout, design: .monospaced))
                                 .textSelection(.enabled)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .help(cwd)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } label: {
+                            Text("Working Dir")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        section("Arguments") {
-                            if args.isEmpty {
-                                Text(verbatim: "—").foregroundStyle(.secondary)
-                            } else {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(Array(args.enumerated()), id: \.offset) { _, arg in
-                                        Text(verbatim: arg)
-                                            .font(.system(.callout, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .help(arg)
-                                    }
-                                }
-                            }
+                        DisclosureGroup(isExpanded: $argsExpanded) {
+                            argsContent
+                                .padding(.top, 4)
+                        } label: {
+                            sectionLabel("Arguments", count: args.count)
                         }
-                        section("Environment") {
-                            if env.isEmpty {
-                                Text(verbatim: "—").foregroundStyle(.secondary)
-                            } else {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    ForEach(Array(env.enumerated()), id: \.offset) { _, e in
-                                        Text(verbatim: e)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .help(e)
-                                    }
-                                }
-                            }
+                        DisclosureGroup(isExpanded: $envExpanded) {
+                            envContent
+                                .padding(.top, 4)
+                        } label: {
+                            sectionLabel("Environment", count: env.count)
                         }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 12)
                 }
                 Divider()
                 Picker("", selection: $tab) {
@@ -386,14 +371,69 @@ struct DetailPane: View {
     }
 
     @ViewBuilder
-    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.caption.bold())
+    private func sectionLabel(_ title: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(verbatim: "\(count)")
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .tracking(0.4)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color(NSColor.tertiaryLabelColor).opacity(0.25),
+                            in: Capsule())
+        }
+    }
+
+    @ViewBuilder
+    private var argsContent: some View {
+        if args.isEmpty {
+            Text(verbatim: "—").foregroundStyle(.secondary).font(.callout)
+        } else {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Array(args.enumerated()), id: \.offset) { idx, arg in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(verbatim: "\(idx)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 22, alignment: .trailing)
+                        Text(verbatim: arg)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .help(arg)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var envContent: some View {
+        if env.isEmpty {
+            Text(verbatim: "—").foregroundStyle(.secondary).font(.callout)
+        } else {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Array(env.enumerated()), id: \.offset) { _, pair in
+                    HStack(spacing: 0) {
+                        Text(verbatim: pair.key)
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                        Text(verbatim: pair.key.isEmpty ? "" : "=")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                        Text(verbatim: pair.value)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(pair.value)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         }
     }
 
@@ -404,7 +444,13 @@ struct DetailPane: View {
         }
         cwd = getProcessCwd(pid) ?? ""
         args = getProcessArgs(pid)
-        env = getProcessEnv(pid)
+        let envLines = getProcessEnv(pid)
+        env = envLines.map { line in
+            if let eq = line.firstIndex(of: "=") {
+                return (String(line[..<eq]), String(line[line.index(after: eq)...]))
+            }
+            return (line, "")
+        }
     }
 }
 
