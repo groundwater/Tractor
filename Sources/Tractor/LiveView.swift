@@ -295,50 +295,55 @@ struct DetailPane: View {
             if let pid = selection, let node = model.processes[pid] {
                 DetailHeader(node: node)
                 Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        LabeledContent {
-                            Text(verbatim: cwd.isEmpty ? "—" : cwd)
-                                .font(.system(.callout, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .help(cwd)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } label: {
-                            Text("Working Dir")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                VSplitView {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            LabeledContent {
+                                Text(verbatim: cwd.isEmpty ? "—" : cwd)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help(cwd)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } label: {
+                                Text("Working Dir")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            DisclosureGroup(isExpanded: $argsExpanded) {
+                                argsContent
+                                    .padding(.top, 4)
+                            } label: {
+                                sectionLabel("Arguments", count: args.count)
+                            }
+                            DisclosureGroup(isExpanded: $envExpanded) {
+                                envContent
+                                    .padding(.top, 4)
+                            } label: {
+                                sectionLabel("Environment", count: env.count)
+                            }
                         }
-                        DisclosureGroup(isExpanded: $argsExpanded) {
-                            argsContent
-                                .padding(.top, 4)
-                        } label: {
-                            sectionLabel("Arguments", count: args.count)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
+                    }
+                    .frame(minHeight: 120, idealHeight: 220)
+                    VStack(spacing: 0) {
+                        Picker("", selection: $tab) {
+                            Text("Files (\(model.fileStats[pid]?.count ?? 0))").tag(LiveView.DetailTab.files)
+                            Text("Connections (\(model.connections[pid]?.count ?? 0))").tag(LiveView.DetailTab.connections)
                         }
-                        DisclosureGroup(isExpanded: $envExpanded) {
-                            envContent
-                                .padding(.top, 4)
-                        } label: {
-                            sectionLabel("Environment", count: env.count)
+                        .pickerStyle(.segmented)
+                        .padding(8)
+                        Divider()
+                        switch tab {
+                        case .files:
+                            FilesTable(byPath: model.fileStats[pid] ?? [:])
+                        case .connections:
+                            ConnectionsTable(byFlow: model.connections[pid] ?? [:])
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
-                }
-                Divider()
-                Picker("", selection: $tab) {
-                    Text("Files (\(model.fileStats[pid]?.count ?? 0))").tag(LiveView.DetailTab.files)
-                    Text("Connections (\(model.connections[pid]?.count ?? 0))").tag(LiveView.DetailTab.connections)
-                }
-                .pickerStyle(.segmented)
-                .padding(8)
-                Divider()
-                switch tab {
-                case .files:
-                    FilesTable(byPath: model.fileStats[pid] ?? [:])
-                case .connections:
-                    ConnectionsTable(byFlow: model.connections[pid] ?? [:])
+                    .frame(minHeight: 140)
                 }
             } else {
                 ContentUnavailableView("Select a process", systemImage: "scope")
