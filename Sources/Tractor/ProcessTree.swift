@@ -234,6 +234,52 @@ func getProcessArgs(_ pid: pid_t) -> [String] {
     return args
 }
 
+/// Snapshot of a running process for the GUI's PID picker.
+struct RunningProcessInfo: Identifiable, Hashable {
+    let pid: pid_t
+    let user: String
+    let name: String
+    let argv: String
+    var id: pid_t { pid }
+}
+
+/// Enumerate all currently-running processes. Cheap to call (a few ms even on
+/// busy systems). Skips kernel pids and anything we can't read info for.
+func listRunningProcesses() -> [RunningProcessInfo] {
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return [] }
+    var pidsBuf = [pid_t](repeating: 0, count: Int(count) + 64)
+    let actual = proc_listallpids(&pidsBuf, Int32(MemoryLayout<pid_t>.size * pidsBuf.count))
+    guard actual > 0 else { return [] }
+    var out: [RunningProcessInfo] = []
+    out.reserveCapacity(Int(actual))
+    for i in 0..<Int(actual) {
+        let pid = pidsBuf[i]
+        guard pid > 0 else { continue }
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info,
+                                Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard size > 0 else { continue }
+        let uid = info.pbi_uid
+        let user: String = {
+            if let pwd = getpwuid(uid) {
+                return String(cString: pwd.pointee.pw_name)
+            }
+            return "\(uid)"
+        }()
+        let name = withUnsafePointer(to: info.pbi_comm) { tuplePtr -> String in
+            let cap = MemoryLayout.size(ofValue: info.pbi_comm)
+            return tuplePtr.withMemoryRebound(to: CChar.self, capacity: cap) {
+                String(cString: $0)
+            }
+        }
+        let argv = getProcessArgs(pid).joined(separator: " ")
+        out.append(RunningProcessInfo(pid: pid, user: user, name: name, argv: argv))
+    }
+    out.sort { $0.pid < $1.pid }
+    return out
+}
+
 /// Working directory for a process, via PROC_PIDVNODEPATHINFO.
 func getProcessCwd(_ pid: pid_t) -> String? {
     var vnodeInfo = proc_vnodepathinfo()

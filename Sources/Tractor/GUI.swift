@@ -975,70 +975,94 @@ private struct ApplicationsCategoryView: View {
 
 private struct PIDsCategoryView: View {
     @ObservedObject var model: PickerModel
+    @State private var processes: [RunningProcessInfo] = []
+    @State private var filter: String = ""
+    @State private var selection: Set<pid_t> = []
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("PID", text: $model.pidDraft)
+                TextField("Filter pid / user / name / args…", text: $filter)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                if let name = resolvedName() {
-                    Text("→ \(name)")
-                        .foregroundStyle(.secondary).font(.callout)
-                } else if !model.pidDraft.isEmpty && parsedPID() != nil {
-                    Text("→ (no such process)")
-                        .foregroundStyle(.secondary).font(.callout)
+                Button {
+                    processes = listRunningProcesses()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
                 }
-                Spacer()
-                Button("Add") { addPID() }
-                    .disabled(parsedPID() == nil || resolvedName() == nil)
+                .help("Refresh process list")
             }
             .padding(8)
             .background(.bar)
             Divider()
-            let pidTargets = model.active.filter { if case .pid = $0.kind { return true } else { return false } }
-            if pidTargets.isEmpty {
-                ContentUnavailableView("No PID targets",
-                                       systemImage: "number",
-                                       description: Text("Enter a running PID above to trace it and all its descendants."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Table(pidTargets) {
-                    TableColumn("Target") { Text($0.label) }
-                    TableColumn("") { t in
-                        Button(role: .destructive) { model.remove(t) } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .width(40)
+            Table(filtered, selection: $selection) {
+                TableColumn("PID") { p in
+                    Text(verbatim: "\(p.pid)").monospacedDigit().foregroundStyle(.secondary)
                 }
+                .width(min: 50, ideal: 60, max: 80)
+                TableColumn("User") { p in
+                    Text(verbatim: p.user).lineLimit(1)
+                }
+                .width(min: 60, ideal: 90, max: 140)
+                TableColumn("Name") { p in
+                    Text(verbatim: p.name).lineLimit(1)
+                }
+                .width(min: 100, ideal: 160)
+                TableColumn("Arguments") { p in
+                    Text(verbatim: p.argv)
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(p.argv)
+                }
+            }
+            Divider()
+            HStack {
+                Text(verbatim: "\(selection.count) selected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    addSelected()
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+                .disabled(selection.isEmpty)
+            }
+            .padding(8)
+            .background(.bar)
+        }
+        .onAppear {
+            if processes.isEmpty {
+                processes = listRunningProcesses()
             }
         }
     }
 
-    private func parsedPID() -> pid_t? {
-        let trimmed = model.pidDraft.trimmingCharacters(in: .whitespaces)
-        guard let n = Int32(trimmed), n > 0 else { return nil }
-        return pid_t(n)
+    private var filtered: [RunningProcessInfo] {
+        let q = filter.lowercased()
+        guard !q.isEmpty else { return processes }
+        return processes.filter { p in
+            String(p.pid).contains(q)
+                || p.user.lowercased().contains(q)
+                || p.name.lowercased().contains(q)
+                || p.argv.lowercased().contains(q)
+        }
     }
 
-    private func resolvedName() -> String? {
-        guard let pid = parsedPID() else { return nil }
-        return model.resolveProcessName(pid: pid)
-    }
-
-    private func addPID() {
-        guard let pid = parsedPID(), let name = resolvedName() else { return }
-        let target = TraceTarget(
-            id: "pid:\(pid)",
-            kind: .pid(pid),
-            label: "PID \(pid) (\(name))",
-            detail: nil,
-            icon: nil
-        )
-        model.add(target)
-        model.pidDraft = ""
+    private func addSelected() {
+        for pid in selection {
+            guard let p = processes.first(where: { $0.pid == pid }) else { continue }
+            let target = TraceTarget(
+                id: "pid:\(pid)",
+                kind: .pid(pid),
+                label: "PID \(pid) (\(p.name))",
+                detail: nil,
+                icon: nil
+            )
+            model.add(target)
+        }
+        selection.removeAll()
     }
 }
 
