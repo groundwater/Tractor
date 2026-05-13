@@ -168,6 +168,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 enum TargetKind: Hashable {
     case recommended(bundleID: String)
+    /// Recommended entry that matches by process name (for CLI binaries that
+    /// have no bundle ID, e.g. `claude`).
+    case recommendedByName(processName: String)
     case application(bundleID: String)
     case pid(pid_t)
     case custom(id: UUID)
@@ -211,6 +214,7 @@ final class TraceRunner: ObservableObject {
     private var sink: LiveSink?
     private var appliedPids: Set<pid_t> = []
     private var appliedPaths: Set<String> = []
+    private var appliedNames: Set<String> = []
 
     /// Idempotent — starts the trace session if it isn't running yet. Safe to
     /// call eagerly on app launch and again later when targets are added.
@@ -224,11 +228,15 @@ final class TraceRunner: ObservableObject {
 
         var pids: [pid_t] = []
         var paths: [String] = []
+        var names: [String] = []
         let groups = buildGroups(active: active, runningByBundleID: runningByBundleID)
         for target in active {
             switch target.kind {
             case .application(let bid), .recommended(let bid):
                 if let pid = runningByBundleID[bid] { pids.append(pid) }
+            case .recommendedByName(let n):
+                names.append(n)
+                pids.append(contentsOf: findProcessesByName(n))
             case .pid(let pid):
                 pids.append(pid)
             case .custom:
@@ -263,7 +271,7 @@ final class TraceRunner: ObservableObject {
             }
         }
 
-        let roots = TraceRoots(names: [], pids: pids, paths: paths)
+        let roots = TraceRoots(names: names, pids: pids, paths: paths)
         let options = TraceOptions(logToSQLite: true)
 
         do {
@@ -274,6 +282,7 @@ final class TraceRunner: ObservableObject {
             self.sink = sink
             self.appliedPids = Set(pids)
             self.appliedPaths = Set(paths)
+            self.appliedNames = Set(names)
             self.isRunning = true
             self.lastMessage = nil
         } catch {
@@ -287,6 +296,7 @@ final class TraceRunner: ObservableObject {
         sink = nil
         appliedPids.removeAll()
         appliedPaths.removeAll()
+        appliedNames.removeAll()
         isRunning = false
     }
 
@@ -301,10 +311,14 @@ final class TraceRunner: ObservableObject {
         guard let session = session, isRunning else { return }
         var pids: Set<pid_t> = []
         var paths: Set<String> = []
+        var names: Set<String> = []
         for target in active {
             switch target.kind {
             case .application(let bid), .recommended(let bid):
                 if let pid = runningByBundleID[bid] { pids.insert(pid) }
+            case .recommendedByName(let n):
+                names.insert(n)
+                for pid in findProcessesByName(n) { pids.insert(pid) }
             case .pid(let pid):
                 pids.insert(pid)
             case .custom:
@@ -318,6 +332,7 @@ final class TraceRunner: ObservableObject {
         // events for those so the live view picks them up.
         let newPids = pids.subtracting(appliedPids)
         let newPaths = paths.subtracting(appliedPaths)
+        let newNames = names.subtracting(appliedNames)
         if !newPids.isEmpty {
             session.attachExisting(roots: Array(newPids))
             appliedPids.formUnion(newPids)
@@ -326,7 +341,10 @@ final class TraceRunner: ObservableObject {
             session.attachExisting(paths: Array(newPaths))
             appliedPaths.formUnion(newPaths)
         }
-        session.setTrackerPatterns(names: [], paths: Array(appliedPaths))
+        if !newNames.isEmpty {
+            appliedNames.formUnion(newNames)
+        }
+        session.setTrackerPatterns(names: Array(appliedNames), paths: Array(appliedPaths))
     }
 
     private func buildGroups(active: [TraceTarget], runningByBundleID: [String: pid_t]) -> [TraceGroup] {
@@ -336,6 +354,8 @@ final class TraceRunner: ObservableObject {
             case .application(let bid), .recommended(let bid):
                 if let pid = runningByBundleID[bid] { kind = .pid(pid) }
                 else { kind = .name(target.label) }
+            case .recommendedByName(let n):
+                kind = .name(n)
             case .pid(let pid):
                 kind = .pid(pid)
             case .custom:
@@ -350,6 +370,7 @@ final class TraceRunner: ObservableObject {
 
 private enum StoredActiveTarget: Codable, Hashable {
     case recommended(bundleID: String)
+    case recommendedByName(processName: String)
     case application(bundleID: String, name: String)
     case custom(id: UUID)
 }
@@ -408,15 +429,21 @@ private final class CustomTargetStore {
 
 private struct RecommendedEntry {
     let name: String
-    let bundleID: String
+    /// Either a bundle ID for a GUI app or a process name for a CLI binary.
+    let match: Match
+
+    enum Match: Hashable {
+        case bundleID(String)
+        case processName(String)
+    }
 }
 
 private let recommendedEntries: [RecommendedEntry] = [
-    .init(name: "Cursor", bundleID: "com.todesktop.230313mzl4w4u92"),
-    .init(name: "Claude", bundleID: "com.anthropic.claudefordesktop"),
-    .init(name: "VS Code", bundleID: "com.microsoft.VSCode"),
-    .init(name: "Zed", bundleID: "dev.zed.Zed"),
-    .init(name: "Windsurf", bundleID: "com.exafunction.windsurf"),
+    .init(name: "Cursor",    match: .bundleID("com.todesktop.230313mzl4w4u92")),
+    .init(name: "Claude",    match: .processName("claude")),
+    .init(name: "VS Code",   match: .bundleID("com.microsoft.VSCode")),
+    .init(name: "Zed",       match: .bundleID("dev.zed.Zed")),
+    .init(name: "Windsurf",  match: .bundleID("com.exafunction.windsurf")),
 ]
 
 // MARK: - View model
@@ -502,6 +529,7 @@ final class PickerModel: ObservableObject {
         let stored: [StoredActiveTarget] = active.compactMap { target in
             switch target.kind {
             case .recommended(let bid): return .recommended(bundleID: bid)
+            case .recommendedByName(let n): return .recommendedByName(processName: n)
             case .application(let bid): return .application(bundleID: bid, name: target.label)
             case .custom(let id): return .custom(id: id)
             case .pid: return nil // ephemeral, can't survive relaunch
@@ -525,6 +553,13 @@ final class PickerModel: ObservableObject {
                 }) {
                     restored.append(t)
                 }
+            case .recommendedByName(let n):
+                if let t = recommended.first(where: {
+                    if case .recommendedByName(let pn) = $0.kind { return pn == n }
+                    return false
+                }) {
+                    restored.append(t)
+                }
             case .application(let bid, let name):
                 restored.append(TraceTarget(
                     id: "app:\(bid)",
@@ -544,14 +579,24 @@ final class PickerModel: ObservableObject {
 
     func recommendedTargets() -> [TraceTarget] {
         recommendedEntries.map { entry in
-            let icon = iconForBundleID(entry.bundleID)
-            return TraceTarget(
-                id: "rec:\(entry.bundleID)",
-                kind: .recommended(bundleID: entry.bundleID),
-                label: entry.name,
-                detail: entry.bundleID,
-                icon: icon
-            )
+            switch entry.match {
+            case .bundleID(let bid):
+                return TraceTarget(
+                    id: "rec:\(bid)",
+                    kind: .recommended(bundleID: bid),
+                    label: entry.name,
+                    detail: bid,
+                    icon: iconForBundleID(bid)
+                )
+            case .processName(let pname):
+                return TraceTarget(
+                    id: "rec-name:\(pname)",
+                    kind: .recommendedByName(processName: pname),
+                    label: entry.name,
+                    detail: "process: \(pname)",
+                    icon: nil
+                )
+            }
         }
     }
 
@@ -876,7 +921,11 @@ private struct RecommendedCategoryView: View {
 
     private func statusDot(for t: TraceTarget) -> some View {
         let running: Bool
-        if case .recommended(let bid) = t.kind { running = model.isRunning(bundleID: bid) } else { running = false }
+        switch t.kind {
+        case .recommended(let bid):       running = model.isRunning(bundleID: bid)
+        case .recommendedByName(let n):   running = !findProcessesByName(n).isEmpty
+        default:                          running = false
+        }
         return Circle()
             .fill(running ? Color.green : Color.secondary.opacity(0.4))
             .frame(width: 8, height: 8)
@@ -1167,7 +1216,7 @@ private struct ActiveListView: View {
 
     private func iconName(for kind: TargetKind) -> String {
         switch kind {
-        case .recommended: return "star.fill"
+        case .recommended, .recommendedByName: return "star.fill"
         case .application: return "app.fill"
         case .pid: return "number"
         case .custom: return "doc.fill"
