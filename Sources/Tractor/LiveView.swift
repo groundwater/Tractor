@@ -284,11 +284,63 @@ struct DetailPane: View {
     @ObservedObject var model: LiveModel
     let selection: pid_t?
     @Binding var tab: LiveView.DetailTab
+    @State private var cwd: String = ""
+    @State private var args: [String] = []
+    @State private var env: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
             if let pid = selection, let node = model.processes[pid] {
                 DetailHeader(node: node)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        section("Working Directory") {
+                            Text(verbatim: cwd.isEmpty ? "—" : cwd)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(cwd)
+                        }
+                        section("Arguments") {
+                            if args.isEmpty {
+                                Text(verbatim: "—").foregroundStyle(.secondary)
+                            } else {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(Array(args.enumerated()), id: \.offset) { _, arg in
+                                        Text(verbatim: arg)
+                                            .font(.system(.callout, design: .monospaced))
+                                            .textSelection(.enabled)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .help(arg)
+                                    }
+                                }
+                            }
+                        }
+                        section("Environment") {
+                            if env.isEmpty {
+                                Text(verbatim: "—").foregroundStyle(.secondary)
+                            } else {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(Array(env.enumerated()), id: \.offset) { _, e in
+                                        Text(verbatim: e)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .textSelection(.enabled)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .help(e)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                }
                 Divider()
                 Picker("", selection: $tab) {
                     Text("Files (\(model.fileStats[pid]?.count ?? 0))").tag(LiveView.DetailTab.files)
@@ -308,6 +360,8 @@ struct DetailPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onAppear { fetchProcessDetails(for: selection) }
+        .onChange(of: selection) { _, newValue in fetchProcessDetails(for: newValue) }
         .background(Color(NSColor.controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
@@ -329,6 +383,28 @@ struct DetailPane: View {
             )
             .fill(Color(NSColor.windowBackgroundColor))
         )
+    }
+
+    @ViewBuilder
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .tracking(0.4)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func fetchProcessDetails(for pid: pid_t?) {
+        guard let pid = pid else {
+            cwd = ""; args = []; env = []
+            return
+        }
+        cwd = getProcessCwd(pid) ?? ""
+        args = getProcessArgs(pid)
+        env = getProcessEnv(pid)
     }
 }
 

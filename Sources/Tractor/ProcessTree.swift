@@ -234,6 +234,18 @@ func getProcessArgs(_ pid: pid_t) -> [String] {
     return args
 }
 
+/// Working directory for a process, via PROC_PIDVNODEPATHINFO.
+func getProcessCwd(_ pid: pid_t) -> String? {
+    var vnodeInfo = proc_vnodepathinfo()
+    let size = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, Int32(MemoryLayout<proc_vnodepathinfo>.size))
+    guard size > 0 else { return nil }
+    let cwd = withUnsafePointer(to: vnodeInfo.pvi_cdir.vip_path) { tuplePtr -> String in
+        let cap = MemoryLayout.size(ofValue: vnodeInfo.pvi_cdir.vip_path)
+        return tuplePtr.withMemoryRebound(to: CChar.self, capacity: cap) { String(cString: $0) }
+    }
+    return cwd.isEmpty ? nil : cwd
+}
+
 /// Get environment variables for a process from KERN_PROCARGS2
 func getProcessEnv(_ pid: pid_t) -> [String] {
     var argmax: Int = 0
