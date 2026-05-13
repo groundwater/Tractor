@@ -380,17 +380,24 @@ struct DetailPane: View {
     @State private var argsExpanded: Bool = true
     @State private var envExpanded: Bool = false
 
+    /// True when the selected row is a top-level group header — id like
+    /// "g:<group_id>" with no "/" (process rows nested under groups have
+    /// the group prefix plus "/pid/...").
+    private var isGroupRow: Bool {
+        guard let id = selectionID else { return false }
+        return id.hasPrefix("g:") && !id.contains("/")
+    }
+
     private var selectedPid: pid_t? {
-        guard let id = selectionID, !id.hasPrefix("g:"),
+        guard !isGroupRow,
+              let id = selectionID,
               let last = id.split(separator: "/").last else { return nil }
         return pid_t(last)
     }
 
-    /// Group id when a group row is selected, "" when no selection.
-    /// nil when a process row is selected.
-    private var groupSelection: String? {
-        guard let id = selectionID else { return "" }   // no selection → default
-        guard id.hasPrefix("g:") else { return nil }    // process selection
+    /// Group id when the *header* row of a group is selected; nil otherwise.
+    private var selectedGroupID: String? {
+        guard isGroupRow, let id = selectionID else { return nil }
         return String(id.dropFirst(2))
     }
 
@@ -405,7 +412,7 @@ struct DetailPane: View {
     private var contentView: some View {
         if let pid = selectedPid, let node = model.processes[pid] {
             processDetailView(pid: pid, node: node)
-        } else if let groupID = groupSelection {
+        } else if let groupID = selectedGroupID {
             recordOptionsView(groupID: groupID)
         } else {
             ContentUnavailableView("Select a process", systemImage: "scope")
@@ -481,19 +488,14 @@ struct DetailPane: View {
 
     @ViewBuilder
     private func recordOptionsView(groupID: String) -> some View {
-        let isDefault = groupID.isEmpty
-        let group = isDefault ? nil : model.groups.first(where: { $0.id == groupID })
-        let title = isDefault ? "Default Record Options" : (group?.label ?? "Default Record Options")
-        let subtitle: String? = isDefault
-            ? "Applied to new categories until you override them."
-            : "Per-category record options."
-        let hasOverride = !isDefault && AppPrefs.shared.perGroupRecordOptions[groupID] != nil
+        let group = model.groups.first(where: { $0.id == groupID })
+        let hasOverride = AppPrefs.shared.perGroupRecordOptions[groupID] != nil
         RecordOptionsEditor(
-            title: title,
-            subtitle: subtitle,
-            options: AppPrefs.shared.recordOptionsBinding(for: isDefault ? nil : groupID),
+            title: group?.label ?? "Category",
+            subtitle: "Record options for this category.",
+            options: AppPrefs.shared.recordOptionsBinding(for: groupID),
             canResetToDefault: hasOverride,
-            onResetToDefault: isDefault ? nil : {
+            onResetToDefault: {
                 AppPrefs.shared.perGroupRecordOptions[groupID] = nil
             }
         )
