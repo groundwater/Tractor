@@ -687,7 +687,7 @@ private struct PickerPane: View {
     @State private var category: PickerCategory = .recommended
 
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             List(PickerCategory.allCases, id: \.self, selection: $category) { cat in
                 HStack {
                     Label(cat.title, systemImage: cat.systemImage)
@@ -700,8 +700,8 @@ private struct PickerPane: View {
                 }
                 .tag(cat)
             }
-            .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
-        } detail: {
+            .listStyle(.sidebar)
+            .frame(minWidth: 160, idealWidth: 200, maxWidth: 260)
             Group {
                 switch category {
                 case .targets:      TargetsCategoryView(model: model)
@@ -711,7 +711,7 @@ private struct PickerPane: View {
                 case .custom:       CustomCategoryView(model: model)
                 }
             }
-            .navigationSplitViewColumnWidth(min: 380, ideal: 520)
+            .frame(minWidth: 380, idealWidth: 520)
         }
     }
 }
