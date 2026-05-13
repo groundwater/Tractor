@@ -572,11 +572,16 @@ private struct MainView: View {
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        Group {
-            switch selection {
-            case .trace: RootView(filter: filter)
-            case .setup: SetupView()
-            }
+        // Keep both subviews in the hierarchy and toggle visibility instead of
+        // switching them in/out — that way RootView's @StateObject runner and
+        // PickerModel survive when the user flips to Setup and back.
+        ZStack {
+            RootView(filter: filter)
+                .opacity(selection == .trace ? 1 : 0)
+                .allowsHitTesting(selection == .trace)
+            SetupView()
+                .opacity(selection == .setup ? 1 : 0)
+                .allowsHitTesting(selection == .setup)
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
