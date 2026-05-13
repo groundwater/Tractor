@@ -83,8 +83,9 @@ enum TractorGUIEntry {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     var window: NSWindow?
+    private static let toggleInspectorItemID = NSToolbarItem.Identifier("ToggleInspector")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let content = NSHostingView(rootView: MainView())
@@ -96,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "Tractor"
         window.contentView = content
+        window.toolbarStyle = .unified
+        let toolbar = NSToolbar(identifier: "main")
+        toolbar.delegate = self
+        toolbar.allowsUserCustomization = false
+        toolbar.displayMode = .iconOnly
+        window.toolbar = toolbar
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.window = window
@@ -111,12 +118,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
+    @objc func toggleInspector(_ sender: Any?) {
+        AppPrefs.shared.inspectorShown.toggle()
+    }
+
+    @MainActor
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(toggleHideExited(_:)) {
             menuItem.state = AppPrefs.shared.hideExited ? .on : .off
             return true
         }
         return true
+    }
+
+    // MARK: - NSToolbarDelegate
+
+    func toolbar(_ toolbar: NSToolbar,
+                 itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard itemIdentifier == Self.toggleInspectorItemID else { return nil }
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.label = "Inspector"
+        item.paletteLabel = "Inspector"
+        item.toolTip = "Toggle inspector"
+        item.isBordered = true
+        item.image = NSImage(systemSymbolName: "sidebar.right",
+                             accessibilityDescription: "Toggle inspector")
+        item.target = self
+        item.action = #selector(toggleInspector(_:))
+        return item
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.toggleInspectorItemID]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.toggleInspectorItemID]
     }
 }
 
@@ -535,12 +573,11 @@ private struct RootView: View {
     @StateObject private var model = PickerModel()
     @StateObject private var runner = TraceRunner()
     @State private var pickerSheetShown = false
-    @State private var inspectorShown = true
 
     var body: some View {
         VStack(spacing: 0) {
             if runner.isRunning {
-                LiveView(model: runner.live, inspectorShown: $inspectorShown)
+                LiveView(model: runner.live, onAddTarget: { pickerSheetShown = true })
             } else {
                 PickerPane(model: model)
             }
@@ -575,19 +612,6 @@ private struct RootView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if runner.isRunning {
-                Button {
-                    pickerSheetShown = true
-                } label: {
-                    Label("Add target", systemImage: "plus")
-                }
-            }
-            Button {
-                inspectorShown.toggle()
-            } label: {
-                Image(systemName: "sidebar.right")
-            }
-            .help(inspectorShown ? "Hide inspector" : "Show inspector")
             if runner.isRunning {
                 RecordButton(isRecording: true) { runner.stop() }
                     .keyboardShortcut(.return, modifiers: [.command])

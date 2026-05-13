@@ -8,12 +8,13 @@ final class AppPrefs: ObservableObject {
     static let hideExitedAfter: TimeInterval = 3.0
 
     @Published var hideExited: Bool = true
+    @Published var inspectorShown: Bool = true
 }
 
 struct LiveView: View {
     @ObservedObject var model: LiveModel
     @ObservedObject private var prefs = AppPrefs.shared
-    @Binding var inspectorShown: Bool
+    var onAddTarget: () -> Void
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: DetailTab = .files
 
@@ -23,11 +24,24 @@ struct LiveView: View {
         // .periodic ticks once per second so exited processes disappear
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
-            ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
-                .inspector(isPresented: $inspectorShown) {
-                    DetailPane(model: model, selection: selectedPid, tab: $detailTab)
-                        .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
+            VStack(spacing: 0) {
+                ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                HStack {
+                    Button(action: onAddTarget) {
+                        Label("Add target", systemImage: "plus")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    Spacer()
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(NSColor.controlBackgroundColor))
+            }
+            .inspector(isPresented: $prefs.inspectorShown) {
+                DetailPane(model: model, selection: selectedPid, tab: $detailTab)
+                    .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
+            }
         }
     }
 
