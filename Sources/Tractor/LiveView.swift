@@ -164,6 +164,33 @@ extension LiveModel {
     }
 }
 
+/// A flattened tree row used to drive the non-hierarchical Table. Carries the
+/// row's tree depth + whether it has children so we can render an indent and
+/// a manual chevron. Going flat (instead of using SwiftUI Table's hierarchical
+/// init) gives us "expanded by default" — new rows are visible immediately
+/// without needing to seed Table's internal disclosure state.
+struct FlatProcessRow: Identifiable, Hashable {
+    let row: ProcessTableRow
+    let depth: Int
+    let hasChildren: Bool
+    var id: ProcessTableRow.ID { row.id }
+}
+
+/// Recursively flatten the row tree, skipping any subtree whose root is in
+/// `collapsed`. New rows that appear later are absent from `collapsed`, so
+/// they're rendered fully expanded by default.
+func flattenRows(_ rows: [ProcessTableRow], depth: Int = 0, collapsed: Set<ProcessTableRow.ID>) -> [FlatProcessRow] {
+    var out: [FlatProcessRow] = []
+    for r in rows {
+        let kids = r.children ?? []
+        out.append(FlatProcessRow(row: r, depth: depth, hasChildren: !kids.isEmpty))
+        if !kids.isEmpty && !collapsed.contains(r.id) {
+            out.append(contentsOf: flattenRows(kids, depth: depth + 1, collapsed: collapsed))
+        }
+    }
+    return out
+}
+
 // MARK: - Table
 
 private struct ProcessTableView: View {
@@ -171,47 +198,66 @@ private struct ProcessTableView: View {
     let now: Date
     let hideExited: Bool
     @Binding var selection: ProcessTableRow.ID?
+    @State private var collapsed: Set<ProcessTableRow.ID> = []
 
     var body: some View {
-        Table(model.buildRows(now: now, hideExited: hideExited), children: \.children, selection: $selection) {
-            TableColumn("Process") { row in
-                HStack(spacing: 6) {
-                    if row.isGroup {
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                    } else if row.placeholder {
-                        // no leading dot
+        let flat = flattenRows(model.buildRows(now: now, hideExited: hideExited), collapsed: collapsed)
+        Table(flat, selection: $selection) {
+            TableColumn("Process") { entry in
+                HStack(spacing: 4) {
+                    Spacer().frame(width: CGFloat(entry.depth) * 14)
+                    if entry.hasChildren {
+                        Button {
+                            if collapsed.contains(entry.id) {
+                                collapsed.remove(entry.id)
+                            } else {
+                                collapsed.insert(entry.id)
+                            }
+                        } label: {
+                            Image(systemName: collapsed.contains(entry.id) ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 12)
+                        }
+                        .buttonStyle(.plain)
                     } else {
-                        Image(systemName: row.exited ? "circle" : "circle.fill")
-                            .font(.system(size: 6))
-                            .foregroundStyle(row.exited ? Color.secondary : Color.green)
+                        Spacer().frame(width: 12)
                     }
-                    Text(row.name)
-                        .font(row.isGroup ? .body.weight(.semibold) : .body)
-                        .foregroundStyle(row.placeholder ? .secondary : .primary)
+                    if entry.row.isGroup {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                    } else if entry.row.placeholder {
+                        EmptyView()
+                    } else {
+                        Image(systemName: entry.row.exited ? "circle" : "circle.fill")
+                            .font(.system(size: 6))
+                            .foregroundStyle(entry.row.exited ? Color.secondary : Color.green)
+                    }
+                    Text(entry.row.name)
+                        .font(entry.row.isGroup ? .body.weight(.semibold) : .body)
+                        .foregroundStyle(entry.row.placeholder ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
             .width(min: 160)
-            TableColumn("PID") { row in
-                Text(row.pidLabel).foregroundStyle(.secondary)
+            TableColumn("PID") { entry in
+                Text(entry.row.pidLabel).foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
-            TableColumn("Files") { row in
-                Text(row.isGroup || row.placeholder ? "" : "\(row.fileOpCount)")
+            TableColumn("Files") { entry in
+                Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
                     .foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
-            TableColumn("Connections") { row in
-                Text(row.isGroup || row.placeholder ? "" : "\(row.connectionCount)")
+            TableColumn("Connections") { entry in
+                Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
                     .foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 90, max: 110)
-            TableColumn("Status") { row in
-                if row.isGroup || row.placeholder {
+            TableColumn("Status") { entry in
+                if entry.row.isGroup || entry.row.placeholder {
                     Text("").foregroundStyle(.secondary)
-                } else if let code = row.exitStatus {
+                } else if let code = entry.row.exitStatus {
                     Text("exited \(code)").foregroundStyle(.secondary)
                 } else {
                     Text("running").foregroundStyle(.secondary)
