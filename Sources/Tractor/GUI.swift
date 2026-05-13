@@ -83,29 +83,18 @@ enum TractorGUIEntry {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
-    private static let toggleInspectorItemID = NSToolbarItem.Identifier("ToggleInspector")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let content = NSHostingView(rootView: MainView())
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 640),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
+        let controller = NSHostingController(rootView: MainView())
+        let window = NSWindow(contentViewController: controller)
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Tractor"
-        window.contentView = content
-        window.toolbarStyle = .unified
-        let toolbar = NSToolbar(identifier: "main")
-        toolbar.delegate = self
-        toolbar.allowsUserCustomization = false
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
         // Persist size + position across launches. AppKit handles save/restore
         // automatically; centers only on the very first launch (no saved frame).
         if !window.setFrameUsingName("TractorMainWindow") {
+            window.setContentSize(NSSize(width: 760, height: 640))
             window.center()
         }
         window.setFrameAutosaveName("TractorMainWindow")
@@ -123,43 +112,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     }
 
     @MainActor
-    @objc func toggleInspector(_ sender: Any?) {
-        AppPrefs.shared.inspectorShown.toggle()
-    }
-
-    @MainActor
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(toggleHideExited(_:)) {
             menuItem.state = AppPrefs.shared.hideExited ? .on : .off
             return true
         }
         return true
-    }
-
-    // MARK: - NSToolbarDelegate
-
-    func toolbar(_ toolbar: NSToolbar,
-                 itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        guard itemIdentifier == Self.toggleInspectorItemID else { return nil }
-        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-        item.label = "Inspector"
-        item.paletteLabel = "Inspector"
-        item.toolTip = "Toggle inspector"
-        item.isBordered = true
-        item.image = NSImage(systemSymbolName: "sidebar.right",
-                             accessibilityDescription: "Toggle inspector")
-        item.target = self
-        item.action = #selector(toggleInspector(_:))
-        return item
-    }
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.toggleInspectorItemID]
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.toggleInspectorItemID]
     }
 }
 
@@ -587,6 +545,7 @@ final class PickerModel: ObservableObject {
 private struct MainView: View {
     enum Tab: Hashable { case trace, setup }
     @State private var selection: Tab = .trace
+    @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
         TabView(selection: $selection) {
@@ -598,6 +557,16 @@ private struct MainView: View {
                 .tag(Tab.setup)
         }
         .frame(minWidth: 720, minHeight: 580)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    prefs.inspectorShown.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
+            }
+        }
     }
 }
 
@@ -628,7 +597,14 @@ private struct RootView: View {
             }
             .frame(minWidth: 640, minHeight: 560)
         }
-        .onAppear { runner.ensureStarted() }
+        .onAppear {
+            runner.ensureStarted()
+            // Push the restored-from-UserDefaults active list to the session.
+            // .onChange below only fires on subsequent changes, not the initial
+            // value, so without this the persisted targets would silently
+            // never attach to the trace session.
+            runner.apply(active: model.active, runningByBundleID: model.runningByBundleID)
+        }
         .onChange(of: model.active) { _, _ in
             runner.apply(active: model.active, runningByBundleID: model.runningByBundleID)
         }
@@ -643,12 +619,12 @@ private struct RootView: View {
                     Text("Recording — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                } else if let msg = runner.lastMessage {
-                    Text(msg).font(.caption).foregroundStyle(.secondary)
                 } else if runner.isRunning {
                     Text("Tracing — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                } else if let msg = runner.lastMessage {
+                    Text(msg).font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
