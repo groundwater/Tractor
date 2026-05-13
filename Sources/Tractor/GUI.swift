@@ -572,17 +572,26 @@ private struct MainView: View {
 private struct RootView: View {
     @StateObject private var model = PickerModel()
     @StateObject private var runner = TraceRunner()
+    @ObservedObject private var prefs = AppPrefs.shared
     @State private var pickerSheetShown = false
+    @State private var selection: ProcessTableRow.ID? = nil
+    @State private var detailTab: LiveView.DetailTab = .files
 
     var body: some View {
         VStack(spacing: 0) {
             if runner.isRunning {
-                LiveView(model: runner.live, onAddTarget: { pickerSheetShown = true })
+                LiveView(model: runner.live,
+                         selection: $selection,
+                         onAddTarget: { pickerSheetShown = true })
             } else {
                 PickerPane(model: model)
             }
             Divider()
             footer
+        }
+        .inspector(isPresented: $prefs.inspectorShown) {
+            DetailPane(model: runner.live, selection: selectedPid(from: selection), tab: $detailTab)
+                .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
         }
         .frame(minWidth: 720, minHeight: 520)
         .sheet(isPresented: $pickerSheetShown) {
@@ -635,7 +644,7 @@ private struct RecordButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: isRecording ? "stop.circle.fill" : "record.circle.fill")
+                Image(systemName: isRecording ? "stop.fill" : "circle.fill")
                     .foregroundStyle(Color.red)
                     .shadow(color: isRecording ? Color.red.opacity(pulse ? 0.9 : 0.4) : .clear,
                             radius: isRecording ? (pulse ? 8 : 4) : 0)

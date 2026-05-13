@@ -14,9 +14,8 @@ final class AppPrefs: ObservableObject {
 struct LiveView: View {
     @ObservedObject var model: LiveModel
     @ObservedObject private var prefs = AppPrefs.shared
+    @Binding var selection: ProcessTableRow.ID?
     var onAddTarget: () -> Void
-    @State private var selection: ProcessTableRow.ID? = nil
-    @State private var detailTab: DetailTab = .files
 
     enum DetailTab: Hashable { case files, connections }
 
@@ -38,17 +37,14 @@ struct LiveView: View {
                 .padding(.vertical, 4)
                 .background(Color(NSColor.controlBackgroundColor))
             }
-            .inspector(isPresented: $prefs.inspectorShown) {
-                DetailPane(model: model, selection: selectedPid, tab: $detailTab)
-                    .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
-            }
         }
     }
+}
 
-    private var selectedPid: pid_t? {
-        guard let id = selection, id.hasPrefix("p:") else { return nil }
-        return pid_t(id.dropFirst(2))
-    }
+/// Resolves a ProcessTableRow.ID like "p:1234" to a pid_t.
+func selectedPid(from id: ProcessTableRow.ID?) -> pid_t? {
+    guard let id = id, id.hasPrefix("p:") else { return nil }
+    return pid_t(id.dropFirst(2))
 }
 
 // MARK: - Hierarchical row model
@@ -202,7 +198,7 @@ private struct ProcessTableView: View {
 
 // MARK: - Detail pane
 
-private struct DetailPane: View {
+struct DetailPane: View {
     @ObservedObject var model: LiveModel
     let selection: pid_t?
     @Binding var tab: LiveView.DetailTab
