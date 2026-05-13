@@ -704,7 +704,7 @@ private struct RootView: View {
             footer
         }
         .inspector(isPresented: $prefs.inspectorShown) {
-            DetailPane(model: runner.live, selection: selectedPid(from: selection), tab: $detailTab)
+            DetailPane(model: runner.live, selectionID: selection, tab: $detailTab)
                 .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
         }
         .frame(minWidth: 720, minHeight: 520)
