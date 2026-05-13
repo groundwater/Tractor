@@ -686,6 +686,7 @@ private struct RootView: View {
     @StateObject private var runner = TraceRunner()
     @ObservedObject private var prefs = AppPrefs.shared
     @State private var pickerSheetShown = false
+    @State private var optionsSheetShown = false
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: LiveView.DetailTab = .files
 
@@ -713,6 +714,15 @@ private struct RootView: View {
                 pickerSheetShown = false
             }
             .frame(minWidth: 640, minHeight: 560)
+        }
+        .sheet(isPresented: $optionsSheetShown) {
+            RecordOptionsSheet(
+                options: Binding(
+                    get: { prefs.recordOptions },
+                    set: { prefs.recordOptions = $0 }
+                ),
+                onClose: { optionsSheetShown = false }
+            )
         }
         .onAppear {
             runner.ensureStarted()
@@ -748,6 +758,7 @@ private struct RootView: View {
                 }
             }
             Spacer()
+            Button("Options…") { optionsSheetShown = true }
             RecordButton(isRecording: runner.isRecording) {
                 runner.isRecording.toggle()
             }

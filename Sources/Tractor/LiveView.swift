@@ -14,35 +14,21 @@ struct RecordOptions: Codable, Hashable {
     var http: Bool = true
 }
 
-/// Persists default RecordOptions + per-group overrides in UserDefaults.
+/// Persists global RecordOptions in UserDefaults.
 private final class RecordOptionsStore {
     private let defaults = UserDefaults.standard
-    private let defaultKey = "tractor.gui.recordOptions.default.v1"
-    private let perGroupKey = "tractor.gui.recordOptions.perGroup.v1"
+    private let key = "tractor.gui.recordOptions.v1"
 
-    func loadDefault() -> RecordOptions {
-        guard let data = defaults.data(forKey: defaultKey),
+    func load() -> RecordOptions {
+        guard let data = defaults.data(forKey: key),
               let opts = try? JSONDecoder().decode(RecordOptions.self, from: data)
         else { return RecordOptions() }
         return opts
     }
 
-    func saveDefault(_ opts: RecordOptions) {
+    func save(_ opts: RecordOptions) {
         if let data = try? JSONEncoder().encode(opts) {
-            defaults.set(data, forKey: defaultKey)
-        }
-    }
-
-    func loadPerGroup() -> [String: RecordOptions] {
-        guard let data = defaults.data(forKey: perGroupKey),
-              let map = try? JSONDecoder().decode([String: RecordOptions].self, from: data)
-        else { return [:] }
-        return map
-    }
-
-    func savePerGroup(_ map: [String: RecordOptions]) {
-        if let data = try? JSONEncoder().encode(map) {
-            defaults.set(data, forKey: perGroupKey)
+            defaults.set(data, forKey: key)
         }
     }
 }
@@ -57,45 +43,17 @@ final class AppPrefs: ObservableObject {
     @Published var hideExited: Bool = true
     @Published var inspectorShown: Bool = true
 
-    /// Default record options applied when a new group is added or when
-    /// the user has no per-group override for that group's ID.
-    @Published var defaultRecordOptions: RecordOptions {
-        didSet { recordOptionsStore.saveDefault(defaultRecordOptions) }
-    }
-    /// Per-group overrides keyed by TraceGroup.id.
-    @Published var perGroupRecordOptions: [String: RecordOptions] {
-        didSet { recordOptionsStore.savePerGroup(perGroupRecordOptions) }
+    /// Global record options — which event types get persisted to the SQLite
+    /// trace DB when recording is on. Set via the toolbar Options… modal.
+    @Published var recordOptions: RecordOptions {
+        didSet { recordOptionsStore.save(recordOptions) }
     }
 
     private let recordOptionsStore = RecordOptionsStore()
 
     private init() {
         let store = RecordOptionsStore()
-        self.defaultRecordOptions = store.loadDefault()
-        self.perGroupRecordOptions = store.loadPerGroup()
-    }
-
-    /// Effective options for the given group id — per-group override if present,
-    /// otherwise the current default.
-    func effectiveRecordOptions(for groupID: String?) -> RecordOptions {
-        if let id = groupID, let opts = perGroupRecordOptions[id] { return opts }
-        return defaultRecordOptions
-    }
-
-    /// Returns a Binding that reads/writes a group's options (or the default
-    /// when groupID is nil), automatically materialising a per-group entry on
-    /// first write.
-    func recordOptionsBinding(for groupID: String?) -> Binding<RecordOptions> {
-        if let id = groupID {
-            return Binding(
-                get: { self.perGroupRecordOptions[id] ?? self.defaultRecordOptions },
-                set: { self.perGroupRecordOptions[id] = $0 }
-            )
-        }
-        return Binding(
-            get: { self.defaultRecordOptions },
-            set: { self.defaultRecordOptions = $0 }
-        )
+        self.recordOptions = store.load()
     }
 }
 
@@ -380,25 +338,13 @@ struct DetailPane: View {
     @State private var argsExpanded: Bool = true
     @State private var envExpanded: Bool = false
 
-    /// True when the selected row is a top-level group header — id like
-    /// "g:<group_id>" with no "/" (process rows nested under groups have
-    /// the group prefix plus "/pid/...").
-    private var isGroupRow: Bool {
-        guard let id = selectionID else { return false }
-        return id.hasPrefix("g:") && !id.contains("/")
-    }
-
+    /// Pid for a selected process row. Group header rows ("g:<id>" with no
+    /// embedded "/") return nil — no process detail to show.
     private var selectedPid: pid_t? {
-        guard !isGroupRow,
-              let id = selectionID,
-              let last = id.split(separator: "/").last else { return nil }
+        guard let id = selectionID else { return nil }
+        if id.hasPrefix("g:") && !id.contains("/") { return nil }   // group header
+        guard let last = id.split(separator: "/").last else { return nil }
         return pid_t(last)
-    }
-
-    /// Group id when the *header* row of a group is selected; nil otherwise.
-    private var selectedGroupID: String? {
-        guard isGroupRow, let id = selectionID else { return nil }
-        return String(id.dropFirst(2))
     }
 
     var body: some View {
@@ -412,8 +358,6 @@ struct DetailPane: View {
     private var contentView: some View {
         if let pid = selectedPid, let node = model.processes[pid] {
             processDetailView(pid: pid, node: node)
-        } else if let groupID = selectedGroupID {
-            recordOptionsView(groupID: groupID)
         } else {
             ContentUnavailableView("Select a process", systemImage: "scope")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -484,21 +428,6 @@ struct DetailPane: View {
                 ConnectionsTable(byFlow: model.connections[pid] ?? [:])
             }
         }
-    }
-
-    @ViewBuilder
-    private func recordOptionsView(groupID: String) -> some View {
-        let group = model.groups.first(where: { $0.id == groupID })
-        let hasOverride = AppPrefs.shared.perGroupRecordOptions[groupID] != nil
-        RecordOptionsEditor(
-            title: group?.label ?? "Category",
-            subtitle: "Record options for this category.",
-            options: AppPrefs.shared.recordOptionsBinding(for: groupID),
-            canResetToDefault: hasOverride,
-            onResetToDefault: {
-                AppPrefs.shared.perGroupRecordOptions[groupID] = nil
-            }
-        )
     }
 
     @ViewBuilder
@@ -615,77 +544,42 @@ private extension View {
     }
 }
 
-/// Toggles for which event types this group (or the global default) records
-/// to the SQLite trace DB. Shown in the inspector when a category row is
-/// selected, or when nothing is selected (editing the defaults).
-private struct RecordOptionsEditor: View {
-    let title: String
-    let subtitle: String?
+/// Modal sheet content for editing the global RecordOptions — invoked from
+/// the toolbar/footer Options… button next to Record.
+struct RecordOptionsSheet: View {
     @Binding var options: RecordOptions
-    let canResetToDefault: Bool
-    let onResetToDefault: (() -> Void)?
+    var onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.headline)
-                if let subtitle = subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        VStack(spacing: 0) {
+            HStack {
+                Text("Record Options").font(.headline)
+                Spacer()
+                Button("Done", action: onClose)
+                    .keyboardShortcut(.return, modifiers: [.command])
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding()
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    sectionHeader("Process")
+            Form {
+                Section("Process") {
                     Toggle("Exec", isOn: $options.exec)
                     Toggle("Exit", isOn: $options.exit)
-
-                    sectionHeader("Files")
+                }
+                Section("Files") {
                     Toggle("Reads", isOn: $options.fileRead)
                     Toggle("Writes", isOn: $options.fileWrite)
                     Toggle("Creates", isOn: $options.fileCreate)
                     Toggle("Deletes", isOn: $options.fileDelete)
                     Toggle("Renames", isOn: $options.fileRename)
-
-                    sectionHeader("Network")
+                }
+                Section("Network") {
                     Toggle("Connections", isOn: $options.network)
                     Toggle("HTTP traffic", isOn: $options.http)
                 }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 12)
             }
-            if canResetToDefault, let reset = onResetToDefault {
-                Divider()
-                HStack {
-                    Spacer()
-                    Button("Reset to Default", role: .destructive, action: reset)
-                        .controlSize(.small)
-                }
-                .padding(8)
-            }
-            // NOTE: these toggles are not yet wired to actually gate SQLite
-            // writes — that's a follow-up commit. They persist correctly and
-            // the bindings are live.
-            Spacer(minLength: 0)
+            .formStyle(.grouped)
         }
-    }
-
-    @ViewBuilder
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.caption.bold())
-            .foregroundStyle(.secondary)
-            .tracking(0.4)
-            .padding(.top, 4)
+        .frame(minWidth: 360, minHeight: 480)
     }
 }
 
