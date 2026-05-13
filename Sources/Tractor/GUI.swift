@@ -26,6 +26,12 @@ extension AppDelegate {
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
         appMenu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…",
+                                      action: #selector(AppDelegate.openSettings(_:)),
+                                      keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide \(appName)",
                         action: #selector(NSApplication.hide(_:)),
                         keyEquivalent: "h")
@@ -94,6 +100,7 @@ extension AppDelegate {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
+    var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let controller = NSHostingController(rootView: MainView())
@@ -123,6 +130,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     @objc func focusFilter(_ sender: Any?) {
         NotificationCenter.default.post(name: .focusFilterField, object: nil)
+    }
+
+    @MainActor
+    @objc func openSettings(_ sender: Any?) {
+        if let win = settingsWindow {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let controller = NSHostingController(rootView: SetupView())
+        let win = NSWindow(contentViewController: controller)
+        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        win.title = "Settings"
+        win.setContentSize(NSSize(width: 620, height: 520))
+        if !win.setFrameUsingName("TractorSettingsWindow") {
+            win.center()
+        }
+        win.setFrameAutosaveName("TractorSettingsWindow")
+        win.isReleasedWhenClosed = false
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = win
     }
 
     @MainActor
@@ -566,46 +595,26 @@ final class PickerModel: ObservableObject {
 // MARK: - Root
 
 private struct MainView: View {
-    enum Tab: Hashable, CaseIterable { case trace, setup }
-    @State private var selection: Tab = .trace
     @State private var filter: String = ""
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        // Keep both subviews in the hierarchy and toggle visibility instead of
-        // switching them in/out — that way RootView's @StateObject runner and
-        // PickerModel survive when the user flips to Setup and back.
-        ZStack {
-            RootView(filter: filter)
-                .opacity(selection == .trace ? 1 : 0)
-                .allowsHitTesting(selection == .trace)
-            SetupView()
-                .opacity(selection == .setup ? 1 : 0)
-                .allowsHitTesting(selection == .setup)
-        }
-        .frame(minWidth: 720, minHeight: 580)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                FilterField(text: $filter, placeholder: "Find")
-                    .frame(width: 200)
-            }
-            ToolbarItem(placement: .principal) {
-                Picker("View", selection: $selection) {
-                    Text("Trace").tag(Tab.trace)
-                    Text("Setup").tag(Tab.setup)
+        RootView(filter: filter)
+            .frame(minWidth: 720, minHeight: 580)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    FilterField(text: $filter, placeholder: "Find")
+                        .frame(width: 200)
                 }
-                .pickerStyle(.segmented)
-                .fixedSize()
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    prefs.inspectorShown.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        prefs.inspectorShown.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                    }
+                    .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
                 }
-                .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
             }
-        }
     }
 }
 
