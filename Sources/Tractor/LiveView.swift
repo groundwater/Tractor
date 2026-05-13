@@ -308,6 +308,13 @@ struct DetailPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color(NSColor.separatorColor).opacity(0.6), lineWidth: 1)
+        )
+        .padding(8)
     }
 }
 
