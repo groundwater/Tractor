@@ -558,7 +558,7 @@ private struct MainView: View {
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .navigation) {
                 Button {
                     prefs.inspectorShown.toggle()
                 } label: {
