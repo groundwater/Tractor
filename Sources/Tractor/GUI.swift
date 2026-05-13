@@ -870,6 +870,8 @@ private struct PickerPane: View {
     @ObservedObject var model: PickerModel
     @Binding var category: PickerCategory
     @Binding var pickSelection: TraceTarget.ID?
+    @Binding var pidSelection: Set<pid_t>
+    @Binding var pidProcesses: [RunningProcessInfo]
 
     var body: some View {
         HSplitView {
@@ -882,13 +884,16 @@ private struct PickerPane: View {
                 switch category {
                 case .recommended:  RecommendedCategoryView(model: model, selection: $pickSelection)
                 case .applications: ApplicationsCategoryView(model: model, selection: $pickSelection)
-                case .pids:         PIDsCategoryView(model: model)
+                case .pids:         PIDsCategoryView(processes: $pidProcesses, selection: $pidSelection)
                 case .custom:       CustomCategoryView(model: model, selection: $pickSelection)
                 }
             }
             .frame(minWidth: 380, idealWidth: 520)
         }
-        .onChange(of: category) { _, _ in pickSelection = nil }
+        .onChange(of: category) { _, _ in
+            pickSelection = nil
+            pidSelection.removeAll()
+        }
     }
 }
 
@@ -974,10 +979,9 @@ private struct ApplicationsCategoryView: View {
 }
 
 private struct PIDsCategoryView: View {
-    @ObservedObject var model: PickerModel
-    @State private var processes: [RunningProcessInfo] = []
+    @Binding var processes: [RunningProcessInfo]
+    @Binding var selection: Set<pid_t>
     @State private var filter: String = ""
-    @State private var selection: Set<pid_t> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1016,21 +1020,6 @@ private struct PIDsCategoryView: View {
                         .help(p.argv)
                 }
             }
-            Divider()
-            HStack {
-                Text(verbatim: "\(selection.count) selected")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    addSelected()
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-                .disabled(selection.isEmpty)
-            }
-            .padding(8)
-            .background(.bar)
         }
         .onAppear {
             if processes.isEmpty {
@@ -1048,21 +1037,6 @@ private struct PIDsCategoryView: View {
                 || p.name.lowercased().contains(q)
                 || p.argv.lowercased().contains(q)
         }
-    }
-
-    private func addSelected() {
-        for pid in selection {
-            guard let p = processes.first(where: { $0.pid == pid }) else { continue }
-            let target = TraceTarget(
-                id: "pid:\(pid)",
-                kind: .pid(pid),
-                label: "PID \(pid) (\(p.name))",
-                detail: nil,
-                icon: nil
-            )
-            model.add(target)
-        }
-        selection.removeAll()
     }
 }
 
@@ -1148,6 +1122,8 @@ private struct PickerSheet: View {
     var onClose: () -> Void
     @State private var category: PickerCategory = .recommended
     @State private var pickSelection: TraceTarget.ID? = nil
+    @State private var pidSelection: Set<pid_t> = []
+    @State private var pidProcesses: [RunningProcessInfo] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1158,23 +1134,47 @@ private struct PickerSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Add", action: addSelected)
                     .keyboardShortcut(.return, modifiers: [.command])
-                    .disabled(resolvedSelection() == nil)
+                    .disabled(!canAdd)
             }
             .padding()
             Divider()
-            PickerPane(model: model, category: $category, pickSelection: $pickSelection)
+            PickerPane(model: model,
+                       category: $category,
+                       pickSelection: $pickSelection,
+                       pidSelection: $pidSelection,
+                       pidProcesses: $pidProcesses)
+        }
+    }
+
+    private var canAdd: Bool {
+        switch category {
+        case .pids: return !pidSelection.isEmpty
+        default:    return resolvedSelection() != nil
         }
     }
 
     private func addSelected() {
-        guard let target = resolvedSelection() else { return }
-        model.add(target)
+        switch category {
+        case .pids:
+            for pid in pidSelection {
+                guard let p = pidProcesses.first(where: { $0.pid == pid }) else { continue }
+                model.add(TraceTarget(
+                    id: "pid:\(pid)",
+                    kind: .pid(pid),
+                    label: "PID \(pid) (\(p.name))",
+                    detail: nil,
+                    icon: nil
+                ))
+            }
+        default:
+            guard let target = resolvedSelection() else { return }
+            model.add(target)
+        }
         onClose()
     }
 
     /// Maps the current `pickSelection` ID to a TraceTarget by looking it up
-    /// in whatever list the current category renders. Returns nil when the
-    /// category has no row-based selection (PIDs) or when nothing is selected.
+    /// in whatever list the current category renders.
     private func resolvedSelection() -> TraceTarget? {
         guard let id = pickSelection else { return nil }
         switch category {
