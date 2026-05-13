@@ -554,15 +554,17 @@ final class PickerModel: ObservableObject {
 private struct MainView: View {
     enum Tab: Hashable, CaseIterable { case trace, setup }
     @State private var selection: Tab = .trace
+    @State private var filter: String = ""
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
         Group {
             switch selection {
-            case .trace: RootView()
+            case .trace: RootView(filter: filter)
             case .setup: SetupView()
             }
         }
+        .searchable(text: $filter, prompt: "Filter processes")
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -585,6 +587,7 @@ private struct MainView: View {
 }
 
 private struct RootView: View {
+    let filter: String
     @StateObject private var model = PickerModel()
     @StateObject private var runner = TraceRunner()
     @ObservedObject private var prefs = AppPrefs.shared
@@ -595,6 +598,7 @@ private struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             LiveView(model: runner.live,
+                     filter: filter,
                      selection: $selection,
                      onAddTarget: { pickerSheetShown = true },
                      onDeleteGroup: { groupID in

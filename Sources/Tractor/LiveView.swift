@@ -14,6 +14,7 @@ final class AppPrefs: ObservableObject {
 struct LiveView: View {
     @ObservedObject var model: LiveModel
     @ObservedObject private var prefs = AppPrefs.shared
+    let filter: String
     @Binding var selection: ProcessTableRow.ID?
     var onAddTarget: () -> Void
     var onDeleteGroup: (String) -> Void
@@ -25,7 +26,7 @@ struct LiveView: View {
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
-                ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, filter: filter, selection: $selection)
                     .onDeleteCommand {
                         // Top-level group row ids look like "g:<group_id>" with
                         // no embedded "/" (process rows are paths with slashes).
@@ -89,16 +90,24 @@ struct ProcessTableRow: Identifiable, Hashable {
     /// distinct rows. Otherwise SwiftUI Table treats them as the same row and
     /// selecting one highlights both.
     @MainActor
-    static func process(_ pid: pid_t, model: LiveModel, now: Date, hideExited: Bool, parentID: String) -> ProcessTableRow? {
+    static func process(_ pid: pid_t, model: LiveModel, now: Date, hideExited: Bool, filter: String, parentID: String) -> ProcessTableRow? {
         let id = "\(parentID)/\(pid)"
         let node = model.processes[pid]
         let kids = model.sortedChildren(pid).compactMap {
-            process($0, model: model, now: now, hideExited: hideExited, parentID: id)
+            process($0, model: model, now: now, hideExited: hideExited, filter: filter, parentID: id)
         }
         if hideExited, let exitedAt = node?.exitedAt,
            now.timeIntervalSince(exitedAt) > AppPrefs.hideExitedAfter,
            kids.isEmpty {
             return nil
+        }
+        if !filter.isEmpty {
+            // Keep this row only if it matches OR has a (visible) matching descendant.
+            let selfMatches = node.map {
+                $0.name.localizedCaseInsensitiveContains(filter) ||
+                $0.argv.localizedCaseInsensitiveContains(filter)
+            } ?? false
+            if !selfMatches && kids.isEmpty { return nil }
         }
         return ProcessTableRow(
             id: id,
@@ -129,11 +138,11 @@ struct ProcessTableRow: Identifiable, Hashable {
     }
 
     @MainActor
-    static func group(_ group: TraceGroup, model: LiveModel, now: Date, hideExited: Bool) -> ProcessTableRow {
+    static func group(_ group: TraceGroup, model: LiveModel, now: Date, hideExited: Bool, filter: String) -> ProcessTableRow {
         let groupRowID = "g:\(group.id)"
         let roots = model.rootsForGroup(group.id)
         let kidRows = roots.compactMap {
-            process($0, model: model, now: now, hideExited: hideExited, parentID: groupRowID)
+            process($0, model: model, now: now, hideExited: hideExited, filter: filter, parentID: groupRowID)
         }
         let kids = kidRows.isEmpty
             ? [emptyGroupPlaceholder(groupID: group.id)]
@@ -152,14 +161,14 @@ struct ProcessTableRow: Identifiable, Hashable {
 }
 
 extension LiveModel {
-    func buildRows(now: Date, hideExited: Bool) -> [ProcessTableRow] {
+    func buildRows(now: Date, hideExited: Bool, filter: String) -> [ProcessTableRow] {
         if groups.isEmpty {
             return sortedRoots().compactMap {
-                ProcessTableRow.process($0, model: self, now: now, hideExited: hideExited, parentID: "p")
+                ProcessTableRow.process($0, model: self, now: now, hideExited: hideExited, filter: filter, parentID: "p")
             }
         }
         return groups.map {
-            ProcessTableRow.group($0, model: self, now: now, hideExited: hideExited)
+            ProcessTableRow.group($0, model: self, now: now, hideExited: hideExited, filter: filter)
         }
     }
 }
@@ -197,11 +206,12 @@ private struct ProcessTableView: View {
     @ObservedObject var model: LiveModel
     let now: Date
     let hideExited: Bool
+    let filter: String
     @Binding var selection: ProcessTableRow.ID?
     @State private var collapsed: Set<ProcessTableRow.ID> = []
 
     var body: some View {
-        let flat = flattenRows(model.buildRows(now: now, hideExited: hideExited), collapsed: collapsed)
+        let flat = flattenRows(model.buildRows(now: now, hideExited: hideExited, filter: filter), collapsed: collapsed)
         Table(flat, selection: $selection) {
             TableColumn("Process") { entry in
                 HStack(spacing: 4) {
