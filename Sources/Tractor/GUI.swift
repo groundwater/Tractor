@@ -66,16 +66,16 @@ extension AppDelegate {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
-        // View menu
-        let viewMenuItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "View")
-        let hideExitedItem = NSMenuItem(title: "Hide Exited Processes",
-                                        action: #selector(AppDelegate.toggleHideExited(_:)),
+        // Process menu
+        let processMenuItem = NSMenuItem()
+        let processMenu = NSMenu(title: "Process")
+        let showExitedItem = NSMenuItem(title: "Show Exited",
+                                        action: #selector(AppDelegate.toggleShowExited(_:)),
                                         keyEquivalent: "")
-        hideExitedItem.target = self
-        viewMenu.addItem(hideExitedItem)
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
+        showExitedItem.target = self
+        processMenu.addItem(showExitedItem)
+        processMenuItem.submenu = processMenu
+        mainMenu.addItem(processMenuItem)
 
         // Window menu
         let windowMenuItem = NSMenuItem()
@@ -123,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    @objc func toggleHideExited(_ sender: NSMenuItem) {
+    @objc func toggleShowExited(_ sender: NSMenuItem) {
         AppPrefs.shared.hideExited.toggle()
     }
 
@@ -156,8 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(toggleHideExited(_:)) {
-            menuItem.state = AppPrefs.shared.hideExited ? .on : .off
+        if menuItem.action == #selector(toggleShowExited(_:)) {
+            // "Show Exited" is the inverse of `hideExited` — check on when
+            // we are NOT hiding exited rows.
+            menuItem.state = AppPrefs.shared.hideExited ? .off : .on
             return true
         }
         return true
