@@ -543,22 +543,27 @@ final class PickerModel: ObservableObject {
 // MARK: - Root
 
 private struct MainView: View {
-    enum Tab: Hashable { case trace, setup }
+    enum Tab: Hashable, CaseIterable { case trace, setup }
     @State private var selection: Tab = .trace
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        TabView(selection: $selection) {
-            RootView()
-                .tabItem { Label("Trace", systemImage: "scope") }
-                .tag(Tab.trace)
-            SetupView()
-                .tabItem { Label("Setup", systemImage: "gearshape") }
-                .tag(Tab.setup)
+        Group {
+            switch selection {
+            case .trace: RootView()
+            case .setup: SetupView()
+            }
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
-            ToolbarItem(placement: .navigation) {
+            ToolbarItem(placement: .principal) {
+                Picker("View", selection: $selection) {
+                    Text("Trace").tag(Tab.trace)
+                    Text("Setup").tag(Tab.setup)
+                }
+                .pickerStyle(.segmented)
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     prefs.inspectorShown.toggle()
                 } label: {
