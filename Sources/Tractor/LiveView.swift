@@ -13,6 +13,7 @@ final class AppPrefs: ObservableObject {
 struct LiveView: View {
     @ObservedObject var model: LiveModel
     @ObservedObject private var prefs = AppPrefs.shared
+    @Binding var inspectorShown: Bool
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: DetailTab = .files
 
@@ -22,12 +23,11 @@ struct LiveView: View {
         // .periodic ticks once per second so exited processes disappear
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
-            HSplitView {
-                ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
-                    .frame(minWidth: 480, idealWidth: 640)
-                DetailPane(model: model, selection: selectedPid, tab: $detailTab)
-                    .frame(minWidth: 360)
-            }
+            ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                .inspector(isPresented: $inspectorShown) {
+                    DetailPane(model: model, selection: selectedPid, tab: $detailTab)
+                        .inspectorColumnWidth(min: 320, ideal: 400, max: 700)
+                }
         }
     }
 

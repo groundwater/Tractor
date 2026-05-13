@@ -535,11 +535,12 @@ private struct RootView: View {
     @StateObject private var model = PickerModel()
     @StateObject private var runner = TraceRunner()
     @State private var pickerSheetShown = false
+    @State private var inspectorShown = true
 
     var body: some View {
         VStack(spacing: 0) {
             if runner.isRunning {
-                LiveView(model: runner.live)
+                LiveView(model: runner.live, inspectorShown: $inspectorShown)
             } else {
                 PickerPane(model: model)
             }
@@ -564,7 +565,7 @@ private struct RootView: View {
             if runner.isRunning {
                 HStack(spacing: 6) {
                     Circle().fill(Color.red).frame(width: 8, height: 8)
-                    Text("Tracing — \(model.active.count) target\(model.active.count == 1 ? "" : "s"), \(runner.live.processes.count) processes")
+                    Text("Recording — \(model.active.count) target\(model.active.count == 1 ? "" : "s"), \(runner.live.processes.count) processes")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -581,22 +582,44 @@ private struct RootView: View {
                     Label("Add target", systemImage: "plus")
                 }
                 Button {
-                    runner.stop()
+                    inspectorShown.toggle()
                 } label: {
-                    Text("Stop trace").padding(.horizontal, 12)
+                    Image(systemName: "sidebar.right")
                 }
-                .keyboardShortcut(.return, modifiers: [.command])
+                .help(inspectorShown ? "Hide inspector" : "Show inspector")
+                RecordButton(isRecording: true) { runner.stop() }
+                    .keyboardShortcut(.return, modifiers: [.command])
             } else {
-                Button {
+                RecordButton(isRecording: false) {
                     runner.start(active: model.active, runningByBundleID: model.runningByBundleID)
-                } label: {
-                    Text("Start trace").padding(.horizontal, 12)
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(model.active.isEmpty)
             }
         }
         .padding()
+    }
+}
+
+private struct RecordButton: View {
+    let isRecording: Bool
+    let action: () -> Void
+    @State private var pulse = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: isRecording ? "stop.circle.fill" : "record.circle.fill")
+                    .foregroundStyle(Color.red)
+                    .shadow(color: isRecording ? Color.red.opacity(pulse ? 0.9 : 0.4) : .clear,
+                            radius: isRecording ? (pulse ? 8 : 4) : 0)
+                Text(isRecording ? "Stop" : "Record")
+            }
+            .padding(.horizontal, 10)
+        }
+        .onAppear { if isRecording { pulse = true } }
+        .onChange(of: isRecording) { _, newValue in pulse = newValue }
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
     }
 }
 
