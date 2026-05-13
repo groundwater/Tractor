@@ -311,11 +311,12 @@ private struct FilesTable: View {
                     .truncationMode(.middle)
                     .help(row.path)
             }
-            TableColumn("R") { Text("\($0.stats.reads)") }.width(36)
-            TableColumn("W") { Text("\($0.stats.writes)") }.width(36)
-            TableColumn("C") { Text("\($0.stats.creates)") }.width(36)
-            TableColumn("D") { Text("\($0.stats.deletes)") }.width(36)
-            TableColumn("Rn") { Text("\($0.stats.renames)") }.width(36)
+            .width(min: 80)
+            TableColumn("R") { Text("\($0.stats.reads)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("W") { Text("\($0.stats.writes)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("C") { Text("\($0.stats.creates)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("D") { Text("\($0.stats.deletes)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("Rn") { Text("\($0.stats.renames)") }.width(min: 28, ideal: 32, max: 40)
         }
     }
 }
@@ -344,9 +345,10 @@ private struct ConnectionsTable: View {
                         .truncationMode(.middle)
                 }
             }
-            TableColumn("Port") { Text("\($0.port)") }.width(60)
-            TableColumn("↑") { Text(formatBytes($0.bytesOut)) }.width(80)
-            TableColumn("↓") { Text(formatBytes($0.bytesIn)) }.width(80)
+            .width(min: 80)
+            TableColumn("Port") { Text("\($0.port)") }.width(min: 40, ideal: 50, max: 70)
+            TableColumn("↑") { Text(formatBytes($0.bytesOut)).monospacedDigit() }.width(min: 60, ideal: 70, max: 90)
+            TableColumn("↓") { Text(formatBytes($0.bytesIn)).monospacedDigit() }.width(min: 60, ideal: 70, max: 90)
         }
     }
 

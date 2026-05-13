@@ -51,6 +51,16 @@ final class TraceSession {
     func setSQLiteRecordingEnabled(_ enabled: Bool) {
         sqliteLog?.isEnabled = enabled
     }
+
+    /// Reset the SQLiteLog's recorded-event counter (used when the GUI
+    /// starts a fresh recording session).
+    func resetSQLiteRecordedCount() {
+        sqliteLog?.resetRecordedCount()
+    }
+
+    /// Total number of events written to the SQLite trace DB since the
+    /// last reset. Shown in the GUI footer while recording.
+    var sqliteRecordedCount: Int { sqliteLog?.recordedCount ?? 0 }
     private(set) var isRunning = false
     private var initialOrdered: [pid_t] = []
 

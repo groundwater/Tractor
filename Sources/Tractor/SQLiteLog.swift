@@ -18,6 +18,11 @@ final class SQLiteLog: EventSink {
     /// the trace session.
     var isEnabled: Bool = true
 
+    /// Count of events actually written to the DB (i.e., handlers that ran
+    /// while isEnabled was true). Read from the GUI footer to display
+    /// "Recording — N events".
+    private(set) var recordedCount: Int = 0
+
     let path: String
 
     init(path: String) throws {
@@ -159,6 +164,7 @@ final class SQLiteLog: EventSink {
     /// Log captured HTTP traffic (called from MITM flow)
     func logTraffic(pid: pid_t, host: String, port: UInt16, direction: String, content: String) {
         guard isEnabled else { return }
+        recordedCount &+= 1
         lock.lock()
         defer { lock.unlock() }
         guard let stmt = trafficStmt else { return }
@@ -178,22 +184,31 @@ final class SQLiteLog: EventSink {
 
     func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
         guard isEnabled else { return }
+        recordedCount &+= 1
         insert(timestamp: now(), type: "exec", pid: pid, ppid: ppid, process: process, user: user, details: ["argv": argv])
     }
 
     func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
         guard isEnabled else { return }
+        recordedCount &+= 1
         insert(timestamp: now(), type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
     }
 
     func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
         guard isEnabled else { return }
+        recordedCount &+= 1
         insert(timestamp: now(), type: "connect", pid: pid, ppid: ppid, process: process, user: user, details: ["addr": remoteAddr, "port": "\(remotePort)", "flowID": "\(flowID)"])
     }
 
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32 = 0) {
         guard isEnabled else { return }
+        recordedCount &+= 1
         insert(timestamp: now(), type: "exit", pid: pid, ppid: ppid, process: process, user: user, details: [:])
+    }
+
+    /// Reset the counter — called when the GUI's Record toggle flips from off to on.
+    func resetRecordedCount() {
+        recordedCount = 0
     }
 }
 

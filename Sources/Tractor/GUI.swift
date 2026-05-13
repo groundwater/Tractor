@@ -150,8 +150,17 @@ final class TraceRunner: ObservableObject {
     /// of tracing — tracing is always on once started; recording is the
     /// user-controlled "save to disk" switch, gated by SQLiteLog.isEnabled.
     @Published var isRecording = false {
-        didSet { session?.setSQLiteRecordingEnabled(isRecording) }
+        didSet {
+            session?.setSQLiteRecordingEnabled(isRecording)
+            if isRecording && !oldValue {
+                session?.resetSQLiteRecordedCount()
+            }
+        }
     }
+
+    /// Number of events written to the trace DB during the current recording.
+    /// Polled by the GUI footer via a TimelineView tick.
+    var recordedEventCount: Int { session?.sqliteRecordedCount ?? 0 }
     @Published private(set) var lastMessage: String?
     let live = LiveModel()
 
@@ -623,18 +632,21 @@ private struct RootView: View {
     @ViewBuilder
     private var footer: some View {
         HStack {
-            HStack(spacing: 6) {
-                if runner.isRecording {
-                    Circle().fill(Color.red).frame(width: 8, height: 8)
-                    Text("Recording — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else if runner.isRunning {
-                    Text("Tracing — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else if let msg = runner.lastMessage {
-                    Text(msg).font(.caption).foregroundStyle(.secondary)
+            TimelineView(.periodic(from: .now, by: 1.0)) { _ in
+                HStack(spacing: 6) {
+                    if runner.isRecording {
+                        Circle().fill(Color.red).frame(width: 8, height: 8)
+                        Text("Recording — \(runner.recordedEventCount) events, \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    } else if runner.isRunning {
+                        Text("Tracing — \(runner.live.processes.count) processes, \(model.active.count) target\(model.active.count == 1 ? "" : "s")")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else if let msg = runner.lastMessage {
+                        Text(msg).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer()
