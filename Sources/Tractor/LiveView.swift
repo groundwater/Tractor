@@ -251,16 +251,16 @@ private struct ProcessTableView: View {
             }
             .width(min: 160)
             TableColumn("PID") { entry in
-                Text(entry.row.pidLabel).foregroundStyle(.secondary)
+                Text(verbatim: entry.row.pidLabel).foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Disk") { entry in
-                Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
+                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
                     .foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Network") { entry in
-                Text(entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
+                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
                     .foregroundStyle(.secondary)
             }
             .width(min: 60, ideal: 80, max: 110)
@@ -340,7 +340,7 @@ private struct DetailHeader: View {
             HStack {
                 Text(node.name)
                     .font(.headline)
-                Text("pid \(node.pid)")
+                Text(verbatim: "pid \(node.pid)")
                     .foregroundStyle(.secondary)
                 if let status = node.exitStatus {
                     Text("exited \(status)")
@@ -389,11 +389,11 @@ private struct FilesTable: View {
                     .help(row.path)
             }
             .width(min: 80)
-            TableColumn("R") { Text("\($0.stats.reads)") }.width(min: 28, ideal: 32, max: 40)
-            TableColumn("W") { Text("\($0.stats.writes)") }.width(min: 28, ideal: 32, max: 40)
-            TableColumn("C") { Text("\($0.stats.creates)") }.width(min: 28, ideal: 32, max: 40)
-            TableColumn("D") { Text("\($0.stats.deletes)") }.width(min: 28, ideal: 32, max: 40)
-            TableColumn("Rn") { Text("\($0.stats.renames)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("R") { Text(verbatim: "\($0.stats.reads)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("W") { Text(verbatim: "\($0.stats.writes)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("C") { Text(verbatim: "\($0.stats.creates)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("D") { Text(verbatim: "\($0.stats.deletes)") }.width(min: 28, ideal: 32, max: 40)
+            TableColumn("Rn") { Text(verbatim: "\($0.stats.renames)") }.width(min: 28, ideal: 32, max: 40)
         }
     }
 }
@@ -423,7 +423,7 @@ private struct ConnectionsTable: View {
                 }
             }
             .width(min: 80)
-            TableColumn("Port") { Text("\($0.port)") }.width(min: 40, ideal: 50, max: 70)
+            TableColumn("Port") { Text(verbatim: "\($0.port)") }.width(min: 40, ideal: 50, max: 70)
             TableColumn("↑") { Text(formatBytes($0.bytesOut)).monospacedDigit() }.width(min: 60, ideal: 70, max: 90)
             TableColumn("↓") { Text(formatBytes($0.bytesIn)).monospacedDigit() }.width(min: 60, ideal: 70, max: 90)
         }
