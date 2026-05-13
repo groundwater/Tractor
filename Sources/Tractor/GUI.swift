@@ -103,7 +103,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
         toolbar.allowsUserCustomization = false
         toolbar.displayMode = .iconOnly
         window.toolbar = toolbar
-        window.center()
+        // Persist size + position across launches. AppKit handles save/restore
+        // automatically; centers only on the very first launch (no saved frame).
+        if !window.setFrameUsingName("TractorMainWindow") {
+            window.center()
+        }
+        window.setFrameAutosaveName("TractorMainWindow")
         window.makeKeyAndOrderFront(nil)
         self.window = window
     }
