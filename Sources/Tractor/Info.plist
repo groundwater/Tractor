@@ -7,7 +7,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>Tractor</string>
 	<key>CFBundleExecutable</key>
-	<string>Tractor</string>
+	<string>Tractor-GUI</string>
 	<key>CFBundleIconFile</key>
 	<string>Tractor</string>
 	<key>CFBundleIdentifier</key>

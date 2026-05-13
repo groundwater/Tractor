@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Distribution-time entitlements for the Tractor host app. Apple Development
+  provisioning profiles authorise plain `app-proxy-provider`; Developer ID
+  Direct profiles authorise only the `-systemextension` variant. The source
+  entitlements file uses plain (so archive against the dev profile succeeds);
+  this file is used by the Makefile re-sign step that applies the Developer ID
+  identity. See https://developer.apple.com/forums/thread/737894.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>app-proxy-provider-systemextension</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.jacobgroundwater.Tractor</string>
+    </array>
+</dict>
+</plist>

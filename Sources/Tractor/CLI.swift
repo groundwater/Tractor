@@ -2,29 +2,6 @@ import ArgumentParser
 import Foundation
 import NetworkExtension
 
-@main
-struct TractorMain {
-    static func main() {
-        let args = Array(CommandLine.arguments.dropFirst())
-        if shouldRunGUI(args: args) {
-            TractorGUI.run()
-        }
-        Tractor.main()
-    }
-
-    private static let knownSubcommands: Set<String> = [
-        "trace", "exec", "activate", "trust-ca", "log",
-        "-h", "--help", "-help", "help", "--version",
-    ]
-
-    private static func shouldRunGUI(args: [String]) -> Bool {
-        guard let first = args.first else { return true }
-        if knownSubcommands.contains(first) { return false }
-        if first.hasPrefix("-NS") || first.hasPrefix("-Apple") { return true }
-        return false
-    }
-}
-
 struct Tractor: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tractor",

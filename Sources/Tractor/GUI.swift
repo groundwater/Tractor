@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum TractorGUI {
+enum TractorGUIEntry {
     static func run() -> Never {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
