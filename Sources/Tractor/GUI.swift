@@ -581,12 +581,14 @@ private struct RootView: View {
                 } label: {
                     Label("Add target", systemImage: "plus")
                 }
-                Button {
-                    inspectorShown.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                }
-                .help(inspectorShown ? "Hide inspector" : "Show inspector")
+            }
+            Button {
+                inspectorShown.toggle()
+            } label: {
+                Image(systemName: "sidebar.right")
+            }
+            .help(inspectorShown ? "Hide inspector" : "Show inspector")
+            if runner.isRunning {
                 RecordButton(isRecording: true) { runner.stop() }
                     .keyboardShortcut(.return, modifiers: [.command])
             } else {
