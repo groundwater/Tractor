@@ -5,15 +5,17 @@ enum TractorGUIEntry {
     static func run() -> Never {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
-        app.mainMenu = buildMainMenu()
         let delegate = AppDelegate()
         app.delegate = delegate
+        app.mainMenu = delegate.buildMainMenu()
         app.activate(ignoringOtherApps: true)
         app.run()
         exit(0)
     }
+}
 
-    private static func buildMainMenu() -> NSMenu {
+extension AppDelegate {
+    func buildMainMenu() -> NSMenu {
         let mainMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
 
@@ -50,9 +52,11 @@ enum TractorGUIEntry {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Find",
-                         action: #selector(AppDelegate.focusFilter(_:)),
-                         keyEquivalent: "f")
+        let findItem = NSMenuItem(title: "Find",
+                                  action: #selector(AppDelegate.focusFilter(_:)),
+                                  keyEquivalent: "f")
+        findItem.target = self
+        editMenu.addItem(findItem)
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
@@ -62,6 +66,7 @@ enum TractorGUIEntry {
         let hideExitedItem = NSMenuItem(title: "Hide Exited Processes",
                                         action: #selector(AppDelegate.toggleHideExited(_:)),
                                         keyEquivalent: "")
+        hideExitedItem.target = self
         viewMenu.addItem(hideExitedItem)
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
@@ -576,18 +581,18 @@ private struct MainView: View {
         }
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                TextField("Filter", text: $filter, prompt: Text("Filter"))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($filterFocused)
+                    .frame(width: 200)
+            }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $selection) {
                     Text("Trace").tag(Tab.trace)
                     Text("Setup").tag(Tab.setup)
                 }
                 .pickerStyle(.segmented)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                TextField("Filter", text: $filter, prompt: Text("Filter"))
-                    .textFieldStyle(.roundedBorder)
-                    .focused($filterFocused)
-                    .frame(width: 200)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
