@@ -190,22 +190,24 @@ private struct ProcessTableView: View {
                         .font(row.isGroup ? .body.weight(.semibold) : .body)
                         .foregroundStyle(row.placeholder ? .secondary : .primary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
+            .width(min: 160, ideal: 280)
             TableColumn("PID") { row in
                 Text(row.pidLabel).foregroundStyle(.secondary)
             }
-            .width(min: 50, ideal: 70)
+            .width(min: 50, ideal: 60, max: 80)
             TableColumn("Files") { row in
                 Text(row.isGroup || row.placeholder ? "" : "\(row.fileOpCount)")
                     .foregroundStyle(.secondary)
             }
-            .width(min: 50, ideal: 70)
+            .width(min: 50, ideal: 60, max: 80)
             TableColumn("Connections") { row in
                 Text(row.isGroup || row.placeholder ? "" : "\(row.connectionCount)")
                     .foregroundStyle(.secondary)
             }
-            .width(min: 60, ideal: 100)
+            .width(min: 60, ideal: 90, max: 110)
             TableColumn("Status") { row in
                 if row.isGroup || row.placeholder {
                     Text("").foregroundStyle(.secondary)
@@ -215,7 +217,7 @@ private struct ProcessTableView: View {
                     Text("running").foregroundStyle(.secondary)
                 }
             }
-            .width(min: 70, ideal: 100)
+            .width(min: 70, ideal: 80, max: 110)
         }
     }
 }
