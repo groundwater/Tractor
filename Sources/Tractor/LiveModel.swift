@@ -25,6 +25,7 @@ struct ProcessNode: Identifiable, Hashable {
     var bytesIn: Int64 = 0
     var bytesOut: Int64 = 0
     var exitStatus: Int32? = nil
+    var exitedAt: Date? = nil
     var firstSeen: Date = Date()
 
     var id: pid_t { pid }
@@ -174,6 +175,7 @@ final class LiveModel: ObservableObject {
 
     func handleExit(pid: pid_t, exitStatus: Int32) {
         processes[pid]?.exitStatus = exitStatus
+        processes[pid]?.exitedAt = Date()
     }
 
     func handleBytesUpdate(pid: pid_t, host: String, port: UInt16, bytesOut: Int64, bytesIn: Int64, flowID: UInt64) {

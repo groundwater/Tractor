@@ -52,6 +52,16 @@ enum TractorGUIEntry {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        // View menu
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let hideExitedItem = NSMenuItem(title: "Hide Exited Processes",
+                                        action: #selector(AppDelegate.toggleHideExited(_:)),
+                                        keyEquivalent: "")
+        viewMenu.addItem(hideExitedItem)
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
         // Window menu
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
@@ -73,7 +83,7 @@ enum TractorGUIEntry {
     }
 }
 
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -93,6 +103,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    @MainActor
+    @objc func toggleHideExited(_ sender: NSMenuItem) {
+        AppPrefs.shared.hideExited.toggle()
+    }
+
+    @MainActor
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleHideExited(_:)) {
+            menuItem.state = AppPrefs.shared.hideExited ? .on : .off
+            return true
+        }
+        return true
     }
 }
 

@@ -1,18 +1,33 @@
 import SwiftUI
 
+/// Process-list-wide UI preferences. Singleton so AppKit menu items and
+/// SwiftUI views share the same source of truth.
+@MainActor
+final class AppPrefs: ObservableObject {
+    static let shared = AppPrefs()
+    static let hideExitedAfter: TimeInterval = 3.0
+
+    @Published var hideExited: Bool = true
+}
+
 struct LiveView: View {
     @ObservedObject var model: LiveModel
+    @ObservedObject private var prefs = AppPrefs.shared
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: DetailTab = .files
 
     enum DetailTab: Hashable { case files, connections }
 
     var body: some View {
-        HSplitView {
-            ProcessTableView(model: model, selection: $selection)
-                .frame(minWidth: 480, idealWidth: 640)
-            DetailPane(model: model, selection: selectedPid, tab: $detailTab)
-                .frame(minWidth: 360)
+        // .periodic ticks once per second so exited processes disappear
+        // after AppPrefs.hideExitedAfter even when no events are arriving.
+        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+            HSplitView {
+                ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                    .frame(minWidth: 480, idealWidth: 640)
+                DetailPane(model: model, selection: selectedPid, tab: $detailTab)
+                    .frame(minWidth: 360)
+            }
         }
     }
 
@@ -41,10 +56,19 @@ struct ProcessTableRow: Identifiable, Hashable {
     let placeholder: Bool         // empty-group "(waiting for matches…)" row
     let children: [ProcessTableRow]?
 
+    /// Returns nil when this process should be hidden (exited > hideExitedAfter ago
+    /// AND has no still-visible descendants).
     @MainActor
-    static func process(_ pid: pid_t, model: LiveModel) -> ProcessTableRow {
+    static func process(_ pid: pid_t, model: LiveModel, now: Date, hideExited: Bool) -> ProcessTableRow? {
         let node = model.processes[pid]
-        let kids = model.sortedChildren(pid).map { process($0, model: model) }
+        let kids = model.sortedChildren(pid).compactMap {
+            process($0, model: model, now: now, hideExited: hideExited)
+        }
+        if hideExited, let exitedAt = node?.exitedAt,
+           now.timeIntervalSince(exitedAt) > AppPrefs.hideExitedAfter,
+           kids.isEmpty {
+            return nil
+        }
         return ProcessTableRow(
             id: "p:\(pid)",
             kind: .process(pid),
@@ -74,16 +98,17 @@ struct ProcessTableRow: Identifiable, Hashable {
     }
 
     @MainActor
-    static func group(_ group: TraceGroup, model: LiveModel) -> ProcessTableRow {
+    static func group(_ group: TraceGroup, model: LiveModel, now: Date, hideExited: Bool) -> ProcessTableRow {
         let roots = model.rootsForGroup(group.id)
-        let kids = roots.isEmpty
+        let kidRows = roots.compactMap { process($0, model: model, now: now, hideExited: hideExited) }
+        let kids = kidRows.isEmpty
             ? [emptyGroupPlaceholder(groupID: group.id)]
-            : roots.map { process($0, model: model) }
+            : kidRows
         return ProcessTableRow(
             id: "g:\(group.id)",
             kind: .group(group.id),
             name: group.label,
-            pidLabel: roots.isEmpty ? "" : "\(roots.count)",
+            pidLabel: kidRows.isEmpty ? "" : "\(kidRows.count)",
             fileOpCount: 0, connectionCount: 0,
             exited: false, exitStatus: nil,
             isGroup: true, placeholder: false,
@@ -93,11 +118,15 @@ struct ProcessTableRow: Identifiable, Hashable {
 }
 
 extension LiveModel {
-    func buildRows() -> [ProcessTableRow] {
+    func buildRows(now: Date, hideExited: Bool) -> [ProcessTableRow] {
         if groups.isEmpty {
-            return sortedRoots().map { ProcessTableRow.process($0, model: self) }
+            return sortedRoots().compactMap {
+                ProcessTableRow.process($0, model: self, now: now, hideExited: hideExited)
+            }
         }
-        return groups.map { ProcessTableRow.group($0, model: self) }
+        return groups.map {
+            ProcessTableRow.group($0, model: self, now: now, hideExited: hideExited)
+        }
     }
 }
 
@@ -105,10 +134,12 @@ extension LiveModel {
 
 private struct ProcessTableView: View {
     @ObservedObject var model: LiveModel
+    let now: Date
+    let hideExited: Bool
     @Binding var selection: ProcessTableRow.ID?
 
     var body: some View {
-        Table(model.buildRows(), children: \.children, selection: $selection) {
+        Table(model.buildRows(now: now, hideExited: hideExited), children: \.children, selection: $selection) {
             TableColumn("Process") { row in
                 HStack(spacing: 6) {
                     if row.isGroup {
