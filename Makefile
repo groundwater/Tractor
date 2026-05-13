@@ -38,6 +38,7 @@ debug: ensure-local-config
 	done
 	xcodebuild -project $(PROJECT).xcodeproj -scheme TractorApp -configuration Debug \
 		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) \
+		ENABLE_DEBUG_DYLIB=NO ENABLE_PREVIEWS=NO \
 		CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-" build
 
 # Auto-increment sysext build number so macOS recognizes replacement

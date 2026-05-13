@@ -9,19 +9,13 @@ private let KEY_MOUSE: Int32 = 0o631
 /// Globals for signal-safe cleanup
 private var activeTUI: TUI?
 private var activeInputSource: DispatchSourceTimer?
-private var activeSQLiteLog: SQLiteLog?
-private var activeFlowClient: FlowXPCClient?
-private var activeESClient: ESXPCClient?
+private var activeSession: TraceSession?
 
 private func exitAfterRestoringTerminal(message: String, code: Int32 = 1) {
     activeInputSource?.cancel()
     activeTUI?.stop()
-    activeSQLiteLog?.close()
-    // Close XPC connections — sysexts see the disconnects and stop their daemons.
-    activeESClient?.stop()
-    activeESClient = nil
-    activeFlowClient?.stop()
-    activeFlowClient = nil
+    activeSession?.stop()
+    activeSession = nil
     if !message.isEmpty {
         fputs("\n\(message)\n", stderr)
         fflush(stderr)
@@ -71,12 +65,7 @@ struct Trace: ParsableCommand {
         guard !name.isEmpty || !pid.isEmpty || !path.isEmpty || !pids.isEmpty || !exec.isEmpty else {
             throw ValidationError("Provide at least one --name, --pid, --path, or --exec")
         }
-        guard ESXPCClient.isAvailable() else {
-            throw ValidationError("Endpoint Security extension is not active. Run 'sudo tractor activate endpoint-security', approve it in System Settings if prompted, then retry.")
-        }
         let mitmCAPaths = mitm ? try TrustCA.requiredExistingCAPaths() : nil
-
-        let tree = ProcessTree()
 
         // Build header label from all trackers
         var labels: [String] = []
@@ -87,9 +76,8 @@ struct Trace: ParsableCommand {
         for cmd in exec { labels.append(cmd) }
         let agentLabel = labels.joined(separator: ", ")
 
-        // Create sink: TUI or JSON
+        // Create primary sink: TUI or JSON
         let primarySink: EventSink
-        let sink: EventSink
         var tui: TUI?
 
         if json {
@@ -101,141 +89,115 @@ struct Trace: ParsableCommand {
                 t.expandSpecified = true
             }
             t.excludeSelf()
-            t.processTree = tree
-            t.start(header: "Tractor - tracing \(agentLabel)")
             tui = t
             primarySink = t
         }
 
-        // Optionally add SQLite logging
-        if log || logFile != nil {
-            let dbPath: String
-            if let explicit = logFile {
-                dbPath = explicit
-            } else {
-                dbPath = try TractorPaths.sharedLogPath()
-            }
-            let sqliteLog = try SQLiteLog(path: dbPath)
-            activeSQLiteLog = sqliteLog
-            fputs("Tractor: logging to \(sqliteLog.path)\n", stderr)
-            sink = MultiSink([primarySink, sqliteLog])
-        } else {
-            sink = primarySink
-        }
-
-        // Create tracker groups and seed processes
-        if let t = tui {
-            for n in name {
-                t.addTrackerGroup(kind: .name, value: n)
-            }
-            for p in pid {
-                t.addTrackerGroup(kind: .pid, value: "\(p)")
-            }
-            for p in pids {
-                t.addTrackerGroup(kind: .pid, value: "\(p)")
-            }
-            for p in path {
-                t.addTrackerGroup(kind: .path, value: p)
-            }
-        } else {
-            // JSON mode — just resolve roots directly
-            var roots: [pid_t] = []
-            for n in name {
-                roots.append(contentsOf: findProcessesByName(n))
-            }
-            for p in pid {
-                roots.append(p)
-            }
-            for p in pids {
-                roots.append(p)
-            }
-            for p in path {
-                roots.append(contentsOf: findProcessesByExactPath(p))
-            }
-            if !roots.isEmpty {
-                let expanded = expandProcessTree(roots: roots)
-                tree.addRoots(expanded)
-                for trackedPid in expanded {
-                    let (execPath, ppid, argv) = getProcessInfo(trackedPid)
-                    sink.onExec(pid: trackedPid, ppid: ppid, process: execPath, argv: argv, user: uid_t(getuid()))
-                }
-            }
-        }
-
-        // Seed ProcessTree with all tracked PIDs from TUI groups
-        if let t = tui {
-            for group in t.trackerGroups {
-                let groupPids = findPidsForTrackerGroup(group)
-                if !groupPids.isEmpty {
-                    let expanded = expandProcessTree(roots: groupPids)
-                    tree.addRoots(expanded)
-                }
-            }
-        }
-
-        // ES events come from the TractorES sysext; NE flow events from TractorNE.
-        let esClient = ESXPCClient()
-        activeESClient = esClient
+        // Build session.
+        let session = TraceSession(primarySink: primarySink)
+        activeSession = session
         activeTUI = tui
-        esClient.onConnectionError = { error in
+        if let t = tui {
+            t.processTree = session.tree
+            t.start(header: "Tractor - tracing \(agentLabel)")
+        }
+
+        session.onMessage = { msg in
+            fputs("\(msg)\n", stderr)
+        }
+        session.onConnectionError = { error in
             exitAfterRestoringTerminal(
                 message: "Tractor: lost Endpoint Security connection: \(error.localizedDescription)",
                 code: 1
             )
         }
 
-        // ES exec → mirror into local ProcessTree and feed the sink (TUI + SQLite + JSON)
-        esClient.onExec = { [weak tree, weak tui] pid, ppid, process, argv, user in
-            tree?.trackIfChild(pid: pid, ppid: ppid)
-            tree?.addRoots([pid])
-            if let t = tui {
+        // TUI-specific tracker bookkeeping: runs before sink.onExec.
+        if let t = tui {
+            session.onExec = { [weak t] pid, ppid, process, _, _ in
+                guard let t = t else { return }
                 t.inheritGroupMembership(child: pid, parent: ppid)
                 let name = (process as NSString).lastPathComponent
                 t.matchProcessToGroups(pid: pid, name: name, path: process)
             }
-            sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
-        }
-        esClient.onFileOp = { type, pid, ppid, process, user, details in
-            sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
-        }
-        esClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
-            sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
-            tree?.remove(pid)
         }
 
-        esClient.start()
-        esClient.setTrackerPatterns(
-            names: tui?.trackerGroups.compactMap { $0.kind == .name ? $0.value : nil } ?? name,
-            paths: tui?.trackerGroups.compactMap { $0.kind == .path ? $0.value : nil } ?? path
+        // Tracker groups (TUI) or direct root resolution (JSON).
+        let trackerRoots: TraceRoots
+        if let t = tui {
+            for n in name { t.addTrackerGroup(kind: .name, value: n) }
+            for p in pid { t.addTrackerGroup(kind: .pid, value: "\(p)") }
+            for p in pids { t.addTrackerGroup(kind: .pid, value: "\(p)") }
+            for p in path { t.addTrackerGroup(kind: .path, value: p) }
+            trackerRoots = TraceRoots(
+                names: t.trackerGroups.compactMap { $0.kind == .name ? $0.value : nil },
+                pids: t.trackerGroups.compactMap { $0.kind == .pid ? pid_t($0.value) : nil },
+                paths: t.trackerGroups.compactMap { $0.kind == .path ? $0.value : nil }
+            )
+        } else {
+            trackerRoots = TraceRoots(names: name, pids: pid + pids, paths: path)
+        }
+
+        let options = TraceOptions(
+            logToSQLite: log,
+            logFilePath: logFile,
+            net: net,
+            mitm: mitm,
+            mitmCAPaths: mitmCAPaths
         )
-        esClient.addTrackedPids(tree.snapshot)
 
-        // --exec: fork each command, register its PID with the sysext, then release
-        // it to call execve. The pipe gate guarantees the sysext sees AUTH_EXEC for
-        // a PID that's already in its tracked set.
+        try session.start(roots: trackerRoots, options: options)
+
+        // JSON mode: emit a starting exec for each seeded root so consumers
+        // see the initial process state. TUI populates itself via its own paths.
+        if json {
+            session.seedSinkFromTree()
+        }
+
+        // --exec: fork each command, register its PID, release.
         for cmd in exec {
             let argv = SpawnedChild.argv(for: cmd)
             guard !argv.isEmpty else {
                 throw ValidationError("--exec value is empty")
             }
             let pending = try SpawnedChild.fork(argv: argv, stdio: .devNull)
-            tree.addRoots([pending.pid])
+            session.registerExecRoot(pid: pending.pid)
             if let t = tui {
                 t.addTrackerGroup(kind: .exec, value: "\(pending.pid)", label: cmd)
             }
-            esClient.addTrackedPidsSync([pending.pid])
             pending.release()
             fputs("Tractor: spawned [\(pending.pid)] \(cmd)\n", stderr)
         }
 
-        // Push pattern updates whenever the TUI's tracker groups change.
+        // TUI tracker-group changes push back to the session.
         if let t = tui {
-            t.onTrackersChanged = { [weak esClient] trackers in
+            t.onTrackersChanged = { [weak session] trackers in
                 let names = trackers.compactMap { $0.kind == .name ? $0.value : nil }
                 let paths = trackers.compactMap { $0.kind == .path ? $0.value : nil }
-                esClient?.setTrackerPatterns(names: names, paths: paths)
+                session?.setTrackerPatterns(names: names, paths: paths)
                 let pids: [Int32] = trackers.compactMap { $0.kind == .pid ? Int32($0.value) : nil }
-                if !pids.isEmpty { esClient?.addTrackedPids(Set(pids)) }
+                if !pids.isEmpty { session?.addTrackedPids(Set(pids)) }
+            }
+        }
+
+        // TUI flow callbacks (network display).
+        if let t = tui, net || mitm {
+            session.onBytesUpdate = { [weak t] pid, host, port, bytesOut, bytesIn, flowID in
+                t?.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
+                                          txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn), flowID: flowID)
+            }
+            session.onConnectionClosed = { [weak t] pid, host, port, flowID in
+                t?.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
+            }
+            session.onTraffic = { [weak t] pid, host, port, direction, data, flowID in
+                let dir: TrafficDirection = direction == "up" ? .up : .down
+                t?.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
+                                 direction: dir, data: data, flowID: flowID)
+            }
+            if mitm {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak t] in
+                    t?.flash("MITM enabled — intercepting TLS on port 443", duration: 5.0)
+                }
             }
         }
 
@@ -248,76 +210,6 @@ struct Trace: ParsableCommand {
 
         if json {
             fputs("Tractor: tracing started. JSON output on stdout.\n", stderr)
-        }
-
-        // Activate network extension flow interception (--mitm implies --net).
-        if net || mitm {
-            if FlowXPCClient.isAvailable() {
-                let flowClient = FlowXPCClient(sink: sink)
-                activeFlowClient = flowClient
-
-                // Set up MITM exported object BEFORE start (NSXPCConnection requires
-                // exportedObject to be configured pre-resume).
-                if mitm {
-                    guard let caPaths = mitmCAPaths else {
-                        throw ValidationError("MITM requires CA files. Run 'sudo tractor activate certificate-root' first.")
-                    }
-                    let certPEM = try String(contentsOfFile: caPaths.certPath, encoding: .utf8)
-                    let keyPEM = try String(contentsOfFile: caPaths.keyPath, encoding: .utf8)
-                    flowClient.setupMITM(caCertPEM: certPEM, caKeyPEM: keyPEM)
-                }
-
-                flowClient.onConnectionError = { error in
-                    fputs("Tractor: network extension unavailable, continuing without network capture (\(error.localizedDescription)).\n", stderr)
-                    activeFlowClient?.stop()
-                    activeFlowClient = nil
-                    esClient.onTrackedPidsChanged = nil
-                }
-
-                flowClient.start()
-                flowClient.updateWatchList(tree.snapshot)
-
-                // Mirror ES daemon's tracked-PID set into the NE proxy's watch list.
-                esClient.onTrackedPidsChanged = { [weak flowClient] pids in
-                    flowClient?.updateWatchList(pids)
-                }
-
-                if mitm {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        flowClient.setMITMEnabled(true)
-                        if let t = tui {
-                            t.flash("MITM enabled — intercepting TLS on port 443", duration: 5.0)
-                        }
-                    }
-                }
-
-                if let t = tui {
-                    flowClient.onBytesUpdate = { pid, host, port, bytesOut, bytesIn, flowID in
-                        t.updateConnectionBytes(pid: pid, remoteAddr: host, remotePort: port,
-                                                txBytes: UInt64(bytesOut), rxBytes: UInt64(bytesIn), flowID: flowID)
-                    }
-                    flowClient.onConnectionClosed = { pid, host, port, flowID in
-                        t.markConnectionClosed(pid: pid, remoteAddr: host, remotePort: port, flowID: flowID)
-                    }
-                    flowClient.onTraffic = { pid, host, port, direction, data, flowID in
-                        let dir: TrafficDirection = direction == "up" ? .up : .down
-                        t.appendTraffic(pid: pid, remoteAddr: host, remotePort: port,
-                                        direction: dir, data: data, flowID: flowID)
-                        let logContent = String(data: data, encoding: .utf8)
-                            ?? String(data: data, encoding: .isoLatin1) ?? "<binary>"
-                        activeSQLiteLog?.logTraffic(pid: pid, host: host, port: port,
-                                                    direction: direction, content: logContent)
-                    }
-                }
-            } else {
-                let msg = mitm
-                    ? "Tractor: network extension is not active; continuing without network capture or MITM. Run 'sudo tractor activate network-extension' to enable it."
-                    : "Tractor: network extension is not active; continuing without network capture. Run 'sudo tractor activate network-extension' to enable it."
-                if let t = tui {
-                    t.flash(msg, duration: 5.0)
-                }
-                fputs("\(msg)\n", stderr)
-            }
         }
 
         // In TUI mode, also check for 'q' keypress to quit
