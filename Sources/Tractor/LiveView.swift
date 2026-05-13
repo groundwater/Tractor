@@ -316,7 +316,19 @@ struct DetailPane: View {
         )
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(
+            // Top-right corner of the inspector pane should be square (meets
+            // the toolbar at a hard 90°); other corners can round naturally
+            // with the window. UnevenRoundedRectangle pins the trailing top.
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 10,
+                topTrailingRadius: 0,
+                style: .continuous
+            )
+            .fill(Color(NSColor.windowBackgroundColor))
+        )
     }
 }
 
