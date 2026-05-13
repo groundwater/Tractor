@@ -27,7 +27,9 @@ struct LiveView: View {
             VStack(spacing: 0) {
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
                     .onDeleteCommand {
-                        if let id = selection, id.hasPrefix("g:") {
+                        // Top-level group row ids look like "g:<group_id>" with
+                        // no embedded "/" (process rows are paths with slashes).
+                        if let id = selection, id.hasPrefix("g:"), !id.contains("/") {
                             let groupID = String(id.dropFirst(2))
                             onDeleteGroup(groupID)
                             selection = nil
@@ -52,10 +54,12 @@ struct LiveView: View {
     }
 }
 
-/// Resolves a ProcessTableRow.ID like "p:1234" to a pid_t.
+/// Extracts a pid_t from a ProcessTableRow.ID. The id is a path like
+/// "g:rec:foo/1234/5678" or "p/1234"; the last "/"-separated component is the
+/// row's own pid (when it's a process row) or the group label (returns nil).
 func selectedPid(from id: ProcessTableRow.ID?) -> pid_t? {
-    guard let id = id, id.hasPrefix("p:") else { return nil }
-    return pid_t(id.dropFirst(2))
+    guard let id = id, let last = id.split(separator: "/").last else { return nil }
+    return pid_t(last)
 }
 
 // MARK: - Hierarchical row model
@@ -79,11 +83,17 @@ struct ProcessTableRow: Identifiable, Hashable {
 
     /// Returns nil when this process should be hidden (exited > hideExitedAfter ago
     /// AND has no still-visible descendants).
+    ///
+    /// `parentID` participates in the row's id so the same pid appearing under
+    /// two different groups (or under two different parents) produces two
+    /// distinct rows. Otherwise SwiftUI Table treats them as the same row and
+    /// selecting one highlights both.
     @MainActor
-    static func process(_ pid: pid_t, model: LiveModel, now: Date, hideExited: Bool) -> ProcessTableRow? {
+    static func process(_ pid: pid_t, model: LiveModel, now: Date, hideExited: Bool, parentID: String) -> ProcessTableRow? {
+        let id = "\(parentID)/\(pid)"
         let node = model.processes[pid]
         let kids = model.sortedChildren(pid).compactMap {
-            process($0, model: model, now: now, hideExited: hideExited)
+            process($0, model: model, now: now, hideExited: hideExited, parentID: id)
         }
         if hideExited, let exitedAt = node?.exitedAt,
            now.timeIntervalSince(exitedAt) > AppPrefs.hideExitedAfter,
@@ -91,7 +101,7 @@ struct ProcessTableRow: Identifiable, Hashable {
             return nil
         }
         return ProcessTableRow(
-            id: "p:\(pid)",
+            id: id,
             kind: .process(pid),
             name: node?.name ?? "pid \(pid)",
             pidLabel: "\(pid)",
@@ -120,13 +130,16 @@ struct ProcessTableRow: Identifiable, Hashable {
 
     @MainActor
     static func group(_ group: TraceGroup, model: LiveModel, now: Date, hideExited: Bool) -> ProcessTableRow {
+        let groupRowID = "g:\(group.id)"
         let roots = model.rootsForGroup(group.id)
-        let kidRows = roots.compactMap { process($0, model: model, now: now, hideExited: hideExited) }
+        let kidRows = roots.compactMap {
+            process($0, model: model, now: now, hideExited: hideExited, parentID: groupRowID)
+        }
         let kids = kidRows.isEmpty
             ? [emptyGroupPlaceholder(groupID: group.id)]
             : kidRows
         return ProcessTableRow(
-            id: "g:\(group.id)",
+            id: groupRowID,
             kind: .group(group.id),
             name: group.label,
             pidLabel: kidRows.isEmpty ? "" : "\(kidRows.count)",
@@ -142,7 +155,7 @@ extension LiveModel {
     func buildRows(now: Date, hideExited: Bool) -> [ProcessTableRow] {
         if groups.isEmpty {
             return sortedRoots().compactMap {
-                ProcessTableRow.process($0, model: self, now: now, hideExited: hideExited)
+                ProcessTableRow.process($0, model: self, now: now, hideExited: hideExited, parentID: "p")
             }
         }
         return groups.map {
