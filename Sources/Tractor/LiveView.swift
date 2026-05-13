@@ -16,6 +16,7 @@ struct LiveView: View {
     @ObservedObject private var prefs = AppPrefs.shared
     @Binding var selection: ProcessTableRow.ID?
     var onAddTarget: () -> Void
+    var onDeleteGroup: (String) -> Void
 
     enum DetailTab: Hashable { case files, connections }
 
@@ -25,6 +26,13 @@ struct LiveView: View {
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                    .onDeleteCommand {
+                        if let id = selection, id.hasPrefix("g:") {
+                            let groupID = String(id.dropFirst(2))
+                            onDeleteGroup(groupID)
+                            selection = nil
+                        }
+                    }
                 Divider()
                 HStack {
                     Button(action: onAddTarget) {

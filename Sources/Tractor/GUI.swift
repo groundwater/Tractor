@@ -582,7 +582,12 @@ private struct RootView: View {
         VStack(spacing: 0) {
             LiveView(model: runner.live,
                      selection: $selection,
-                     onAddTarget: { pickerSheetShown = true })
+                     onAddTarget: { pickerSheetShown = true },
+                     onDeleteGroup: { groupID in
+                        if let target = model.active.first(where: { $0.id == groupID }) {
+                            model.remove(target)
+                        }
+                     })
             Divider()
             footer
         }
