@@ -96,6 +96,21 @@ final class LiveModel: ObservableObject {
                 let remaining = gs.subtracting(removed)
                 pidToGroups[pid] = remaining.isEmpty ? nil : remaining
             }
+            // Drop process nodes whose only group affiliation was a removed one.
+            // Without this, deleting a group leaves orphan processes visible
+            // (because buildRows in the GUI falls back to all-roots when the
+            // groups list is empty, or just leaves them lingering otherwise).
+            let orphans = processes.keys.filter { pidToGroups[$0] == nil }
+            for pid in orphans {
+                processes.removeValue(forKey: pid)
+                children.removeValue(forKey: pid)
+                fileStats.removeValue(forKey: pid)
+                connections.removeValue(forKey: pid)
+            }
+            roots.removeAll { processes[$0] == nil }
+            for (parent, kids) in children {
+                children[parent] = kids.filter { processes[$0] != nil }
+            }
         }
         groups = newGroups
         // Re-match existing processes against any newly-added groups.
