@@ -25,17 +25,21 @@ struct LiveView: View {
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, selection: $selection)
+                Divider()
                 HStack {
+                    Spacer()
                     Button(action: onAddTarget) {
-                        Label("Add target", systemImage: "plus")
+                        Label("Add Target", systemImage: "plus")
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 2)
                     }
-                    .controlSize(.small)
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
                     Spacer()
                 }
+                .padding(.vertical, 8)
                 .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color(NSColor.controlBackgroundColor))
+                .background(.bar)
             }
         }
     }

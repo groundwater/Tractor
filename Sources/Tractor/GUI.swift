@@ -658,25 +658,346 @@ private struct RecordButton: View {
     }
 }
 
+private enum PickerCategory: Hashable, CaseIterable {
+    case targets, recommended, applications, pids, custom
+
+    var title: String {
+        switch self {
+        case .targets:      return "Trace Targets"
+        case .recommended:  return "Recommended"
+        case .applications: return "Applications"
+        case .pids:         return "PIDs"
+        case .custom:       return "Custom"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .targets:      return "scope"
+        case .recommended:  return "star.fill"
+        case .applications: return "app.fill"
+        case .pids:         return "number"
+        case .custom:       return "doc.fill"
+        }
+    }
+}
+
 private struct PickerPane: View {
+    @ObservedObject var model: PickerModel
+    @State private var category: PickerCategory = .recommended
+
+    var body: some View {
+        NavigationSplitView {
+            List(PickerCategory.allCases, id: \.self, selection: $category) { cat in
+                HStack {
+                    Label(cat.title, systemImage: cat.systemImage)
+                    Spacer()
+                    if case .targets = cat, !model.active.isEmpty {
+                        Text("\(model.active.count)")
+                            .foregroundStyle(.secondary)
+                            .font(.caption.monospacedDigit())
+                    }
+                }
+                .tag(cat)
+            }
+            .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
+        } detail: {
+            Group {
+                switch category {
+                case .targets:      TargetsCategoryView(model: model)
+                case .recommended:  RecommendedCategoryView(model: model)
+                case .applications: ApplicationsCategoryView(model: model)
+                case .pids:         PIDsCategoryView(model: model)
+                case .custom:       CustomCategoryView(model: model)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 380, ideal: 520)
+        }
+    }
+}
+
+// MARK: - Category views (one Table each)
+
+private struct TargetsCategoryView: View {
+    @ObservedObject var model: PickerModel
+    @State private var selection: Set<TraceTarget.ID> = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if model.active.isEmpty {
+                ContentUnavailableView("No trace targets",
+                                       systemImage: "scope",
+                                       description: Text("Pick targets from Recommended, Applications, PIDs, or Custom."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Table(model.active, selection: $selection) {
+                    TableColumn("Name") { t in
+                        Label(t.label, systemImage: iconName(for: t.kind))
+                    }
+                    TableColumn("Detail") { t in
+                        Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Divider()
+                HStack {
+                    Spacer()
+                    Button(role: .destructive) {
+                        for id in selection {
+                            if let t = model.active.first(where: { $0.id == id }) { model.remove(t) }
+                        }
+                        selection.removeAll()
+                    } label: {
+                        Label("Remove", systemImage: "minus")
+                    }
+                    .disabled(selection.isEmpty)
+                }
+                .padding(8)
+                .background(.bar)
+            }
+        }
+    }
+
+    private func iconName(for kind: TargetKind) -> String {
+        switch kind {
+        case .recommended: return "star.fill"
+        case .application: return "app.fill"
+        case .pid: return "number"
+        case .custom: return "doc.fill"
+        }
+    }
+}
+
+private struct RecommendedCategoryView: View {
+    @ObservedObject var model: PickerModel
+    @State private var selection: TraceTarget.ID? = nil
+
+    var body: some View {
+        let rows = model.recommendedTargets()
+        Table(rows, selection: $selection) {
+            TableColumn("Name") { t in
+                HStack {
+                    statusDot(for: t)
+                    Text(t.label)
+                }
+            }
+            TableColumn("Bundle ID") { t in
+                Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            TableColumn("") { t in
+                addOrAddedButton(for: t)
+            }
+            .width(min: 90, ideal: 90)
+        }
+    }
+
+    private func statusDot(for t: TraceTarget) -> some View {
+        let running: Bool
+        if case .recommended(let bid) = t.kind { running = model.isRunning(bundleID: bid) } else { running = false }
+        return Circle()
+            .fill(running ? Color.green : Color.secondary.opacity(0.4))
+            .frame(width: 8, height: 8)
+    }
+
+    @ViewBuilder
+    private func addOrAddedButton(for t: TraceTarget) -> some View {
+        if model.contains(t) {
+            Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
+        } else {
+            let running: Bool = {
+                if case .recommended(let bid) = t.kind { return model.isRunning(bundleID: bid) }
+                return false
+            }()
+            Button("Add") { model.add(t) }.controlSize(.small).disabled(!running)
+        }
+    }
+}
+
+private struct ApplicationsCategoryView: View {
+    @ObservedObject var model: PickerModel
+    @State private var search = ""
+    @State private var selection: TraceTarget.ID? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                TextField("Search applications…", text: $search)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(8)
+            .background(.bar)
+            Divider()
+            Table(filtered, selection: $selection) {
+                TableColumn("Name") { t in
+                    HStack {
+                        Circle().fill(Color.green).frame(width: 8, height: 8)
+                        Text(t.label)
+                    }
+                }
+                TableColumn("Bundle ID") { t in
+                    Text(t.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                TableColumn("") { t in
+                    if model.contains(t) {
+                        Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
+                    } else {
+                        Button("Add") { model.add(t) }.controlSize(.small)
+                    }
+                }
+                .width(min: 90, ideal: 90)
+            }
+        }
+    }
+
+    private var filtered: [TraceTarget] {
+        let q = search.lowercased()
+        guard !q.isEmpty else { return model.runningApplications }
+        return model.runningApplications.filter { $0.label.lowercased().contains(q) }
+    }
+}
+
+private struct PIDsCategoryView: View {
     @ObservedObject var model: PickerModel
 
     var body: some View {
         VStack(spacing: 0) {
-            ActiveListView(model: model)
-                .padding()
-                .background(Color(NSColor.controlBackgroundColor))
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    RecommendedSection(model: model)
-                    ApplicationsSection(model: model)
-                    PIDSection(model: model)
-                    CustomSection(model: model)
+            HStack {
+                TextField("PID", text: $model.pidDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+                if let name = resolvedName() {
+                    Text("→ \(name)")
+                        .foregroundStyle(.secondary).font(.callout)
+                } else if !model.pidDraft.isEmpty && parsedPID() != nil {
+                    Text("→ (no such process)")
+                        .foregroundStyle(.secondary).font(.callout)
                 }
-                .padding()
+                Spacer()
+                Button("Add") { addPID() }
+                    .disabled(parsedPID() == nil || resolvedName() == nil)
+            }
+            .padding(8)
+            .background(.bar)
+            Divider()
+            let pidTargets = model.active.filter { if case .pid = $0.kind { return true } else { return false } }
+            if pidTargets.isEmpty {
+                ContentUnavailableView("No PID targets",
+                                       systemImage: "number",
+                                       description: Text("Enter a running PID above to trace it and all its descendants."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Table(pidTargets) {
+                    TableColumn("Target") { Text($0.label) }
+                    TableColumn("") { t in
+                        Button(role: .destructive) { model.remove(t) } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .width(40)
+                }
             }
         }
+    }
+
+    private func parsedPID() -> pid_t? {
+        let trimmed = model.pidDraft.trimmingCharacters(in: .whitespaces)
+        guard let n = Int32(trimmed), n > 0 else { return nil }
+        return pid_t(n)
+    }
+
+    private func resolvedName() -> String? {
+        guard let pid = parsedPID() else { return nil }
+        return model.resolveProcessName(pid: pid)
+    }
+
+    private func addPID() {
+        guard let pid = parsedPID(), let name = resolvedName() else { return }
+        let target = TraceTarget(
+            id: "pid:\(pid)",
+            kind: .pid(pid),
+            label: "PID \(pid) (\(name))",
+            detail: nil,
+            icon: nil
+        )
+        model.add(target)
+        model.pidDraft = ""
+    }
+}
+
+private struct CustomCategoryView: View {
+    @ObservedObject var model: PickerModel
+    @State private var selection: TraceTarget.ID? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                GridRow {
+                    Text("Name").frame(width: 50, alignment: .trailing)
+                    TextField("Display name", text: $model.customDraftName)
+                        .textFieldStyle(.roundedBorder)
+                }
+                GridRow {
+                    Text("Path").frame(width: 50, alignment: .trailing)
+                    HStack {
+                        TextField("/path/to/binary", text: $model.customDraftPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse…") { browse() }
+                    }
+                }
+                GridRow {
+                    Color.clear.frame(height: 0)
+                    HStack {
+                        Spacer()
+                        Button("Save") { save() }
+                            .disabled(model.customDraftName.isEmpty || model.customDraftPath.isEmpty)
+                    }
+                }
+            }
+            .padding(8)
+            .background(.bar)
+            Divider()
+            let savedTargets = model.savedCustom.map { $0.asTarget() }
+            if savedTargets.isEmpty {
+                ContentUnavailableView("No custom targets",
+                                       systemImage: "doc.fill",
+                                       description: Text("Save a name + path above to trace an arbitrary binary."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Table(savedTargets, selection: $selection) {
+                    TableColumn("Name") { Text($0.label) }
+                    TableColumn("Path") { Text($0.detail ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+                    TableColumn("") { t in
+                        HStack {
+                            if model.contains(t) {
+                                Label("Added", systemImage: "checkmark").foregroundStyle(.secondary).font(.caption)
+                            } else {
+                                Button("Add") { model.add(t) }.controlSize(.small)
+                            }
+                        }
+                    }
+                    .width(min: 90, ideal: 90)
+                }
+            }
+        }
+    }
+
+    private func browse() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            model.customDraftPath = url.path
+            if model.customDraftName.isEmpty {
+                model.customDraftName = url.lastPathComponent
+            }
+        }
+    }
+
+    private func save() {
+        model.addCustom(name: model.customDraftName, path: model.customDraftPath)
+        model.customDraftName = ""
+        model.customDraftPath = ""
     }
 }
 
