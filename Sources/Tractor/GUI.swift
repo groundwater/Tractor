@@ -581,15 +581,17 @@ private struct MainView: View {
         .frame(minWidth: 720, minHeight: 580)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 12) {
+                HStack(spacing: 24) {
                     FilterField(text: $filter, placeholder: "Find")
-                        .frame(width: 200)
+                        .frame(width: 220)
                     Picker("View", selection: $selection) {
                         Text("Trace").tag(Tab.trace)
                         Text("Setup").tag(Tab.setup)
                     }
                     .pickerStyle(.segmented)
+                    .fixedSize()
                 }
+                .padding(.horizontal, 16)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -621,24 +623,23 @@ struct FilterField: NSViewRepresentable {
         Coordinator(text: $text)
     }
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: text)
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField(string: text)
         field.placeholderString = placeholder
-        field.bezelStyle = .roundedBezel
-        field.isBordered = true
-        field.focusRingType = .default
         field.delegate = context.coordinator
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
         context.coordinator.attach(field: field)
         return field
     }
 
-    func updateNSView(_ nsView: NSTextField, context: Context) {
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
         if nsView.stringValue != text {
             nsView.stringValue = text
         }
     }
 
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
         let text: Binding<String>
         private var observer: NSObjectProtocol?
 
@@ -652,7 +653,7 @@ struct FilterField: NSViewRepresentable {
             }
         }
 
-        func attach(field: NSTextField) {
+        func attach(field: NSSearchField) {
             observer = NotificationCenter.default.addObserver(
                 forName: .focusFilterField,
                 object: nil,
@@ -669,7 +670,7 @@ struct FilterField: NSViewRepresentable {
         }
 
         func controlTextDidChange(_ obj: Notification) {
-            guard let field = obj.object as? NSTextField else { return }
+            guard let field = obj.object as? NSSearchField else { return }
             text.wrappedValue = field.stringValue
         }
     }
