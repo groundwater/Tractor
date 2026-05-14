@@ -74,6 +74,12 @@ extension AppDelegate {
                                         keyEquivalent: "")
         showExitedItem.target = self
         processMenu.addItem(showExitedItem)
+        processMenu.addItem(.separator())
+        let signalItem = NSMenuItem(title: "Signal…",
+                                    action: #selector(AppDelegate.requestSignal(_:)),
+                                    keyEquivalent: "k")
+        signalItem.target = self
+        processMenu.addItem(signalItem)
         processMenuItem.submenu = processMenu
         mainMenu.addItem(processMenuItem)
 
@@ -130,6 +136,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     @objc func focusFilter(_ sender: Any?) {
         NotificationCenter.default.post(name: .focusFilterField, object: nil)
+    }
+
+    @MainActor
+    @objc func requestSignal(_ sender: Any?) {
+        NotificationCenter.default.post(name: .showSignalSheet, object: nil)
     }
 
     @MainActor
@@ -756,6 +767,70 @@ private struct MainView: View {
 
 extension Notification.Name {
     static let focusFilterField = Notification.Name("tractor.focusFilterField")
+    static let showSignalSheet = Notification.Name("tractor.showSignalSheet")
+}
+
+/// Pick a Unix signal and deliver it to a target pid. Shown as a modal sheet
+/// from Process → Signal… (⌘K).
+struct SignalSheet: View {
+    let pid: pid_t?
+    let processName: String?
+    var onClose: () -> Void
+
+    @State private var signalIndex: Int = 3  // default SIGTERM
+
+    private static let signals: [(name: String, value: Int32)] = [
+        ("SIGHUP",  1),
+        ("SIGINT",  2),
+        ("SIGQUIT", 3),
+        ("SIGTERM", 15),
+        ("SIGKILL", 9),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Send Signal").font(.headline)
+                if let pid = pid {
+                    Text(verbatim: "PID \(pid)\(processName.map { " (\($0))" } ?? "")")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            Divider()
+            Form {
+                Picker("Signal", selection: $signalIndex) {
+                    ForEach(Self.signals.indices, id: \.self) { i in
+                        let s = Self.signals[i]
+                        Text(verbatim: "\(s.name) (\(s.value))").tag(i)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            }
+            .formStyle(.grouped)
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+                Button("Send", action: send)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(pid == nil)
+            }
+            .padding()
+        }
+        .frame(minWidth: 320, minHeight: 280)
+    }
+
+    private func send() {
+        guard let pid = pid else { return }
+        let sig = Self.signals[signalIndex].value
+        _ = kill(pid, sig)
+        onClose()
+    }
 }
 
 /// NSTextField-backed search field. We don't use SwiftUI's TextField + @FocusState
@@ -832,6 +907,7 @@ private struct RootView: View {
     @ObservedObject private var prefs = AppPrefs.shared
     @State private var pickerSheetShown = false
     @State private var optionsSheetShown = false
+    @State private var signalSheetShown = false
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: LiveView.DetailTab = .files
 
@@ -869,6 +945,19 @@ private struct RootView: View {
                 ),
                 onClose: { optionsSheetShown = false }
             )
+        }
+        .sheet(isPresented: $signalSheetShown) {
+            SignalSheet(
+                pid: selectedPid(from: selection),
+                processName: selectedPid(from: selection).flatMap { runner.live.processes[$0]?.name },
+                onClose: { signalSheetShown = false }
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showSignalSheet)) { _ in
+            // Only show the sheet if a process row is selected.
+            if selectedPid(from: selection) != nil {
+                signalSheetShown = true
+            }
         }
         .onAppear {
             runner.ensureStarted()
