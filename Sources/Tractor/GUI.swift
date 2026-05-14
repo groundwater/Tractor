@@ -813,12 +813,7 @@ private struct TimelineMock: View {
     @State private var atLive: Bool = true
     @State private var playhead: CGFloat = 1.0  // 0…1 along the bar
 
-    // Hard-coded chunks expressed as fractional ranges of the total span.
-    private let chunks: [(CGFloat, CGFloat)] = [
-        (0.05, 0.28),
-        (0.36, 0.62),
-        (0.71, 0.94),
-    ]
+    private let barHeight: CGFloat = 22
 
     var body: some View {
         HStack(spacing: 10) {
@@ -827,8 +822,8 @@ private struct TimelineMock: View {
                 if isPlaying { atLive = false }
             } label: {
                 Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 22, height: 22)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -836,22 +831,15 @@ private struct TimelineMock: View {
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.35))
-                    ForEach(chunks.indices, id: \.self) { i in
-                        let (start, end) = chunks[i]
-                        Capsule()
-                            .fill(Color.accentColor.opacity(0.55))
-                            .frame(width: max(0, geo.size.width * (end - start)))
-                            .offset(x: geo.size.width * start)
-                    }
-                    let headX = (atLive ? geo.size.width : geo.size.width * playhead)
-                    Capsule()
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.3))
+                    let headX = atLive ? geo.size.width : geo.size.width * playhead
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                         .fill(Color.primary)
-                        .frame(width: 2, height: 14)
-                        .offset(x: headX - 1, y: -4)
+                        .frame(width: 3, height: barHeight + 4)
+                        .offset(x: headX - 1.5, y: -2)
                 }
-                .frame(height: 6)
+                .frame(height: barHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { location in
                     let frac = min(1, max(0, location.x / geo.size.width))
@@ -859,7 +847,7 @@ private struct TimelineMock: View {
                     atLive = false
                 }
             }
-            .frame(height: 18)
+            .frame(height: barHeight)
 
             Button {
                 atLive = true
@@ -874,7 +862,7 @@ private struct TimelineMock: View {
                         .font(.caption.weight(.semibold))
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+                .padding(.vertical, 4)
                 .background(atLive ? Color.secondary.opacity(0.15) : Color.clear,
                             in: Capsule())
             }
