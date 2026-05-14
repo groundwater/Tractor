@@ -2,18 +2,11 @@ import ArgumentParser
 import Foundation
 import NetworkExtension
 
-@main
-struct TractorMain {
-    static func main() {
-        Tractor.main()
-    }
-}
-
 struct Tractor: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tractor",
         abstract: "Monitor AI coding agent activity via Endpoint Security",
-        subcommands: [Trace.self, Exec.self, Activate.self, TrustCA.self]
+        subcommands: [Trace.self, Exec.self, Activate.self, Log.self]
     )
 
     static func main(_ arguments: [String]? = nil) {

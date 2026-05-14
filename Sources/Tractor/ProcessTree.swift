@@ -234,6 +234,101 @@ func getProcessArgs(_ pid: pid_t) -> [String] {
     return args
 }
 
+/// Snapshot of a running process for the GUI's PID picker.
+struct RunningProcessInfo: Identifiable, Hashable {
+    let pid: pid_t
+    let user: String
+    let name: String
+    let argv: String
+    var id: pid_t { pid }
+}
+
+/// Enumerate all currently-running processes. Cheap to call (a few ms even on
+/// busy systems). Skips kernel pids and anything we can't read info for.
+func listRunningProcesses() -> [RunningProcessInfo] {
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return [] }
+    var pidsBuf = [pid_t](repeating: 0, count: Int(count) + 64)
+    let actual = proc_listallpids(&pidsBuf, Int32(MemoryLayout<pid_t>.size * pidsBuf.count))
+    guard actual > 0 else { return [] }
+    var out: [RunningProcessInfo] = []
+    out.reserveCapacity(Int(actual))
+    for i in 0..<Int(actual) {
+        let pid = pidsBuf[i]
+        guard pid > 0 else { continue }
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info,
+                                Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard size > 0 else { continue }
+        let uid = info.pbi_uid
+        let user: String = {
+            if let pwd = getpwuid(uid) {
+                return String(cString: pwd.pointee.pw_name)
+            }
+            return "\(uid)"
+        }()
+        let name = withUnsafePointer(to: info.pbi_comm) { tuplePtr -> String in
+            let cap = MemoryLayout.size(ofValue: info.pbi_comm)
+            return tuplePtr.withMemoryRebound(to: CChar.self, capacity: cap) {
+                String(cString: $0)
+            }
+        }
+        let argv = getProcessArgs(pid).joined(separator: " ")
+        out.append(RunningProcessInfo(pid: pid, user: user, name: name, argv: argv))
+    }
+    out.sort { $0.pid < $1.pid }
+    return out
+}
+
+/// BFS-walk the live kernel process tree to collect a pid and all of its
+/// descendants. Used by the GUI's Kill Branch action so we kill the entire
+/// subtree even if some descendants are running outside our trace scope.
+func collectDescendantPids(of rootPid: pid_t) -> [pid_t] {
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return [rootPid] }
+    var pidsBuf = [pid_t](repeating: 0, count: Int(count) + 64)
+    let actual = proc_listallpids(&pidsBuf, Int32(MemoryLayout<pid_t>.size * pidsBuf.count))
+    guard actual > 0 else { return [rootPid] }
+
+    var parentToChildren: [pid_t: [pid_t]] = [:]
+    for i in 0..<Int(actual) {
+        let pid = pidsBuf[i]
+        guard pid > 0 else { continue }
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        if size > 0 {
+            let ppid = pid_t(info.pbi_ppid)
+            parentToChildren[ppid, default: []].append(pid)
+        }
+    }
+
+    var result: [pid_t] = []
+    var visited: Set<pid_t> = []
+    var queue: [pid_t] = [rootPid]
+    while !queue.isEmpty {
+        let p = queue.removeFirst()
+        if visited.contains(p) { continue }
+        visited.insert(p)
+        result.append(p)
+        if let kids = parentToChildren[p] {
+            queue.append(contentsOf: kids)
+        }
+    }
+    return result
+}
+
+/// Working directory for a process, via PROC_PIDVNODEPATHINFO.
+func getProcessCwd(_ pid: pid_t) -> String? {
+    var vnodeInfo = proc_vnodepathinfo()
+    let size = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnodeInfo, Int32(MemoryLayout<proc_vnodepathinfo>.size))
+    guard size > 0 else { return nil }
+    let cwd = withUnsafePointer(to: vnodeInfo.pvi_cdir.vip_path) { tuplePtr -> String in
+        let cap = MemoryLayout.size(ofValue: vnodeInfo.pvi_cdir.vip_path)
+        return tuplePtr.withMemoryRebound(to: CChar.self, capacity: cap) { String(cString: $0) }
+    }
+    return cwd.isEmpty ? nil : cwd
+}
+
 /// Get environment variables for a process from KERN_PROCARGS2
 func getProcessEnv(_ pid: pid_t) -> [String] {
     var argmax: Int = 0

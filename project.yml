@@ -55,8 +55,8 @@ targets:
       path: Sources/TractorNE/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "174"
+        CFBundleShortVersionString: "0.3.0"
+        CFBundleVersion: "250"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -94,7 +94,7 @@ targets:
       path: Sources/TractorES/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.2.0"
+        CFBundleShortVersionString: "0.3.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses an Endpoint Security extension to monitor process activity for the process tree you trace."
@@ -124,6 +124,7 @@ targets:
       - path: Sources/Tractor
         excludes:
           - "*.png"
+      - path: Sources/TractorGUI
       - path: icon/Tractor.icns
         buildPhase: resources
     dependencies:
@@ -149,8 +150,20 @@ targets:
             fi
             ditto "${SYSEXT_SRC}" "${SYSEXT_DST}/${SYSEXT_NAME}"
           done
+          # Single-binary build: the Tractor main exec serves both GUI and CLI.
+          # The wrapper at Contents/Resources/tractor (used by Homebrew and
+          # /usr/local/bin/tractor) sets TRACTOR_CLI=1 before exec'ing the
+          # binary, which routes through Tractor.main() instead of the
+          # SwiftUI app. LaunchServices-launched starts don't set the var → GUI.
+          WRAPPER_DST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Resources/tractor"
+          cat > "${WRAPPER_DST}" <<'WRAPPER_EOF'
+          #!/bin/sh
+          BIN="$(dirname "$(readlink -f "$0")")/../MacOS/Tractor"
+          TRACTOR_CLI=1 exec "$BIN" "$@"
+          WRAPPER_EOF
+          chmod 755 "${WRAPPER_DST}"
           # Debug: ad-hoc resign so the outer app's seal covers both embedded sysexts.
-          # Release: skip — `xcodebuild -exportArchive` re-signs everything later.
+          # Release: skip — Makefile re-signs everything with Developer ID later.
           if [ "${CONFIGURATION}" != "Release" ]; then
             /usr/bin/codesign --force \
               --sign - \
@@ -176,10 +189,9 @@ targets:
         CFBundleExecutable: Tractor
         CFBundleIconFile: Tractor
         CFBundlePackageType: APPL
-        CFBundleShortVersionString: "0.2.0"
+        CFBundleShortVersionString: "0.3.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "15.0"
-        LSUIElement: true
         NSHighResolutionCapable: true
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic for security analysis."
     settings:
