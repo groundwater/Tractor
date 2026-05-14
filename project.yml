@@ -55,8 +55,8 @@ targets:
       path: Sources/TractorNE/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "249"
+        CFBundleShortVersionString: "0.3.0"
+        CFBundleVersion: "250"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -94,7 +94,7 @@ targets:
       path: Sources/TractorES/Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleShortVersionString: "0.2.0"
+        CFBundleShortVersionString: "0.3.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses an Endpoint Security extension to monitor process activity for the process tree you trace."
@@ -189,7 +189,7 @@ targets:
         CFBundleExecutable: Tractor
         CFBundleIconFile: Tractor
         CFBundlePackageType: APPL
-        CFBundleShortVersionString: "0.2.0"
+        CFBundleShortVersionString: "0.3.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "15.0"
         NSHighResolutionCapable: true
