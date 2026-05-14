@@ -794,10 +794,12 @@ struct KillBranchSheet: View {
     var onClose: () -> Void
 
     @State private var descendantCount: Int = 0
+    @State private var resultMessage: String? = nil
+    @State private var didKill: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Kill Process Branch").font(.headline)
                 Text(verbatim: "PID \(pid)\(processName.map { " (\($0))" } ?? "")")
                     .font(.callout)
@@ -807,26 +809,31 @@ struct KillBranchSheet: View {
                      : "Will send SIGKILL to this process.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+                if let msg = resultMessage {
+                    Text(verbatim: msg)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            .padding(20)
+            Spacer(minLength: 0)
             Divider()
             HStack {
                 Spacer()
-                Button("Cancel", action: onClose)
+                Button(didKill ? "Close" : "Cancel", action: onClose)
                     .keyboardShortcut(.cancelAction)
-                Button(role: .destructive) {
-                    killAll()
-                    onClose()
-                } label: {
-                    Text("Kill All")
+                if !didKill {
+                    Button(role: .destructive, action: killAll) {
+                        Text("Kill All")
+                    }
+                    .keyboardShortcut(.defaultAction)
                 }
-                .keyboardShortcut(.defaultAction)
             }
-            .padding()
+            .padding(16)
         }
-        .frame(minWidth: 360, minHeight: 180)
+        .frame(minWidth: 420, minHeight: 240)
         .onAppear { descendantCount = collectDescendantPids(of: pid).count }
     }
 
@@ -834,10 +841,23 @@ struct KillBranchSheet: View {
         // Freeze the root so it can't fork() new children during the walk.
         _ = kill(pid, SIGSTOP)
         let pids = collectDescendantPids(of: pid)
-        // Kill leaves first (reverse BFS) — parents die last so they don't
-        // reap children before our SIGKILL reaches them.
+        var failures: [(pid: pid_t, errno: Int32)] = []
+        // Kill leaves first (reverse BFS).
         for p in pids.reversed() {
-            _ = kill(p, SIGKILL)
+            if kill(p, SIGKILL) != 0 {
+                failures.append((p, errno))
+            }
+        }
+        didKill = true
+        if failures.isEmpty {
+            resultMessage = "Sent SIGKILL to \(pids.count) process\(pids.count == 1 ? "" : "es")."
+        } else {
+            let firstReason = String(cString: strerror(failures[0].errno))
+            let permCount = failures.filter { $0.errno == EPERM }.count
+            let perm = permCount > 0
+                ? " (\(permCount) needs higher privileges — try `sudo` from the CLI to kill those)"
+                : ""
+            resultMessage = "\(pids.count - failures.count) killed, \(failures.count) failed: \(firstReason)\(perm)"
         }
     }
 }

@@ -56,7 +56,7 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "248"
+        CFBundleVersion: "249"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
