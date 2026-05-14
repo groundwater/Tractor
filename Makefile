@@ -15,7 +15,7 @@ DMG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).dmg
 # See Local.mk.example. Optional for `make debug` / `make release`.
 -include Local.mk
 
-.PHONY: debug release dmg dmg-from-release notarize-dmg dist clean \
+.PHONY: debug release dmg dmg-from-release notarize-dmg notarize-app dist clean \
         preflight-release preflight-dmg bump-sysext-version ensure-local-config
 
 # Auto-create Local.xcconfig from the example if it's missing so xcodegen
@@ -153,6 +153,23 @@ dmg-from-release: preflight-dmg
 		"$(DMG_OUT)"
 	@echo ""
 	@echo "Unsigned dmg: $(DMG_OUT)"
+
+# Notarize the built .app directly and staple it, so it can be ditto'd into
+# /Applications and launched (or shell-exec'd) without Gatekeeper killing it.
+# Use this for local-dev installs of the new build. ~2-3 minutes per round.
+notarize-app:
+	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
+		|| { echo "ERROR: NOTARYTOOL_KEYCHAIN_PROFILE is not set (see Local.mk.example)."; exit 1; }
+	@test -d "$(APP_BUILT)" \
+		|| { echo "ERROR: $(APP_BUILT) not found — run 'make release' first."; exit 1; }
+	rm -f $(BUILD_DIR)/Tractor.app.zip
+	ditto -c -k --sequesterRsrc --keepParent "$(APP_BUILT)" $(BUILD_DIR)/Tractor.app.zip
+	xcrun notarytool submit $(BUILD_DIR)/Tractor.app.zip \
+		--keychain-profile "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
+		--wait
+	xcrun stapler staple "$(APP_BUILT)"
+	@echo ""
+	@echo "Notarized + stapled: $(APP_BUILT)"
 
 notarize-dmg:
 	@test -n "$(NOTARYTOOL_KEYCHAIN_PROFILE)" \
