@@ -348,7 +348,9 @@ final class TraceRunner: ObservableObject {
         }
 
         let roots = TraceRoots(names: names, pids: pids, paths: paths)
-        let options = TraceOptions(logToSQLite: true)
+        // GUI needs network bytes for the timeline waveform; NE will silently
+        // no-op (with a lastMessage) if the network extension isn't activated.
+        let options = TraceOptions(logToSQLite: true, net: true)
 
         do {
             try session.start(roots: roots, options: options)
