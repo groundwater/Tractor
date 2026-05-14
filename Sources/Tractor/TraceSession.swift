@@ -172,6 +172,24 @@ final class TraceSession {
         isRunning = false
     }
 
+    /// Try to (re)start the network FlowXPCClient against the running session.
+    /// Used when the user activates the NE *after* the trace session is up:
+    /// the original `startFlowClient` call already returned no-op'd because
+    /// the sysext wasn't yet available, so without this they'd have to
+    /// relaunch the whole app. Idempotent.
+    @discardableResult
+    func tryStartFlowClient() -> Bool {
+        guard isRunning, flowClient == nil, let esClient = esClient else { return false }
+        guard FlowXPCClient.isAvailable() else { return false }
+        do {
+            try startFlowClient(options: TraceOptions(net: true), esClient: esClient)
+            return flowClient != nil
+        } catch {
+            onMessage?("Tractor: failed to start network capture (\(error.localizedDescription))")
+            return false
+        }
+    }
+
     // MARK: - Live mutation
 
     func setTrackerPatterns(names: [String], paths: [String]) {

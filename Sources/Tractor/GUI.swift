@@ -385,6 +385,16 @@ final class TraceRunner: ObservableObject {
         isRunning = false
     }
 
+    /// Called after the user activates the NE in Settings — tries to bring
+    /// the flow client up against the already-running session, so they don't
+    /// have to relaunch the app.
+    func retryNetworkCapture() {
+        guard let session = session else { return }
+        if session.tryStartFlowClient() {
+            lastMessage = "Tractor: network capture active"
+        }
+    }
+
     /// Push the current active-list state to the running session. Safe to call
     /// when stopped — it's a no-op. Adds work; remove is best-effort (the ES
     /// sysext doesn't support pid removal yet, so existing tracked PIDs keep
@@ -875,14 +885,31 @@ private struct RootView: View {
 
     @ViewBuilder
     private var footer: some View {
-        HStack(spacing: 10) {
-            TimelineMock(sampler: runner.sampler, isRecording: runner.isRecording)
-                .frame(maxWidth: .infinity)
-            Button("Options…") { optionsSheetShown = true }
-            RecordButton(isRecording: runner.isRecording) {
-                runner.isRecording.toggle()
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                TimelineMock(sampler: runner.sampler, isRecording: runner.isRecording)
+                    .frame(maxWidth: .infinity)
+                Button("Options…") { optionsSheetShown = true }
+                RecordButton(isRecording: runner.isRecording) {
+                    runner.isRecording.toggle()
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
             }
-            .keyboardShortcut(.return, modifiers: [.command])
+            if let msg = runner.lastMessage {
+                HStack(spacing: 6) {
+                    Text(verbatim: msg)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    if msg.contains("network extension") {
+                        Button("Retry") { runner.retryNetworkCapture() }
+                            .controlSize(.mini)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
