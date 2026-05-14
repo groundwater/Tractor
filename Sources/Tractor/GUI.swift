@@ -80,6 +80,15 @@ extension AppDelegate {
                                     keyEquivalent: "k")
         signalItem.target = self
         processMenu.addItem(signalItem)
+        // Kill Branch: Delete key (Mac's Delete = backspace, 0x08). When a
+        // text field has focus the field eats Delete for editing, so this
+        // only fires when the process tree (or a non-text view) is focused.
+        let killBranchItem = NSMenuItem(title: "Kill Branch",
+                                        action: #selector(AppDelegate.requestKillBranch(_:)),
+                                        keyEquivalent: "\u{08}")
+        killBranchItem.keyEquivalentModifierMask = []
+        killBranchItem.target = self
+        processMenu.addItem(killBranchItem)
         processMenuItem.submenu = processMenu
         mainMenu.addItem(processMenuItem)
 
@@ -141,6 +150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     @objc func requestSignal(_ sender: Any?) {
         NotificationCenter.default.post(name: .showSignalSheet, object: nil)
+    }
+
+    @MainActor
+    @objc func requestKillBranch(_ sender: Any?) {
+        NotificationCenter.default.post(name: .killBranchRequested, object: nil)
     }
 
     @MainActor
@@ -768,6 +782,64 @@ private struct MainView: View {
 extension Notification.Name {
     static let focusFilterField = Notification.Name("tractor.focusFilterField")
     static let showSignalSheet = Notification.Name("tractor.showSignalSheet")
+    static let killBranchRequested = Notification.Name("tractor.killBranchRequested")
+}
+
+/// Confirm-and-kill modal for Process › Kill Branch (Delete). Sends SIGKILL
+/// to the target pid and every descendant in the live process tree
+/// (resolved via kernel proc_listallpids, not just our trace scope).
+struct KillBranchSheet: View {
+    let pid: pid_t
+    let processName: String?
+    var onClose: () -> Void
+
+    @State private var descendantCount: Int = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Kill Process Branch").font(.headline)
+                Text(verbatim: "PID \(pid)\(processName.map { " (\($0))" } ?? "")")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(verbatim: descendantCount > 0
+                     ? "Will send SIGKILL to this process and its \(descendantCount - 1) descendant\(descendantCount - 1 == 1 ? "" : "s")."
+                     : "Will send SIGKILL to this process.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+                Button(role: .destructive) {
+                    killAll()
+                    onClose()
+                } label: {
+                    Text("Kill All")
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(minWidth: 360, minHeight: 180)
+        .onAppear { descendantCount = collectDescendantPids(of: pid).count }
+    }
+
+    private func killAll() {
+        // Freeze the root so it can't fork() new children during the walk.
+        _ = kill(pid, SIGSTOP)
+        let pids = collectDescendantPids(of: pid)
+        // Kill leaves first (reverse BFS) — parents die last so they don't
+        // reap children before our SIGKILL reaches them.
+        for p in pids.reversed() {
+            _ = kill(p, SIGKILL)
+        }
+    }
 }
 
 /// Pick a Unix signal and deliver it to a target pid. Shown as a modal sheet
@@ -908,6 +980,8 @@ private struct RootView: View {
     @State private var pickerSheetShown = false
     @State private var optionsSheetShown = false
     @State private var signalSheetShown = false
+    @State private var killBranchPid: pid_t? = nil
+    @State private var killBranchSheetShown = false
     @State private var selection: ProcessTableRow.ID? = nil
     @State private var detailTab: LiveView.DetailTab = .files
 
@@ -953,10 +1027,33 @@ private struct RootView: View {
                 onClose: { signalSheetShown = false }
             )
         }
+        .sheet(isPresented: $killBranchSheetShown) {
+            if let pid = killBranchPid {
+                KillBranchSheet(
+                    pid: pid,
+                    processName: runner.live.processes[pid]?.name,
+                    onClose: { killBranchSheetShown = false }
+                )
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .showSignalSheet)) { _ in
-            // Only show the sheet if a process row is selected.
             if selectedPid(from: selection) != nil {
                 signalSheetShown = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .killBranchRequested)) { _ in
+            // Delete on a group row removes it from active (preserves the
+            // earlier "delete a category to stop tracing it" behaviour).
+            // Delete on a process row opens the Kill Branch confirmation.
+            if let id = selection, id.hasPrefix("g:"), !id.contains("/") {
+                let groupID = String(id.dropFirst(2))
+                if let t = model.active.first(where: { $0.id == groupID }) {
+                    model.remove(t)
+                }
+                selection = nil
+            } else if let pid = selectedPid(from: selection) {
+                killBranchPid = pid
+                killBranchSheetShown = true
             }
         }
         .onAppear {

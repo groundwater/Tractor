@@ -280,6 +280,43 @@ func listRunningProcesses() -> [RunningProcessInfo] {
     return out
 }
 
+/// BFS-walk the live kernel process tree to collect a pid and all of its
+/// descendants. Used by the GUI's Kill Branch action so we kill the entire
+/// subtree even if some descendants are running outside our trace scope.
+func collectDescendantPids(of rootPid: pid_t) -> [pid_t] {
+    let count = proc_listallpids(nil, 0)
+    guard count > 0 else { return [rootPid] }
+    var pidsBuf = [pid_t](repeating: 0, count: Int(count) + 64)
+    let actual = proc_listallpids(&pidsBuf, Int32(MemoryLayout<pid_t>.size * pidsBuf.count))
+    guard actual > 0 else { return [rootPid] }
+
+    var parentToChildren: [pid_t: [pid_t]] = [:]
+    for i in 0..<Int(actual) {
+        let pid = pidsBuf[i]
+        guard pid > 0 else { continue }
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        if size > 0 {
+            let ppid = pid_t(info.pbi_ppid)
+            parentToChildren[ppid, default: []].append(pid)
+        }
+    }
+
+    var result: [pid_t] = []
+    var visited: Set<pid_t> = []
+    var queue: [pid_t] = [rootPid]
+    while !queue.isEmpty {
+        let p = queue.removeFirst()
+        if visited.contains(p) { continue }
+        visited.insert(p)
+        result.append(p)
+        if let kids = parentToChildren[p] {
+            queue.append(contentsOf: kids)
+        }
+    }
+    return result
+}
+
 /// Working directory for a process, via PROC_PIDVNODEPATHINFO.
 func getProcessCwd(_ pid: pid_t) -> String? {
     var vnodeInfo = proc_vnodepathinfo()

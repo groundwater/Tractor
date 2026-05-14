@@ -82,15 +82,6 @@ struct LiveView: View {
                 .background(.bar)
                 Divider()
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, filter: filter, selection: $selection)
-                    .onDeleteCommand {
-                        // Top-level group row ids look like "g:<group_id>" with
-                        // no embedded "/" (process rows are paths with slashes).
-                        if let id = selection, id.hasPrefix("g:"), !id.contains("/") {
-                            let groupID = String(id.dropFirst(2))
-                            onDeleteGroup(groupID)
-                            selection = nil
-                        }
-                    }
                 Divider()
                 HStack {
                     Button(action: onAddTarget) {
