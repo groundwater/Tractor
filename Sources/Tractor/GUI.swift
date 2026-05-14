@@ -1096,6 +1096,7 @@ private struct RootView: View {
                 }
                 .padding(.horizontal, 2)
             }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1113,7 +1114,7 @@ private struct TimelineMock: View {
     @State private var atLive: Bool = true
     @State private var playhead: CGFloat = 1.0  // 0…1 along the bar
 
-    private let minBarHeight: CGFloat = 33
+    private let barHeight: CGFloat = 33
     /// "Now" sits at 90% of the bar's width. The rightmost 10% is empty
     /// headroom that fills as new samples arrive.
     private let liveX: CGFloat = 0.90
@@ -1186,7 +1187,7 @@ private struct TimelineMock: View {
                 }
                 .contentShape(Rectangle())
             }
-            .frame(minHeight: minBarHeight, maxHeight: .infinity)
+            .frame(height: barHeight)
 
             Button {
                 atLive = true
