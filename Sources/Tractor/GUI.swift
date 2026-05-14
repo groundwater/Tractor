@@ -191,6 +191,71 @@ struct TraceTarget: Identifiable, Hashable {
 
 // MARK: - Trace runner (in-process)
 
+/// Rolling 30s ring buffer of activity samples for the playback timeline.
+/// 100ms bins; each bin counts file-op events (disk) and TCP byte deltas
+/// (network). Recording state is captured per-bin so the timeline can tint
+/// recorded spans red.
+@MainActor
+final class ActivitySampler: ObservableObject {
+    static let binSeconds: TimeInterval = 0.1
+    static let windowSeconds: TimeInterval = 30
+    static var binCount: Int { Int(windowSeconds / binSeconds) } // 300
+
+    struct Bin: Equatable {
+        var disk: Double = 0
+        var network: Double = 0
+        var recorded: Bool = false
+    }
+
+    @Published private(set) var bins: [Bin] =
+        Array(repeating: Bin(), count: ActivitySampler.binCount)
+
+    /// Mirrors TraceRunner.isRecording. Stamped onto each new bin as it
+    /// rotates in.
+    var isRecording: Bool = false
+
+    private var timer: Timer?
+    /// Last seen cumulative byte total per flow id, used to derive deltas.
+    private var lastBytesPerFlow: [UInt64: Int64] = [:]
+
+    func start() {
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: Self.binSeconds, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.advance() }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func reset() {
+        bins = Array(repeating: Bin(), count: Self.binCount)
+        lastBytesPerFlow.removeAll()
+    }
+
+    private func advance() {
+        bins.removeFirst()
+        bins.append(Bin(recorded: isRecording))
+    }
+
+    func tickDisk() {
+        guard !bins.isEmpty else { return }
+        bins[bins.count - 1].disk += 1
+    }
+
+    func tickBytes(flowID: UInt64, cumulative: Int64) {
+        guard !bins.isEmpty else { return }
+        let last = lastBytesPerFlow[flowID] ?? 0
+        let delta = cumulative - last
+        lastBytesPerFlow[flowID] = cumulative
+        if delta > 0 {
+            bins[bins.count - 1].network += Double(delta)
+        }
+    }
+}
+
 @MainActor
 final class TraceRunner: ObservableObject {
     @Published private(set) var isRunning = false
@@ -200,11 +265,14 @@ final class TraceRunner: ObservableObject {
     @Published var isRecording = false {
         didSet {
             session?.setSQLiteRecordingEnabled(isRecording)
+            sampler.isRecording = isRecording
             if isRecording && !oldValue {
                 session?.resetSQLiteRecordedCount()
             }
         }
     }
+
+    let sampler = ActivitySampler()
 
     /// Number of events written to the trace DB during the current recording.
     /// Polled by the GUI footer via a TimelineView tick.
@@ -260,11 +328,17 @@ final class TraceRunner: ObservableObject {
             Task { @MainActor in self?.lastMessage = msg }
         }
         session.onBytesUpdate = { [weak self] pid, host, port, bytesOut, bytesIn, flowID in
-            let m = self?.live
+            guard let self = self else { return }
+            let m = self.live
             DispatchQueue.main.async {
-                m?.handleBytesUpdate(pid: pid, host: host, port: port,
-                                      bytesOut: bytesOut, bytesIn: bytesIn, flowID: flowID)
+                m.handleBytesUpdate(pid: pid, host: host, port: port,
+                                    bytesOut: bytesOut, bytesIn: bytesIn, flowID: flowID)
+                self.sampler.tickBytes(flowID: flowID, cumulative: bytesOut + bytesIn)
             }
+        }
+        session.onFileOp = { [weak self] _, _, _, _, _, _ in
+            guard let self = self else { return }
+            Task { @MainActor in self.sampler.tickDisk() }
         }
         session.onConnectionClosed = { [weak self] pid, host, port, flowID in
             let m = self?.live
@@ -287,6 +361,7 @@ final class TraceRunner: ObservableObject {
             self.appliedNames = Set(names)
             self.isRunning = true
             self.lastMessage = nil
+            sampler.start()
         } catch {
             self.lastMessage = "failed to start: \(error.localizedDescription)"
         }
@@ -755,7 +830,7 @@ private struct RootView: View {
                      })
                 .frame(minHeight: 220)
             footer
-                .frame(minHeight: 56, idealHeight: 64)
+                .frame(minHeight: 80, idealHeight: 96)
         }
         .inspector(isPresented: $prefs.inspectorShown) {
             DetailPane(model: runner.live, selectionID: selection, tab: $detailTab)
@@ -793,7 +868,7 @@ private struct RootView: View {
     @ViewBuilder
     private var footer: some View {
         HStack(spacing: 10) {
-            TimelineMock()
+            TimelineMock(sampler: runner.sampler, isRecording: runner.isRecording)
                 .frame(maxWidth: .infinity)
             Button("Options…") { optionsSheetShown = true }
             RecordButton(isRecording: runner.isRecording) {
@@ -810,11 +885,16 @@ private struct RootView: View {
 /// SQLite yet — it's just a scrubbable bar so we can iterate on the
 /// interaction shape before committing to the underlying replay engine.
 private struct TimelineMock: View {
+    @ObservedObject var sampler: ActivitySampler
+    let isRecording: Bool
     @State private var isPlaying: Bool = false
     @State private var atLive: Bool = true
     @State private var playhead: CGFloat = 1.0  // 0…1 along the bar
 
-    private let barHeight: CGFloat = 22
+    private let barHeight: CGFloat = 44
+    /// "Now" sits at 90% of the bar's width. The rightmost 10% is empty
+    /// headroom that fills as new samples arrive.
+    private let liveX: CGFloat = 0.90
 
     var body: some View {
         HStack(spacing: 10) {
@@ -832,21 +912,58 @@ private struct TimelineMock: View {
 
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
+                    // Track background.
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.3))
-                    let headX = atLive ? geo.size.width : geo.size.width * playhead
+                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.25))
+                    // Center line.
+                    Rectangle()
+                        .fill(Color(NSColor.separatorColor).opacity(0.55))
+                        .frame(height: 1)
+                        .offset(y: geo.size.height / 2 - 0.5)
+                    // Waveform — newest sample at the 90% mark, older to the left.
+                    Canvas { context, size in
+                        let bins = sampler.bins
+                        guard !bins.isEmpty else { return }
+                        // Map bin index → x. The most-recent bin (last) sits at
+                        // liveX * size.width; older bins step leftward.
+                        let dataWidth = size.width * liveX
+                        let binW = dataWidth / CGFloat(bins.count)
+                        let midY = size.height / 2
+                        let maxDisk = max(bins.map(\.disk).max() ?? 1, 1)
+                        let maxNet = max(bins.map(\.network).max() ?? 1, 1)
+                        let maxHalfH = midY - 2
+                        for (i, bin) in bins.enumerated() {
+                            let x = CGFloat(i) * binW
+                            let baseColor: Color = bin.recorded
+                                ? Color.red.opacity(0.7)
+                                : Color.accentColor.opacity(0.65)
+                            let dH = CGFloat(bin.disk / maxDisk) * maxHalfH
+                            if dH > 0 {
+                                context.fill(
+                                    Path(CGRect(x: x, y: midY - dH,
+                                                width: max(binW - 0.5, 0.5), height: dH)),
+                                    with: .color(baseColor)
+                                )
+                            }
+                            let nH = CGFloat(bin.network / maxNet) * maxHalfH
+                            if nH > 0 {
+                                context.fill(
+                                    Path(CGRect(x: x, y: midY,
+                                                width: max(binW - 0.5, 0.5), height: nH)),
+                                    with: .color(baseColor)
+                                )
+                            }
+                        }
+                    }
+                    // Playhead (fixed @ liveX).
+                    let headX = liveX * geo.size.width
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(Color.primary)
-                        .frame(width: 3, height: barHeight + 4)
-                        .offset(x: headX - 1.5, y: -2)
+                        .fill(isRecording ? Color.red : Color.primary)
+                        .frame(width: 2, height: geo.size.height + 4)
+                        .offset(x: headX - 1, y: -2)
                 }
                 .frame(height: barHeight)
                 .contentShape(Rectangle())
-                .onTapGesture { location in
-                    let frac = min(1, max(0, location.x / geo.size.width))
-                    playhead = frac
-                    atLive = false
-                }
             }
             .frame(height: barHeight)
 
