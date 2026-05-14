@@ -56,7 +56,7 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "243"
+        CFBundleVersion: "244"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -115,46 +115,6 @@ targets:
         Debug:
           PROVISIONING_PROFILE_SPECIFIER: ""
 
-  TractorCLI:
-    type: tool
-    platform: macOS
-    attributes:
-      ProvisioningStyle: Automatic
-    sources:
-      - path: Sources/Tractor
-        excludes:
-          - "*.png"
-      - path: Sources/TractorCLI
-    dependencies:
-      - package: swift-argument-parser
-        product: ArgumentParser
-    entitlements:
-      path: Sources/Tractor/TractorCLI.entitlements
-      properties:
-        com.apple.developer.system-extension.install: true
-        com.apple.developer.networking.networkextension:
-          - app-proxy-provider
-        com.apple.security.application-groups:
-          - group.com.jacobgroundwater.Tractor
-    settings:
-      base:
-        PRODUCT_NAME: Tractor-CLI
-        SWIFT_VERSION: "5.9"
-        CODE_SIGN_ENTITLEMENTS: Sources/Tractor/TractorCLI.entitlements
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
-        PRODUCT_BUNDLE_IDENTIFIER: com.jacobgroundwater.Tractor.CLI
-        SKIP_INSTALL: "YES"
-        OTHER_LDFLAGS:
-          - "-lsqlite3"
-          - "-framework"
-          - "NetworkExtension"
-          - "-framework"
-          - "SystemExtensions"
-          - "-framework"
-          - "AppKit"
-          - "-framework"
-          - "SwiftUI"
-
   TractorApp:
     type: application
     platform: macOS
@@ -174,8 +134,6 @@ targets:
         embed: false
       - target: TractorES
         embed: false
-      - target: TractorCLI
-        embed: false
     postBuildScripts:
       - script: |
           set -e
@@ -192,42 +150,28 @@ targets:
             fi
             ditto "${SYSEXT_SRC}" "${SYSEXT_DST}/${SYSEXT_NAME}"
           done
-          # Embed the Tractor-CLI peer binary next to Tractor-GUI in Contents/MacOS/.
-          CLI_SRC="${TARGET_BUILD_DIR}/Tractor-CLI"
-          if [ ! -f "${CLI_SRC}" ]; then
-            CLI_SRC="$(find "${OBJROOT}" "${SYMROOT}" -type f -name Tractor-CLI -not -path "*/${WRAPPER_NAME}/*" 2>/dev/null | head -1)"
-          fi
-          if [ -z "${CLI_SRC}" ] || [ ! -f "${CLI_SRC}" ]; then
-            echo "error: could not locate built Tractor-CLI"; exit 1
-          fi
-          ditto "${CLI_SRC}" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/MacOS/Tractor-CLI"
-          # Drop the homebrew-friendly `tractor` wrapper into Contents/Resources/.
-          # The Homebrew cask symlinks /opt/homebrew/bin/tractor at this wrapper,
-          # and the wrapper exec()s the Mach-O with an absolute path so
-          # _NSGetExecutablePath/Bundle.main resolve to Tractor.app (required by
-          # OSSystemExtensionRequest and NETransparentProxyManager).
+          # Single-binary build: the Tractor main exec serves both GUI and CLI.
+          # The wrapper at Contents/Resources/tractor (used by Homebrew and
+          # /usr/local/bin/tractor) sets TRACTOR_CLI=1 before exec'ing the
+          # binary, which routes through Tractor.main() instead of the
+          # SwiftUI app. LaunchServices-launched starts don't set the var → GUI.
           WRAPPER_DST="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Resources/tractor"
           cat > "${WRAPPER_DST}" <<'WRAPPER_EOF'
           #!/bin/sh
-          exec "$(dirname "$(readlink -f "$0")")/../MacOS/Tractor-CLI" "$@"
+          BIN="$(dirname "$(readlink -f "$0")")/../MacOS/Tractor"
+          TRACTOR_CLI=1 exec "$BIN" "$@"
           WRAPPER_EOF
           chmod 755 "${WRAPPER_DST}"
-          # Debug: ad-hoc resign so the outer app's seal covers both embedded sysexts + CLI.
+          # Debug: ad-hoc resign so the outer app's seal covers both embedded sysexts.
           # Release: skip — Makefile re-signs everything with Developer ID later.
           if [ "${CONFIGURATION}" != "Release" ]; then
-            /usr/bin/codesign --force \
-              --sign - \
-              --identifier com.jacobgroundwater.Tractor \
-              --entitlements "${SRCROOT}/Sources/Tractor/TractorCLI.entitlements" \
-              --timestamp=none \
-              "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/MacOS/Tractor-CLI"
             /usr/bin/codesign --force \
               --sign - \
               --entitlements "${SRCROOT}/Sources/Tractor/TractorApp.entitlements" \
               --timestamp=none \
               "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"
           fi
-        name: "Embed System Extensions and CLI"
+        name: "Embed System Extensions"
     entitlements:
       path: Sources/Tractor/TractorApp.entitlements
       properties:
@@ -242,7 +186,7 @@ targets:
         CFBundleIdentifier: com.jacobgroundwater.Tractor
         CFBundleName: Tractor
         CFBundleDisplayName: Tractor
-        CFBundleExecutable: Tractor-GUI
+        CFBundleExecutable: Tractor
         CFBundleIconFile: Tractor
         CFBundlePackageType: APPL
         CFBundleShortVersionString: "0.2.0"
@@ -253,7 +197,6 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Tractor
-        EXECUTABLE_NAME: Tractor-GUI
         SWIFT_VERSION: "5.9"
         CODE_SIGN_ENTITLEMENTS: Sources/Tractor/TractorApp.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Tractor/BridgingHeader.h
