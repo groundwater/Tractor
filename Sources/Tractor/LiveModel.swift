@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -56,15 +57,32 @@ struct ConnectionRow: Identifiable, Hashable {
 
 @MainActor
 final class LiveModel: ObservableObject {
-    @Published var processes: [pid_t: ProcessNode] = [:]
-    @Published var children: [pid_t: [pid_t]] = [:]
-    @Published var roots: [pid_t] = []
+    // The storage dicts are NOT @Published — direct mutations don't trigger
+    // a SwiftUI invalidation. Instead we coalesce invalidations to ~30Hz via
+    // setNeedsPublish() so a burst of N events causes one redraw, not N.
+    var processes: [pid_t: ProcessNode] = [:]
+    var children: [pid_t: [pid_t]] = [:]
+    var roots: [pid_t] = []
 
-    @Published var fileStats: [pid_t: [String: PathFileStats]] = [:]
-    @Published var connections: [pid_t: [UInt64: ConnectionRow]] = [:]
+    var fileStats: [pid_t: [String: PathFileStats]] = [:]
+    var connections: [pid_t: [UInt64: ConnectionRow]] = [:]
 
-    @Published var groups: [TraceGroup] = []
-    @Published var pidToGroups: [pid_t: Set<String>] = [:]
+    var groups: [TraceGroup] = []
+    var pidToGroups: [pid_t: Set<String>] = [:]
+
+    /// Tickle to trigger a coalesced redraw at most every ~33ms.
+    private var publishPending: Bool = false
+    private static let publishInterval: TimeInterval = 1.0 / 30.0
+
+    private func setNeedsPublish() {
+        if publishPending { return }
+        publishPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.publishInterval) { [weak self] in
+            guard let self = self else { return }
+            self.publishPending = false
+            self.objectWillChange.send()
+        }
+    }
 
     // Stable ordering helpers
     func sortedRoots() -> [pid_t] {
@@ -83,6 +101,7 @@ final class LiveModel: ObservableObject {
         connections.removeAll()
         groups.removeAll()
         pidToGroups.removeAll()
+        setNeedsPublish()
     }
 
     // MARK: - Trace groups
@@ -96,10 +115,6 @@ final class LiveModel: ObservableObject {
                 let remaining = gs.subtracting(removed)
                 pidToGroups[pid] = remaining.isEmpty ? nil : remaining
             }
-            // Drop process nodes whose only group affiliation was a removed one.
-            // Without this, deleting a group leaves orphan processes visible
-            // (because buildRows in the GUI falls back to all-roots when the
-            // groups list is empty, or just leaves them lingering otherwise).
             let orphans = processes.keys.filter { pidToGroups[$0] == nil }
             for pid in orphans {
                 processes.removeValue(forKey: pid)
@@ -113,7 +128,6 @@ final class LiveModel: ObservableObject {
             }
         }
         groups = newGroups
-        // Re-match existing processes against any newly-added groups.
         let added = newGroups.filter { !oldIDs.contains($0.id) }
         if !added.isEmpty {
             for (pid, node) in processes {
@@ -122,6 +136,7 @@ final class LiveModel: ObservableObject {
                 }
             }
         }
+        setNeedsPublish()
     }
 
     func rootsForGroup(_ groupID: String) -> [pid_t] {
@@ -168,6 +183,7 @@ final class LiveModel: ObservableObject {
         attach(pid: pid, ppid: ppid)
         let name = (process as NSString).lastPathComponent
         assignGroups(pid: pid, ppid: ppid, process: process, name: name)
+        setNeedsPublish()
     }
 
     func handleFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, details: [String: String]) {
@@ -186,11 +202,13 @@ final class LiveModel: ObservableObject {
         byPath[path] = stats
         fileStats[pid] = byPath
         processes[pid]?.fileOpCount += 1
+        setNeedsPublish()
     }
 
     func handleExit(pid: pid_t, exitStatus: Int32) {
         processes[pid]?.exitStatus = exitStatus
         processes[pid]?.exitedAt = Date()
+        setNeedsPublish()
     }
 
     func handleBytesUpdate(pid: pid_t, host: String, port: UInt16, bytesOut: Int64, bytesIn: Int64, flowID: UInt64) {
@@ -209,10 +227,12 @@ final class LiveModel: ObservableObject {
             processes[pid]?.bytesOut = row.bytesOut
             processes[pid]?.bytesIn = row.bytesIn
         }
+        setNeedsPublish()
     }
 
     func handleConnectionClosed(pid: pid_t, host: String, port: UInt16, flowID: UInt64) {
         connections[pid]?[flowID]?.closed = true
+        setNeedsPublish()
     }
 
     // MARK: - Helpers
@@ -236,22 +256,64 @@ final class LiveModel: ObservableObject {
 
 // MARK: - EventSink adapter
 
-/// Receives events from any thread, dispatches to the @MainActor LiveModel.
+/// Receives events from any thread and batches them into a single per-runloop
+/// dispatch to the @MainActor LiveModel. With a busy sysext that's the
+/// difference between one main-thread block per event (thousands/sec) and
+/// one per drained batch.
 final class LiveSink: EventSink {
     weak var model: LiveModel?
+
+    private enum PendingEvent {
+        case exec(pid_t, pid_t, String, String)
+        case fileOp(String, pid_t, pid_t, String, [String: String])
+        case exit(pid_t, Int32)
+    }
+
+    private let lock = NSLock()
+    private var queue: [PendingEvent] = []
+    private var scheduled = false
 
     init(model: LiveModel) {
         self.model = model
     }
 
+    private func enqueue(_ event: PendingEvent) {
+        lock.lock()
+        queue.append(event)
+        let needsSchedule = !scheduled
+        if needsSchedule { scheduled = true }
+        lock.unlock()
+        if needsSchedule {
+            DispatchQueue.main.async { [weak self] in self?.drain() }
+        }
+    }
+
+    @MainActor
+    private func drain() {
+        lock.lock()
+        let events = queue
+        queue.removeAll(keepingCapacity: true)
+        scheduled = false
+        lock.unlock()
+        guard let m = model else { return }
+        for e in events {
+            switch e {
+            case .exec(let pid, let ppid, let process, let argv):
+                m.handleExec(pid: pid, ppid: ppid, process: process, argv: argv)
+            case .fileOp(let type, let pid, let ppid, let process, let details):
+                m.handleFileOp(type: type, pid: pid, ppid: ppid, process: process, details: details)
+            case .exit(let pid, let status):
+                m.handleExit(pid: pid, exitStatus: status)
+            }
+        }
+    }
+
     func onExec(pid: pid_t, ppid: pid_t, process: String, argv: String, user: uid_t) {
-        let m = model
-        DispatchQueue.main.async { m?.handleExec(pid: pid, ppid: ppid, process: process, argv: argv) }
+        enqueue(.exec(pid, ppid, process, argv))
     }
 
     func onFileOp(type: String, pid: pid_t, ppid: pid_t, process: String, user: uid_t, details: [String: String]) {
-        let m = model
-        DispatchQueue.main.async { m?.handleFileOp(type: type, pid: pid, ppid: ppid, process: process, details: details) }
+        enqueue(.fileOp(type, pid, ppid, process, details))
     }
 
     func onConnect(pid: pid_t, ppid: pid_t, process: String, user: uid_t, remoteAddr: String, remotePort: UInt16, flowID: UInt64) {
@@ -259,7 +321,6 @@ final class LiveSink: EventSink {
     }
 
     func onExit(pid: pid_t, ppid: pid_t, process: String, user: uid_t, exitStatus: Int32) {
-        let m = model
-        DispatchQueue.main.async { m?.handleExit(pid: pid, exitStatus: exitStatus) }
+        enqueue(.exit(pid, exitStatus))
     }
 }

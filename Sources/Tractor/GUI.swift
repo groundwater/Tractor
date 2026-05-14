@@ -207,7 +207,11 @@ final class ActivitySampler: ObservableObject {
         var recorded: Bool = false
     }
 
-    @Published private(set) var bins: [Bin] =
+    /// Storage is NOT @Published — tickDisk / tickBytes happen on the hot
+    /// event path. The bin-rotation timer (10Hz) is the only thing that
+    /// fires objectWillChange, so the timeline canvas redraws at most 10x/sec
+    /// regardless of event volume.
+    private(set) var bins: [Bin] =
         Array(repeating: Bin(), count: ActivitySampler.binCount)
 
     /// Mirrors TraceRunner.isRecording. Stamped onto each new bin as it
@@ -233,11 +237,13 @@ final class ActivitySampler: ObservableObject {
     func reset() {
         bins = Array(repeating: Bin(), count: Self.binCount)
         lastBytesPerFlow.removeAll()
+        objectWillChange.send()
     }
 
     private func advance() {
         bins.removeFirst()
         bins.append(Bin(recorded: isRecording))
+        objectWillChange.send()
     }
 
     func tickDisk() {
