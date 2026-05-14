@@ -56,7 +56,7 @@ targets:
       properties:
         CFBundlePackageType: SYSX
         CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "181"
+        CFBundleVersion: "243"
         LSMinimumSystemVersion: "15.0"
         NSSystemExtensionUsageDescription: "Tractor uses a network extension to monitor and intercept network traffic."
         NetworkExtension:
@@ -217,6 +217,7 @@ targets:
           if [ "${CONFIGURATION}" != "Release" ]; then
             /usr/bin/codesign --force \
               --sign - \
+              --identifier com.jacobgroundwater.Tractor \
               --entitlements "${SRCROOT}/Sources/Tractor/TractorCLI.entitlements" \
               --timestamp=none \
               "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/MacOS/Tractor-CLI"

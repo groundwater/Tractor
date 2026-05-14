@@ -119,6 +119,7 @@ release: preflight-release bump-sysext-version
 		"$(APP_BUILT)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension"
 	codesign --force \
 		--sign "$(DEV_ID_APP)" \
+		--identifier com.jacobgroundwater.Tractor \
 		--entitlements pkg/TractorCLI.dist.entitlements \
 		--options runtime --timestamp \
 		"$(APP_BUILT)/Contents/MacOS/Tractor-CLI"
