@@ -743,7 +743,7 @@ private struct RootView: View {
     @State private var detailTab: LiveView.DetailTab = .files
 
     var body: some View {
-        VStack(spacing: 0) {
+        VSplitView {
             LiveView(model: runner.live,
                      filter: $filter,
                      selection: $selection,
@@ -753,8 +753,9 @@ private struct RootView: View {
                             model.remove(target)
                         }
                      })
-            Divider()
+                .frame(minHeight: 220)
             footer
+                .frame(minHeight: 56, idealHeight: 64)
         }
         .inspector(isPresented: $prefs.inspectorShown) {
             DetailPane(model: runner.live, selectionID: selection, tab: $detailTab)
