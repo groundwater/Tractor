@@ -676,11 +676,12 @@ private struct FilesTable: View {
     }
 
     let byPath: [String: PathFileStats]
+    @State private var selection: Row.ID? = nil
 
     var body: some View {
         let rows = byPath.map { Row(path: $0.key, stats: $0.value) }
             .sorted { $0.path < $1.path }
-        Table(rows) {
+        Table(rows, selection: $selection) {
             TableColumn("Path") { row in
                 Text(row.path)
                     .lineLimit(1)
@@ -701,10 +702,11 @@ private struct FilesTable: View {
 
 private struct ConnectionsTable: View {
     let byFlow: [UInt64: ConnectionRow]
+    @State private var selection: ConnectionRow.ID? = nil
 
     var body: some View {
         let rows = byFlow.values.sorted { $0.host < $1.host }
-        Table(rows) {
+        Table(rows, selection: $selection) {
             TableColumn("Host") { row in
                 HStack {
                     if row.closed {
