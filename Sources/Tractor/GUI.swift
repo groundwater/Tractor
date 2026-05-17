@@ -759,23 +759,85 @@ final class PickerModel: ObservableObject {
 
 // MARK: - Root
 
+private enum MainTab: String, CaseIterable, Identifiable {
+    case trace = "Trace"
+    case scripts = "Scripts"
+    var id: String { rawValue }
+}
+
 private struct MainView: View {
     @State private var filter: String = ""
+    @State private var tab: MainTab = .trace
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        RootView(filter: $filter)
-            .frame(minWidth: 720, minHeight: 580)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        prefs.inspectorShown.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
-                }
+        Group {
+            switch tab {
+            case .trace:
+                RootView(filter: $filter)
+            case .scripts:
+                ScriptsView()
             }
+        }
+        .frame(minWidth: 720, minHeight: 580)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                MainTabBar(selection: $tab)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    prefs.inspectorShown.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
+                .disabled(tab != .trace)
+            }
+        }
+    }
+}
+
+/// Custom titlebar tab control. Avoids the macOS 15 segmented Picker style
+/// that wraps the selected pill in an oversized capsule.
+private struct MainTabBar: View {
+    @Binding var selection: MainTab
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(MainTab.allCases) { t in
+                tabButton(t)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+    }
+
+    @ViewBuilder
+    private func tabButton(_ t: MainTab) -> some View {
+        let isSelected = (selection == t)
+        Button {
+            selection = t
+        } label: {
+            Text(t.rawValue)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(isSelected ? Color.secondary.opacity(0.25) : Color.clear, lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

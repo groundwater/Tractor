@@ -20,6 +20,16 @@ final class ESDaemon {
     private var namePatterns: [String] = []
     private var pathPatterns: [String] = []
 
+    /// In-process JS sandbox that evaluates user-submitted probe programs.
+    /// Created on first `loadProgram(_:)`.
+    private var jsEngine: JSEngine?
+
+    /// Authoritative pid → parent/exe map maintained from NOTIFY_EXEC and
+    /// NOTIFY_EXIT. Seeded once on `start()`. Exposed to JS via the
+    /// engine's `getProc` / `getAncestry` globals.
+    let processTree = ProcessTree()
+    private var pruneTimer: DispatchSourceTimer?
+
     init(reporter: ESReporter) {
         self.reporter = reporter
     }
@@ -39,6 +49,55 @@ final class ESDaemon {
         namePatterns = names.map { $0.lowercased() }
         pathPatterns = paths
         lock.unlock()
+    }
+
+    /// Load (or replace) a JS probe program. Returns nil on success.
+    func loadProgram(name: String, source: String, args: [String],
+                     loaderConnectionID: ObjectIdentifier?) -> String? {
+        if jsEngine == nil, let reporter = reporter {
+            jsEngine = JSEngine(reporter: reporter, daemon: self)
+        }
+        guard let js = jsEngine else { return "JS engine unavailable" }
+        return js.loadProgram(name: name, source: source, args: args,
+                              loaderConnectionID: loaderConnectionID)
+    }
+
+    /// List all loaded programs.
+    func listPrograms() -> [JSEngine.ProgramInfo] {
+        return jsEngine?.listPrograms() ?? []
+    }
+
+    /// Unload one program by name.
+    func unloadProgram(name: String) {
+        jsEngine?.unloadProgram(name: name)
+    }
+
+    /// Unload every program loaded by the given XPC connection.
+    func unloadPrograms(loadedBy connectionID: ObjectIdentifier) {
+        jsEngine?.unloadPrograms(loadedBy: connectionID)
+    }
+
+    /// Update the terminal-size hint that JS programs read via
+    /// `terminalCols()` / `terminalRows()`.
+    func setTerminalSize(cols: Int, rows: Int) {
+        jsEngine?.setTerminalSize(cols: cols, rows: rows)
+    }
+
+    /// Evaluate a network flow against any loaded `ne:flow:new` probe.
+    /// Returns true if the JS program denied the flow. Called via XPC from
+    /// TractorNE; runs synchronously in the JS engine queue.
+    func handleNetworkFlow(context: [String: Any]) -> Bool {
+        return jsEngine?.handleNetworkFlow(context: context) ?? false
+    }
+
+    /// Fire `ne:flow:close` probe with byte totals at end of flow.
+    func handleNetworkFlowClose(context: [String: Any]) {
+        jsEngine?.handleNetworkFlowClose(context: context)
+    }
+
+    /// Fire `ne:flow:bytes` probe with periodic byte totals during a flow.
+    func handleNetworkFlowBytes(context: [String: Any]) {
+        jsEngine?.handleNetworkFlowBytes(context: context)
     }
 
     func currentTrackedPids() -> Set<Int32> {
@@ -111,6 +170,10 @@ final class ESDaemon {
 
         let events: [es_event_type_t] = [
             ES_EVENT_TYPE_AUTH_EXEC,
+            ES_EVENT_TYPE_AUTH_CREATE,
+            ES_EVENT_TYPE_AUTH_UNLINK,
+            ES_EVENT_TYPE_AUTH_RENAME,
+            ES_EVENT_TYPE_NOTIFY_EXEC,
             ES_EVENT_TYPE_NOTIFY_OPEN,
             ES_EVENT_TYPE_NOTIFY_WRITE,
             ES_EVENT_TYPE_NOTIFY_UNLINK,
@@ -123,10 +186,25 @@ final class ESDaemon {
             os_log("es_subscribe failed", log: esLog, type: .error)
             return
         }
+
+        // Snapshot the current process universe so getProc/getAncestry
+        // work for procs that existed before we started. New execs/exits
+        // keep the table fresh from here on.
+        processTree.seed()
+
+        // Periodic prune of long-dead entries (kept for a grace window
+        // so a probe racing an exit still resolves the chain).
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        t.setEventHandler { [weak self] in self?.processTree.prune() }
+        t.resume()
+        pruneTimer = t
+
         os_log("ES daemon started", log: esLog, type: .default)
     }
 
     func stop() {
+        pruneTimer?.cancel(); pruneTimer = nil
         if let c = client {
             es_delete_client(c)
             client = nil
@@ -136,6 +214,7 @@ final class ESDaemon {
         namePatterns.removeAll()
         pathPatterns.removeAll()
         lock.unlock()
+        jsEngine = nil
         os_log("ES daemon stopped", log: esLog, type: .default)
     }
 
@@ -151,22 +230,16 @@ final class ESDaemon {
             let target = message.pointee.event.exec.target
             let targetInfo = esProcessInfo(target)
 
-            // Track if the parent is in our tree; allow execution either way.
-            var tracked = self.contains(targetInfo.pid) || trackIfChild(pid: targetInfo.pid, ppid: targetInfo.ppid)
-            if !tracked {
-                tracked = addByPattern(pid: targetInfo.pid, path: targetInfo.path)
-            }
-            if isAuth, let esClient = esClient {
-                es_respond_auth_result(esClient, message, ES_AUTH_RESULT_ALLOW, false)
-            }
-            guard tracked else { return }
+            // Always populate the process tree at AUTH time — it's the
+            // foundation of getProc/getAncestry/listPids and must stay
+            // accurate regardless of which (if any) probes are loaded.
+            processTree.recordExec(pid: targetInfo.pid, ppid: targetInfo.ppid,
+                                   exePath: targetInfo.path)
 
-            // Notify reporter that the tracked-PID set changed so the NE side
-            // can refresh its watch decisions before the new process makes any
-            // network connections.
-            reporter?.didUpdateTrackedPids(currentTrackedPids())
-
-            // Collect argv
+            // argv is always extracted (cheap, also needed by the reporter
+            // tracking path below). Codesigning lookup + procCwd syscall
+            // are gated behind subscription — skipped when no probe asked
+            // for es:auth:exec.
             let execEventPtr: UnsafePointer<es_event_exec_t> = {
                 let rawMsg = UnsafeRawPointer(message)
                 let eventOffset = MemoryLayout<es_message_t>.offset(of: \es_message_t.event)!
@@ -177,10 +250,140 @@ final class ESDaemon {
             for i in 0..<argc {
                 argv.append(esString(es_exec_arg(execEventPtr, i)))
             }
+
+            let hasAuthExec = jsEngine?.hasSubscribers("es:auth:exec") ?? false
+            var denied = false
+            if hasAuthExec {
+                let cs = esCodeSigning(target)
+                let cwd = procCwd(targetInfo.pid)
+                denied = jsEngine?.handleAuthExec(pid: targetInfo.pid,
+                                                  ppid: targetInfo.ppid,
+                                                  process: targetInfo.path,
+                                                  argv: argv,
+                                                  cwd: cwd,
+                                                  teamID: cs.teamID,
+                                                  signingID: cs.signingID,
+                                                  isPlatformBinary: cs.isPlatformBinary,
+                                                  deadline: message.pointee.deadline) ?? false
+            }
+            if isAuth, let esClient = esClient {
+                es_respond_auth_result(esClient, message,
+                                       denied ? ES_AUTH_RESULT_DENY : ES_AUTH_RESULT_ALLOW,
+                                       false)
+            }
+            if denied { return }
+
+            // Track if the parent is in our tree.
+            var tracked = self.contains(targetInfo.pid) || trackIfChild(pid: targetInfo.pid, ppid: targetInfo.ppid)
+            if !tracked {
+                tracked = addByPattern(pid: targetInfo.pid, path: targetInfo.path)
+            }
+            guard tracked else { return }
+
+            // Notify reporter that the tracked-PID set changed so the NE side
+            // can refresh its watch decisions before the new process makes any
+            // network connections.
+            reporter?.didUpdateTrackedPids(currentTrackedPids())
+
             reporter?.reportExec(pid: targetInfo.pid, ppid: targetInfo.ppid,
                                  process: targetInfo.path,
                                  argv: argv.joined(separator: " "),
                                  user: targetInfo.uid)
+
+        case ES_EVENT_TYPE_AUTH_CREATE:
+            // AUTH_CREATE.destination is a tagged union: either an existing
+            // file (caller is overwriting it) or a (dir, filename) pair for
+            // a fresh path. We construct the would-be path in both shapes.
+            let hasAuthCreate = jsEngine?.hasSubscribers("es:auth:create") ?? false
+            var createDenied = false
+            if hasAuthCreate {
+                let createPath: String
+                if message.pointee.event.create.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
+                    createPath = esString(message.pointee.event.create.destination.existing_file.pointee.path)
+                } else {
+                    let dir = esString(message.pointee.event.create.destination.new_path.dir.pointee.path)
+                    let filename = esString(message.pointee.event.create.destination.new_path.filename)
+                    createPath = dir + "/" + filename
+                }
+                createDenied = jsEngine?.handleAuthCreate(pid: info.pid, ppid: info.ppid,
+                                                          process: info.path, path: createPath,
+                                                          deadline: message.pointee.deadline) ?? false
+            }
+            if isAuth, let esClient = esClient {
+                es_respond_auth_result(esClient, message,
+                                       createDenied ? ES_AUTH_RESULT_DENY : ES_AUTH_RESULT_ALLOW,
+                                       false)
+            }
+
+        case ES_EVENT_TYPE_AUTH_UNLINK:
+            let hasAuthUnlink = jsEngine?.hasSubscribers("es:auth:unlink") ?? false
+            var unlinkDenied = false
+            if hasAuthUnlink {
+                let unlinkPath = esString(message.pointee.event.unlink.target.pointee.path)
+                unlinkDenied = jsEngine?.handleAuthUnlink(pid: info.pid, ppid: info.ppid,
+                                                          process: info.path, path: unlinkPath,
+                                                          deadline: message.pointee.deadline) ?? false
+            }
+            if isAuth, let esClient = esClient {
+                es_respond_auth_result(esClient, message,
+                                       unlinkDenied ? ES_AUTH_RESULT_DENY : ES_AUTH_RESULT_ALLOW,
+                                       false)
+            }
+
+        case ES_EVENT_TYPE_AUTH_RENAME:
+            let hasAuthRename = jsEngine?.hasSubscribers("es:auth:rename") ?? false
+            var renameDenied = false
+            if hasAuthRename {
+                let renameSrc = esString(message.pointee.event.rename.source.pointee.path)
+                let renameDst: String
+                if message.pointee.event.rename.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
+                    renameDst = esString(message.pointee.event.rename.destination.existing_file.pointee.path)
+                } else {
+                    let dir = esString(message.pointee.event.rename.destination.new_path.dir.pointee.path)
+                    let filename = esString(message.pointee.event.rename.destination.new_path.filename)
+                    renameDst = dir + "/" + filename
+                }
+                renameDenied = jsEngine?.handleAuthRename(pid: info.pid, ppid: info.ppid,
+                                                          process: info.path,
+                                                          from: renameSrc, to: renameDst,
+                                                          deadline: message.pointee.deadline) ?? false
+            }
+            if isAuth, let esClient = esClient {
+                es_respond_auth_result(esClient, message,
+                                       renameDenied ? ES_AUTH_RESULT_DENY : ES_AUTH_RESULT_ALLOW,
+                                       false)
+            }
+
+        case ES_EVENT_TYPE_NOTIFY_EXEC:
+            // Observe-only exec event. Fires for every exec system-wide;
+            // we always refresh the process tree (foundation for getProc/
+            // listPids) but skip the expensive enrichment + JS dispatch
+            // when no probe subscribes.
+            let target = message.pointee.event.exec.target
+            let targetInfo = esProcessInfo(target)
+            processTree.recordExec(pid: targetInfo.pid, ppid: targetInfo.ppid,
+                                   exePath: targetInfo.path)
+
+            if jsEngine?.hasSubscribers("es:notify:exec") == true {
+                let notifyExecEventPtr: UnsafePointer<es_event_exec_t> = {
+                    let rawMsg = UnsafeRawPointer(message)
+                    let eventOffset = MemoryLayout<es_message_t>.offset(of: \es_message_t.event)!
+                    return (rawMsg + eventOffset).assumingMemoryBound(to: es_event_exec_t.self)
+                }()
+                let notifyArgc = es_exec_arg_count(notifyExecEventPtr)
+                var notifyArgv: [String] = []
+                for i in 0..<notifyArgc {
+                    notifyArgv.append(esString(es_exec_arg(notifyExecEventPtr, i)))
+                }
+                let notifyCS = esCodeSigning(target)
+                let notifyCwd = procCwd(targetInfo.pid)
+                jsEngine?.handleNotifyExec(pid: targetInfo.pid, ppid: targetInfo.ppid,
+                                           process: targetInfo.path, argv: notifyArgv,
+                                           cwd: notifyCwd,
+                                           teamID: notifyCS.teamID,
+                                           signingID: notifyCS.signingID,
+                                           isPlatformBinary: notifyCS.isPlatformBinary)
+            }
 
         case ES_EVENT_TYPE_NOTIFY_OPEN:
             guard contains(info.pid) else { return }
@@ -190,21 +393,39 @@ final class ESDaemon {
                                     details: ["path": path])
 
         case ES_EVENT_TYPE_NOTIFY_WRITE:
-            guard contains(info.pid) else { return }
+            // Skip path extraction entirely when no JS probe wants it
+            // and the pid isn't tracked for the GUI reporter.
+            let writeWantsJS = jsEngine?.hasSubscribers("es:notify:write") == true
+            let writeWantsGUI = contains(info.pid)
+            if !writeWantsJS && !writeWantsGUI { break }
             let path = esString(message.pointee.event.write.target.pointee.path)
-            reporter?.reportFileOp(type: "write", pid: info.pid, ppid: info.ppid,
-                                    process: info.path, user: info.uid,
-                                    details: ["path": path])
+            if writeWantsJS {
+                jsEngine?.handleNotifyWrite(pid: info.pid, ppid: info.ppid, process: info.path, path: path)
+            }
+            if writeWantsGUI {
+                reporter?.reportFileOp(type: "write", pid: info.pid, ppid: info.ppid,
+                                        process: info.path, user: info.uid,
+                                        details: ["path": path])
+            }
 
         case ES_EVENT_TYPE_NOTIFY_UNLINK:
-            guard contains(info.pid) else { return }
+            let unlinkWantsJS = jsEngine?.hasSubscribers("es:notify:unlink") == true
+            let unlinkWantsGUI = contains(info.pid)
+            if !unlinkWantsJS && !unlinkWantsGUI { break }
             let path = esString(message.pointee.event.unlink.target.pointee.path)
-            reporter?.reportFileOp(type: "unlink", pid: info.pid, ppid: info.ppid,
-                                    process: info.path, user: info.uid,
-                                    details: ["path": path])
+            if unlinkWantsJS {
+                jsEngine?.handleNotifyUnlink(pid: info.pid, ppid: info.ppid, process: info.path, path: path)
+            }
+            if unlinkWantsGUI {
+                reporter?.reportFileOp(type: "unlink", pid: info.pid, ppid: info.ppid,
+                                        process: info.path, user: info.uid,
+                                        details: ["path": path])
+            }
 
         case ES_EVENT_TYPE_NOTIFY_RENAME:
-            guard contains(info.pid) else { return }
+            let renameWantsJS = jsEngine?.hasSubscribers("es:notify:rename") == true
+            let renameWantsGUI = contains(info.pid)
+            if !renameWantsJS && !renameWantsGUI { break }
             let src = esString(message.pointee.event.rename.source.pointee.path)
             var dst = ""
             if message.pointee.event.rename.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
@@ -214,9 +435,14 @@ final class ESDaemon {
                 let filename = esString(message.pointee.event.rename.destination.new_path.filename)
                 dst = dir + "/" + filename
             }
-            reporter?.reportFileOp(type: "rename", pid: info.pid, ppid: info.ppid,
-                                    process: info.path, user: info.uid,
-                                    details: ["from": src, "to": dst])
+            if renameWantsJS {
+                jsEngine?.handleNotifyRename(pid: info.pid, ppid: info.ppid, process: info.path, from: src, to: dst)
+            }
+            if renameWantsGUI {
+                reporter?.reportFileOp(type: "rename", pid: info.pid, ppid: info.ppid,
+                                        process: info.path, user: info.uid,
+                                        details: ["from": src, "to": dst])
+            }
 
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
             guard contains(info.pid) else { return }
@@ -228,6 +454,12 @@ final class ESDaemon {
             }
 
         case ES_EVENT_TYPE_NOTIFY_EXIT:
+            // Always update the process tree so getAncestry stays correct
+            // for the whole system, not just tracked pids.
+            processTree.recordExit(pid: info.pid)
+            // JS notify-exit also fires for every proc — pstree etc. need
+            // it for procs that weren't on any tracked-set.
+            jsEngine?.handleNotifyExit(pid: info.pid, ppid: info.ppid, process: info.path)
             if contains(info.pid) {
                 let stat = message.pointee.event.exit.stat
                 reporter?.reportExit(pid: info.pid, ppid: info.ppid,
@@ -255,4 +487,30 @@ private func esProcessInfo(_ proc: UnsafePointer<es_process_t>) -> (path: String
     let ppid = proc.pointee.ppid
     let uid = audit_token_to_euid(proc.pointee.audit_token)
     return (path, pid, ppid, uid)
+}
+
+/// Resolve a pid's current working directory via libproc. Returns nil if
+/// the process is gone or we can't read its vnode info.
+private func procCwd(_ pid: pid_t) -> String? {
+    var info = proc_vnodepathinfo()
+    let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+    let r = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size)
+    guard r == size else { return nil }
+    var cwdTuple = info.pvi_cdir.vip_path
+    let cap = MemoryLayout.size(ofValue: cwdTuple)
+    let path: String = withUnsafePointer(to: &cwdTuple) { ptr in
+        ptr.withMemoryRebound(to: CChar.self, capacity: cap) { String(cString: $0) }
+    }
+    return path.isEmpty ? nil : path
+}
+
+/// Code-signing identity fields from the ES process struct. Empty strings
+/// become nil so JS can do truthy checks (`if (c.team_id) ...`).
+private func esCodeSigning(_ proc: UnsafePointer<es_process_t>) -> (teamID: String?, signingID: String?, isPlatformBinary: Bool) {
+    let teamID = esString(proc.pointee.team_id)
+    let signingID = esString(proc.pointee.signing_id)
+    let isPlatform = proc.pointee.is_platform_binary
+    return (teamID.isEmpty ? nil : teamID,
+            signingID.isEmpty ? nil : signingID,
+            isPlatform)
 }

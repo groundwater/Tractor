@@ -8,6 +8,8 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
     func pollEvents(reply: @escaping (Data) -> Void)
     func setMITMEnabled(_ enabled: Bool)
     func getCACertPEM(reply: @escaping (String) -> Void)
+    func setInterceptAll(_ enabled: Bool)
+    func claimEvaluator()
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
 }
@@ -18,6 +20,9 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
     func openFlow(id: UInt64, host: NSString, port: UInt16, pid: Int32)
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
+    func evaluateFlow(_ context: Data, reply: @escaping (Bool) -> Void)
+    func notifyFlowClose(_ context: Data)
+    func notifyFlowBytes(_ context: Data)
 }
 
 /// Connects to the TractorNE sysext via XPC and polls for flow events.
