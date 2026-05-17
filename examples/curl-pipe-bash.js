@@ -140,10 +140,10 @@ probe(OPTS.deny ? "es:auth:exec" : "es:notify:exec", c => {
     noSourceTrail.push({
       ts: Date.now(), shell: shellName, pid: c.pid,
       handle: mine.handle, peer: mine.peerhandle, inode: mine.inode,
-      treeSize: _processTreeSize(),
+      treeSize: listPids().length,
     });
     if (noSourceTrail.length > 50) noSourceTrail.splice(0, noSourceTrail.length - 50);
-    emit("debug", { line: `${shellName}(${c.pid}) PIPE-no-source  inode=${mine.inode} peer=${mine.peerhandle} tree=${_processTreeSize()}` });
+    emit("debug", { line: `${shellName}(${c.pid}) PIPE-no-source  inode=${mine.inode} peer=${mine.peerhandle} tree=${listPids().length}` });
     return;
   }
   withSourceCount++;

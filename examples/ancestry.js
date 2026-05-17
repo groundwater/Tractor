@@ -61,7 +61,7 @@ probe("timer:250ms", () => {
   const rows = OPTS.rows || Math.max(10, terminalRows() - 4);
   const lines = [];
   const tag = OPTS.watch ? `   --watch ${OPTS.watch}   hits ${watchHits}` : "";
-  lines.push(`ancestry   tree=${_processTreeSize()}   shown=${recent.length}${tag}`);
+  lines.push(`ancestry   tree=${listPids().length}   shown=${recent.length}${tag}`);
   lines.push(pad("TIME", 12) + " " + pad("PID", 6, true) + " ANCESTRY (current ← parent ← …)");
   lines.push("─".repeat(Math.min(cols, 60)));
   const slice = recent.slice(-rows);
