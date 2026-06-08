@@ -56,6 +56,7 @@ final class ESXPCClient {
     private var eventTimer: DispatchSourceTimer?
     private var pidsTimer: DispatchSourceTimer?
     private var panelsTimer: DispatchSourceTimer?
+    private var emitsTimer: DispatchSourceTimer?
 
     /// Most recently observed tracked-PID set on the sysext side. Used by the
     /// CLI to mirror into the NE sysext's watch list when `--net` is on.
@@ -65,8 +66,15 @@ final class ESXPCClient {
     var onFileOp: ((String, pid_t, pid_t, String, uid_t, [String: String]) -> Void)?
     var onExit: ((pid_t, pid_t, String, uid_t, Int32) -> Void)?
     /// Fired when the loaded JS program calls `emit(channel, obj)`. The
-    /// payload preserves the keys the program supplied.
+    /// payload preserves the keys the program supplied. NOTE: this comes
+    /// from the legacy event-buffer ring (drained on read). For UI
+    /// consumers that want lossless per-emit delivery alongside other
+    /// readers, prefer `onEmitRecord`.
     var onEmit: ((String, [String: Any]) -> Void)?
+    /// Fired for every emit from the cursor-based emits ring (no drain
+    /// races with other consumers). Set this on long-lived clients that
+    /// share the daemon with other GUIs / CLIs.
+    var onEmitRecord: ((EmitRecord) -> Void)?
     /// Fired when a JS program calls `render(panel, text)`. Each invocation
     /// is the latest *state* of a named panel, not a stream event.
     var onPanel: ((PanelUpdate) -> Void)?
@@ -129,12 +137,23 @@ final class ESXPCClient {
         panels.setEventHandler { [weak self] in self?.pollPanels() }
         panelsTimer = panels
         panels.resume()
+
+        // Cursor-based emits ring poll. This connection has its own
+        // server-side cursor, so we receive each emit exactly once and
+        // never race with other GUI/CLI consumers (unlike the legacy
+        // pollEvents path which drains a shared buffer).
+        let emits = DispatchSource.makeTimerSource(queue: .main)
+        emits.schedule(deadline: .now() + 0.2, repeating: .milliseconds(200))
+        emits.setEventHandler { [weak self] in self?.pollEmitsCursor() }
+        emitsTimer = emits
+        emits.resume()
     }
 
     func stop() {
         eventTimer?.cancel(); eventTimer = nil
         pidsTimer?.cancel(); pidsTimer = nil
         panelsTimer?.cancel(); panelsTimer = nil
+        emitsTimer?.cancel(); emitsTimer = nil
         connection?.invalidate()
         connection = nil
         proxy = nil
@@ -289,6 +308,36 @@ final class ESXPCClient {
     private func pollEvents() {
         proxy?.pollEvents { [weak self] data in
             DispatchQueue.main.async { self?.handleEvents(data) }
+        }
+    }
+
+    private func pollEmitsCursor() {
+        proxy?.pollEmits { [weak self] data in
+            DispatchQueue.main.async { self?.handleEmitsRing(data) }
+        }
+    }
+
+    private func handleEmitsRing(_ data: Data) {
+        guard !data.isEmpty,
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return }
+        for entry in arr {
+            let ts = entry["ts"] as? Double ?? Date().timeIntervalSince1970
+            let channel = entry["channel"] as? String ?? "?"
+            let program = entry["_program"] as? String ?? "?"
+            var payload = entry
+            for k in ["kind", "channel", "ts", "_program"] {
+                payload.removeValue(forKey: k)
+            }
+            let json: String = {
+                guard let d = try? JSONSerialization.data(withJSONObject: payload),
+                      let s = String(data: d, encoding: .utf8) else { return "{}" }
+                return s
+            }()
+            onEmitRecord?(EmitRecord(time: Date(timeIntervalSince1970: ts),
+                                     program: program,
+                                     channel: channel,
+                                     payloadJSON: json))
         }
     }
 

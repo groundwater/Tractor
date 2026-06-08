@@ -80,6 +80,8 @@ final class TraceSession {
     private var sink: EventSink
     private var esClient: ESXPCClient?
     private var flowClient: FlowXPCClient?
+    private var trackerNamePatterns: [String] = []
+    private var trackerPathPatterns: [String] = []
 
     init(primarySink: EventSink, tree: ProcessTree = ProcessTree()) {
         self.primarySink = primarySink
@@ -120,6 +122,8 @@ final class TraceSession {
             initialOrdered = bfsExpand(roots: initialRoots, excluding: [])
             tree.addRoots(initialOrdered)
         }
+        trackerNamePatterns = roots.names.map { $0.lowercased() }
+        trackerPathPatterns = roots.paths
 
         // Set up ES client.
         let esClient = ESXPCClient()
@@ -132,18 +136,23 @@ final class TraceSession {
         // where e.g. TUI tracker-group bookkeeping completes before render.
         esClient.onExec = { [weak self] pid, ppid, process, argv, user in
             guard let self = self else { return }
-            self.tree.trackIfChild(pid: pid, ppid: ppid)
+            let isTracked = self.tree.contains(pid)
+                || self.tree.trackIfChild(pid: pid, ppid: ppid)
+                || self.matchesTrackerPattern(process: process)
+            guard isTracked else { return }
             self.tree.addRoots([pid])
             self.onExec?(pid, ppid, process, argv, user)
             self.sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
         esClient.onFileOp = { [weak self] type, pid, ppid, process, user, details in
             guard let self = self else { return }
+            guard self.tree.contains(pid) else { return }
             self.onFileOp?(type, pid, ppid, process, user, details)
             self.sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
         esClient.onExit = { [weak self] pid, ppid, process, user, exitStatus in
             guard let self = self else { return }
+            guard self.tree.contains(pid) else { return }
             self.onExit?(pid, ppid, process, user, exitStatus)
             self.sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
             self.tree.remove(pid)
@@ -193,6 +202,8 @@ final class TraceSession {
     // MARK: - Live mutation
 
     func setTrackerPatterns(names: [String], paths: [String]) {
+        trackerNamePatterns = names.map { $0.lowercased() }
+        trackerPathPatterns = paths
         esClient?.setTrackerPatterns(names: names, paths: paths)
     }
 
@@ -207,6 +218,12 @@ final class TraceSession {
     func registerExecRoot(pid: pid_t) {
         tree.addRoots([pid])
         esClient?.addTrackedPidsSync([pid])
+    }
+
+    private func matchesTrackerPattern(process: String) -> Bool {
+        let processLower = process.lowercased()
+        return trackerNamePatterns.contains(where: { processLower.contains($0) })
+            || trackerPathPatterns.contains(process)
     }
 
     /// Attach to an already-running process tree: discover existing descendants

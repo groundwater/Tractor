@@ -762,6 +762,7 @@ final class PickerModel: ObservableObject {
 private enum MainTab: String, CaseIterable, Identifiable {
     case trace = "Trace"
     case scripts = "Scripts"
+    case playground = "Playground"
     var id: String { rawValue }
 }
 
@@ -777,6 +778,8 @@ private struct MainView: View {
                 RootView(filter: $filter)
             case .scripts:
                 ScriptsView()
+            case .playground:
+                PlaygroundView()
             }
         }
         .frame(minWidth: 720, minHeight: 580)

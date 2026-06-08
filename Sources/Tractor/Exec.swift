@@ -61,14 +61,17 @@ struct Exec: ParsableCommand {
 
         let esClient = ESXPCClient()
         esClient.onExec = { [weak tree] pid, ppid, process, argv, user in
-            tree?.trackIfChild(pid: pid, ppid: ppid)
-            tree?.addRoots([pid])
+            guard let tree = tree else { return }
+            let isTracked = tree.contains(pid) || tree.trackIfChild(pid: pid, ppid: ppid)
+            guard isTracked else { return }
             sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
         esClient.onFileOp = { type, pid, ppid, process, user, details in
+            guard tree.contains(pid) else { return }
             sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
         esClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
+            guard tree?.contains(pid) == true else { return }
             sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
             tree?.remove(pid)
         }
