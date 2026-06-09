@@ -40,9 +40,12 @@ debug: ensure-local-config
 
 # Auto-increment sysext build number so macOS recognizes replacement
 bump-sysext-version:
-	@OLD=$$(awk '/CFBundleVersion:/{gsub(/"/,""); print $$2; exit}' project.yml); \
+	@OLD=$$(awk '/TractorNE:/,/TractorES:/ { if ($$1 == "CFBundleVersion:") { gsub(/"/,"",$$2); print $$2; exit } }' project.yml); \
 	NEW=$$((OLD + 1)); \
-	awk -v n="$$NEW" '/CFBundleVersion:/ && !done {sub(/"[0-9]+"/, "\"" n "\""); done=1} 1' project.yml > project.yml.tmp && \
+	awk -v n="$$NEW" '\
+		/TractorNE:/,/TractorES:/ { if (/CFBundleVersion:/) sub(/"[0-9]+"/, "\"" n "\"") } \
+		/TractorES:/,/TractorApp:/ { if (/CFBundleVersion:/) sub(/"[0-9]+"/, "\"" n "\"") } \
+		{ print }' project.yml > project.yml.tmp && \
 	mv project.yml.tmp project.yml; \
 	echo "Tractor: sysext build number → $$NEW"
 

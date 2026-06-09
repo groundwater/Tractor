@@ -104,7 +104,7 @@ final class TraceSession {
             let log = try SQLiteLog(path: dbPath)
             self.sqliteLog = log
             self.sink = MultiSink([primarySink, log])
-            onMessage?("Tractor: logging to \(log.path)")
+            onMessage?("Tractor: logging to \(log.path) (run \(log.runID))")
         }
 
         // Resolve initial roots and seed the tree in BFS order (parents before

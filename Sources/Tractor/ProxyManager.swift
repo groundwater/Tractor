@@ -21,8 +21,18 @@ final class ProxyManager: NSObject {
     static let esBundleID = "com.jacobgroundwater.Tractor.ES"
     static let neBundleID = "com.jacobgroundwater.Tractor.NE"
 
+    private enum RequestPhase {
+        case deactivatingBeforeActivation
+        case activating
+    }
+
     private var activationCompletion: ((Error?) -> Void)?
     private var extensionToActivate: TractorSystemExtension?
+    private var requestPhase: RequestPhase?
+    private var activeDeactivationRequest: OSSystemExtensionRequest?
+    private var activeActivationRequest: OSSystemExtensionRequest?
+    private var deactivationFallback: DispatchWorkItem?
+    private let systemExtensionQueue = DispatchQueue(label: "Tractor.system-extension", attributes: .concurrent)
 
     func activateES(completion: @escaping (Error?) -> Void) {
         activate(.endpointSecurity, completion: completion)
@@ -35,12 +45,71 @@ final class ProxyManager: NSObject {
     private func activate(_ sysext: TractorSystemExtension, completion: @escaping (Error?) -> Void) {
         activationCompletion = completion
         extensionToActivate = sysext
-        let request = OSSystemExtensionRequest.activationRequest(
+        requestPhase = .activating
+        if sysext == .networkExtension {
+            removeTractorProxyConfigurations { [weak self] in
+                self?.submitActivation(for: sysext)
+            }
+        } else {
+            submitActivation(for: sysext)
+        }
+    }
+
+    private func submitDeactivation(for sysext: TractorSystemExtension) {
+        let request = OSSystemExtensionRequest.deactivationRequest(
             forExtensionWithIdentifier: sysext.rawValue,
-            queue: .main
+            queue: systemExtensionQueue
         )
         request.delegate = self
+        activeDeactivationRequest = request
         OSSystemExtensionManager.shared.submitRequest(request)
+
+        let fallback = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.requestPhase == .deactivatingBeforeActivation,
+                  self.extensionToActivate == sysext,
+                  self.activeDeactivationRequest === request else { return }
+            fputs("Tractor: deactivation did not finish promptly; continuing with activation\n", stderr)
+            self.activeDeactivationRequest = nil
+            self.submitActivation(for: sysext)
+        }
+        deactivationFallback = fallback
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: fallback)
+    }
+
+    private func submitActivation(for sysext: TractorSystemExtension) {
+        deactivationFallback?.cancel()
+        deactivationFallback = nil
+        activeDeactivationRequest = nil
+        requestPhase = .activating
+        let request = OSSystemExtensionRequest.activationRequest(
+            forExtensionWithIdentifier: sysext.rawValue,
+            queue: systemExtensionQueue
+        )
+        request.delegate = self
+        activeActivationRequest = request
+        OSSystemExtensionManager.shared.submitRequest(request)
+    }
+
+    private func removeTractorProxyConfigurations(completion: @escaping () -> Void) {
+        NETransparentProxyManager.loadAllFromPreferences { managers, _ in
+            let matches = (managers ?? []).filter { manager in
+                let provider = (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
+                return provider == Self.neBundleID || manager.localizedDescription == "Tractor Network Monitor"
+            }
+            guard !matches.isEmpty else {
+                completion()
+                return
+            }
+            let group = DispatchGroup()
+            for manager in matches {
+                group.enter()
+                manager.isEnabled = false
+                (manager.connection as? NETunnelProviderSession)?.stopTunnel()
+                manager.removeFromPreferences { _ in group.leave() }
+            }
+            group.notify(queue: .main, execute: completion)
+        }
     }
 
     private func enableProxy(completion: @escaping (Error?) -> Void) {
@@ -53,39 +122,25 @@ final class ProxyManager: NSObject {
             }
             fputs("Tractor: found \(managers?.count ?? 0) configs\n", stderr)
 
-            // Reuse the existing config if there is one — saving a fresh config
-            // triggers a "Tractor would like to add proxy configurations" prompt
-            // every time. Updating an existing one doesn't re-prompt. If the
-            // existing config has a stale designated requirement (e.g. cdhash
-            // baked in by a previous install), the save below fails and we fall
-            // through to creating a fresh one.
-            if let existing = managers?.first {
-                fputs("Tractor: existing config found, updating...\n", stderr)
-                existing.isEnabled = true
-                existing.isOnDemandEnabled = false
-                existing.saveToPreferences { saveError in
-                    if let saveError = saveError {
-                        fputs("Tractor: update save failed (\(saveError)); recreating\n", stderr)
-                        existing.removeFromPreferences { _ in
-                            self.createFreshProxy(completion: completion)
-                        }
-                        return
-                    }
-                    existing.loadFromPreferences { _ in
-                        do {
-                            try (existing.connection as? NETunnelProviderSession)?.startTunnel()
-                            fputs("Tractor: tunnel started\n", stderr)
-                            completion(nil)
-                        } catch {
-                            fputs("Tractor: startTunnel error: \(error)\n", stderr)
-                            completion(error)
-                        }
-                    }
-                }
+            let tractorManagers = (managers ?? []).filter { manager in
+                let provider = (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
+                return provider == Self.neBundleID || manager.localizedDescription == "Tractor Network Monitor"
+            }
+            guard !tractorManagers.isEmpty else {
+                self.createFreshProxy(completion: completion)
                 return
             }
-
-            self.createFreshProxy(completion: completion)
+            fputs("Tractor: removing \(tractorManagers.count) stale proxy config(s)\n", stderr)
+            let group = DispatchGroup()
+            for manager in tractorManagers {
+                group.enter()
+                manager.isEnabled = false
+                (manager.connection as? NETunnelProviderSession)?.stopTunnel()
+                manager.removeFromPreferences { _ in group.leave() }
+            }
+            group.notify(queue: .main) {
+                self.createFreshProxy(completion: completion)
+            }
         }
     }
 
@@ -136,6 +191,18 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
 
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        if activeDeactivationRequest === request, let sysext = extensionToActivate {
+            deactivationFallback?.cancel()
+            deactivationFallback = nil
+            activeDeactivationRequest = nil
+            submitActivation(for: sysext)
+            return
+        }
+
+        guard activeActivationRequest === request else {
+            return
+        }
+        activeActivationRequest = nil
         guard let sysext = extensionToActivate else {
             activationCompletion?(nil)
             activationCompletion = nil
@@ -147,6 +214,8 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
         }
         activationCompletion?(nil)
         activationCompletion = nil
+        requestPhase = nil
+        extensionToActivate = nil
     }
 
     private func retryEnableProxy(attemptsLeft: Int) {
@@ -154,12 +223,16 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
             if error == nil {
                 self?.activationCompletion?(nil)
                 self?.activationCompletion = nil
+                self?.requestPhase = nil
+                self?.extensionToActivate = nil
                 return
             }
             if attemptsLeft <= 0 {
                 fputs("Tractor: network extension failed: \(error!.localizedDescription)\n", stderr)
                 self?.activationCompletion?(error)
                 self?.activationCompletion = nil
+                self?.requestPhase = nil
+                self?.extensionToActivate = nil
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -169,9 +242,24 @@ extension ProxyManager: OSSystemExtensionRequestDelegate {
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        if activeDeactivationRequest === request, let sysext = extensionToActivate {
+            deactivationFallback?.cancel()
+            deactivationFallback = nil
+            activeDeactivationRequest = nil
+            // A deactivation request can fail when there is no installed copy.
+            // Continue with activation; replacement still removes old versions.
+            submitActivation(for: sysext)
+            return
+        }
+        guard activeActivationRequest === request else {
+            return
+        }
         fputs("Tractor: sysext failed: \(error.localizedDescription)\n", stderr)
         activationCompletion?(error)
         activationCompletion = nil
+        requestPhase = nil
+        extensionToActivate = nil
+        activeActivationRequest = nil
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {

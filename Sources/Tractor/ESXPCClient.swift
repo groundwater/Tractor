@@ -120,7 +120,7 @@ final class ESXPCClient {
         } as? TractorESXPC
 
         let events = DispatchSource.makeTimerSource(queue: .main)
-        events.schedule(deadline: .now() + 0.5, repeating: .milliseconds(200))
+        events.schedule(deadline: .now() + 0.05, repeating: .milliseconds(100))
         events.setEventHandler { [weak self] in self?.pollEvents() }
         eventTimer = events
         events.resume()
@@ -150,6 +150,7 @@ final class ESXPCClient {
     }
 
     func stop() {
+        drainEventsSync()
         eventTimer?.cancel(); eventTimer = nil
         pidsTimer?.cancel(); pidsTimer = nil
         panelsTimer?.cancel(); panelsTimer = nil
@@ -174,6 +175,25 @@ final class ESXPCClient {
         guard let syncProxy = syncProxy else { return }
         syncProxy.addTrackedPidsSync(pids) { sem.signal() }
         _ = sem.wait(timeout: .now() + timeout)
+    }
+
+    /// Drain any queued ES events before teardown. This closes the race where
+    /// very short `tractor exec` children can exit before the first timer poll.
+    func drainEventsSync(timeout: TimeInterval = 1.0) {
+        let sem = DispatchSemaphore(value: 0)
+        var payload = Data()
+        let syncProxy = connection?.synchronousRemoteObjectProxyWithErrorHandler { _ in
+            sem.signal()
+        } as? TractorESXPC
+        guard let syncProxy = syncProxy else { return }
+        syncProxy.pollEvents { data in
+            payload = data
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + timeout)
+        if !payload.isEmpty {
+            handleEvents(payload)
+        }
     }
 
     func setTrackerPatterns(names: [String], paths: [String]) {

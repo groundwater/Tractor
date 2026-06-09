@@ -60,7 +60,10 @@ private let xpcServiceName = "3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc"
 final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
     private var listener: NSXPCListener?
     private let bufferLock = NSLock()
-    private var eventBuffer: [[String: Any]] = []
+    private var eventRing: [(id: UInt64, entry: [String: Any])] = []
+    private var eventNextID: UInt64 = 1
+    private var eventCursors: [ObjectIdentifier: UInt64] = [:]
+    private let eventRingMax = 5000
 
     /// Capped append-only ring of `emit(channel, obj)` records. Each
     /// record has a monotonic id. Readers track their own cursor so
@@ -120,6 +123,9 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
         connection.exportedInterface = NSXPCInterface(with: TractorESXPC.self)
         connection.exportedObject = self
         let connectionID = ObjectIdentifier(connection)
+        bufferLock.lock()
+        eventCursors[connectionID] = eventNextID - 1
+        bufferLock.unlock()
         connection.invalidationHandler = { [weak self] in
             guard let self = self else { return }
             self.clientLock.lock()
@@ -135,6 +141,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
             // long-running daemons with many short-lived connections.
             self.emitsLock.lock(); self.emitsCursors.removeValue(forKey: connectionID); self.emitsLock.unlock()
             self.panelsLock.lock(); self.panelsCursors.removeValue(forKey: connectionID); self.panelsLock.unlock()
+            self.bufferLock.lock(); self.eventCursors.removeValue(forKey: connectionID); self.bufferLock.unlock()
 
             os_log("client disconnected (remaining: %{public}d)", log: xpcLog, type: .default, remaining)
             if remaining <= 0 {
@@ -144,7 +151,10 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
                 // recreate. Just clear ephemeral buffers.
                 os_log("no clients left — daemon stays running, buffers cleared",
                        log: xpcLog, type: .default)
-                self.bufferLock.lock(); self.eventBuffer.removeAll(); self.bufferLock.unlock()
+                self.bufferLock.lock()
+                self.eventRing.removeAll()
+                self.eventCursors.removeAll()
+                self.bufferLock.unlock()
                 self.pidLock.lock(); self.publishedPids.removeAll(); self.pidLock.unlock()
             }
         }
@@ -178,9 +188,16 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
     }
 
     func pollEvents(reply: @escaping (Data) -> Void) {
+        let connID = NSXPCConnection.current().map { ObjectIdentifier($0) }
         bufferLock.lock()
-        let events = eventBuffer
-        eventBuffer.removeAll()
+        let cursor = connID.flatMap { eventCursors[$0] } ?? 0
+        var events: [[String: Any]] = []
+        var maxID = cursor
+        for (id, entry) in eventRing where id > cursor {
+            events.append(entry)
+            if id > maxID { maxID = id }
+        }
+        if let connID = connID { eventCursors[connID] = maxID }
         bufferLock.unlock()
         guard !events.isEmpty else { reply(Data("[]".utf8)); return }
         if let data = try? JSONSerialization.data(withJSONObject: events) {
@@ -312,6 +329,17 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
 
     // MARK: - Called from ESDaemon
 
+    private func appendEvent(_ event: [String: Any]) {
+        bufferLock.lock()
+        let id = eventNextID
+        eventNextID += 1
+        eventRing.append((id, event))
+        if eventRing.count > eventRingMax {
+            eventRing.removeFirst(eventRing.count - eventRingMax)
+        }
+        bufferLock.unlock()
+    }
+
     func didUpdateTrackedPids(_ pids: Set<Int32>) {
         pidLock.lock()
         publishedPids = pids
@@ -323,7 +351,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
             "kind": "exec", "pid": pid, "ppid": ppid,
             "process": process, "argv": argv, "user": user,
         ]
-        bufferLock.lock(); eventBuffer.append(event); bufferLock.unlock()
+        appendEvent(event)
     }
 
     func reportFileOp(type: String, pid: Int32, ppid: Int32, process: String, user: UInt32, details: [String: String]) {
@@ -332,7 +360,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
             "process": process, "user": user,
         ]
         for (k, v) in details { event[k] = v }
-        bufferLock.lock(); eventBuffer.append(event); bufferLock.unlock()
+        appendEvent(event)
     }
 
     /// Output channel for JS `emit(channel, obj)` calls. Buffered alongside
@@ -353,7 +381,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
                 event[k] = v
             }
         }
-        bufferLock.lock(); eventBuffer.append(event); bufferLock.unlock()
+        appendEvent(event)
 
         // GUI ring: same record + a server-side timestamp. Capped, drops oldest.
         var ringEntry = event
@@ -373,6 +401,6 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
             "kind": "exit", "pid": pid, "ppid": ppid,
             "process": process, "user": user, "exitStatus": exitStatus,
         ]
-        bufferLock.lock(); eventBuffer.append(event); bufferLock.unlock()
+        appendEvent(event)
     }
 }

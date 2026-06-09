@@ -37,7 +37,7 @@ struct Exec: ParsableCommand {
         let s = try SQLiteLog(path: dbPath)
         sqliteLog = s
         sinks.append(s)
-        fputs("Tractor: logging to \(s.path)\n", stderr)
+        fputs("Tractor: logging to \(s.path) (run \(s.runID))\n", stderr)
         var jsonOutput: EventOutput?
         if let jsonPath = jsonFile {
             // Open file for append/create
@@ -102,8 +102,8 @@ struct Exec: ParsableCommand {
             }
             exitCodeBox.set(code)
 
-            // Give ES a moment to drain final events, then shut down.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Give ES time to publish final events from very short processes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 esClient.stop()
                 sqliteLog?.close()
                 jsonOutput?.close()
