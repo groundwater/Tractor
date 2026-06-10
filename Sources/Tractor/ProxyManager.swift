@@ -56,7 +56,9 @@ final class ProxyManager: NSObject {
     private var activationCompletion: ((Error?) -> Void)?
     private var extensionToActivate: TractorSystemExtension?
     private var activeActivationRequest: OSSystemExtensionRequest?
-    private let systemExtensionQueue = DispatchQueue(label: "Tractor.system-extension", attributes: .concurrent)
+    // Serial: delegate callbacks read and write activationCompletion /
+    // extensionToActivate, so they must not interleave.
+    private let systemExtensionQueue = DispatchQueue(label: "Tractor.system-extension")
 
     func activateES(completion: @escaping (Error?) -> Void) {
         activate(.endpointSecurity, completion: completion)

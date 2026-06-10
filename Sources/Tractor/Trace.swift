@@ -28,7 +28,7 @@ struct Trace: ParsableCommand {
         abstract: "Trace a process tree and its activity"
     )
 
-    @Option(name: .shortAndLong, help: "Process name to trace (substring match, repeatable)")
+    @Option(name: .shortAndLong, help: "Process name to trace (substring match on the executable name, repeatable)")
     var name: [String] = []
 
     @Option(name: .shortAndLong, help: "Specific PID to trace including all descendants (repeatable)")
