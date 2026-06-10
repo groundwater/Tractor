@@ -72,15 +72,7 @@ struct LiveView: View {
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
-                HStack {
-                    FilterField(text: $filter, placeholder: "Find")
-                        .frame(maxWidth: 320)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
-                Divider()
+                // Filter lives in the window toolbar (FilterField in GUI.swift).
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, filter: filter, selection: $selection)
                 Divider()
                 HStack {

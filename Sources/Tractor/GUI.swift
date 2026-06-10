@@ -792,6 +792,12 @@ private struct MainView: View {
             ToolbarItem(placement: .principal) {
                 MainTabBar(selection: $tab)
             }
+            if tab == .trace {
+                ToolbarItem(placement: .primaryAction) {
+                    FilterField(text: $filter, placeholder: "Filter processes")
+                        .frame(width: 210)
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     prefs.inspectorShown.toggle()
