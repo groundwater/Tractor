@@ -146,7 +146,9 @@ final class TraceSession {
         }
         esClient.onFileOp = { [weak self] type, pid, ppid, process, user, details in
             guard let self = self else { return }
-            guard self.tree.contains(pid) else { return }
+            // trackIfChild fallback: a child's first file ops can arrive in a
+            // poll batch ahead of the exec event that would add it to the tree.
+            guard self.tree.contains(pid) || self.tree.trackIfChild(pid: pid, ppid: ppid) else { return }
             self.onFileOp?(type, pid, ppid, process, user, details)
             self.sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
@@ -221,8 +223,11 @@ final class TraceSession {
     }
 
     private func matchesTrackerPattern(process: String) -> Bool {
-        let processLower = process.lowercased()
-        return trackerNamePatterns.contains(where: { processLower.contains($0) })
+        // Name patterns match the executable basename only — matching the whole
+        // path would let "test" match "/usr/local/latestversion/bin/foo".
+        // Full-path matching is what trackerPathPatterns is for.
+        let name = (process as NSString).lastPathComponent.lowercased()
+        return trackerNamePatterns.contains(where: { name.contains($0) })
             || trackerPathPatterns.contains(process)
     }
 

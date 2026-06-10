@@ -7,8 +7,6 @@ import SwiftUI
 struct CodeEditorView: NSViewRepresentable {
     @Binding var text: String
     var isEditable: Bool = true
-    var onSaveRequested: (() -> Void)? = nil   // fired on Cmd-S
-    var onRunRequested: (() -> Void)? = nil    // fired on Cmd-R
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -78,67 +76,34 @@ struct CodeEditorView: NSViewRepresentable {
                                           font: CodeEditorView.font)
             }
         }
-
-        func textView(_ textView: NSTextView, doCommandBy sel: Selector) -> Bool {
-            // We hook Cmd-S and Cmd-R via the responder chain elsewhere
-            // (PlaygroundView menu commands). Nothing to override here yet.
-            return false
-        }
     }
 }
 
 // MARK: - Highlighter for NSTextStorage
 
-/// Same rule set as `JSHighlighter` (used by ScriptsView's read-only
-/// display) but with NSColor values so we can apply directly to a live
-/// `NSTextStorage` without going through SwiftUI's AttributedString.
+/// Renders the shared `JSSyntax` token runs with NSColor values so we can
+/// apply directly to a live `NSTextStorage` without going through SwiftUI's
+/// AttributedString.
 private enum JSEditorHighlighter {
-    private struct Rule { let regex: NSRegularExpression; let color: NSColor; let priority: Int }
-
-    private static let rules: [Rule] = build([
-        // Order matters — earlier rules win on overlap.
-        (#"/\*[\s\S]*?\*/"#,                 NSColor.secondaryLabelColor),
-        (#"//[^\n]*"#,                       NSColor.secondaryLabelColor),
-        (#"`(?:\\.|[^`\\])*`"#,              NSColor.string),
-        (#""(?:\\.|[^"\\])*""#,              NSColor.string),
-        (#"'(?:\\.|[^'\\])*'"#,              NSColor.string),
-        (#"\b(probe|emit|render|log|args|engineStats|listPids|listProcs|getProc|getProcStats|getAncestry|getAncestryNames|getFdPipe|terminalCols|terminalRows|loadAverage|ncpu)\b"#,
-                                              NSColor.controlAccentColor),
-        (#"\b(const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|typeof|instanceof|in|of|this|null|undefined|true|false|throw|try|catch|finally|class|extends|import|export|from|as|async|await|yield)\b"#,
-                                              NSColor.keyword),
-        (#"\b\d+(?:\.\d+)?\b"#,              NSColor.number),
-    ])
-
-    private static func build(_ specs: [(String, NSColor)]) -> [Rule] {
-        specs.enumerated().compactMap { (i, spec) in
-            guard let r = try? NSRegularExpression(pattern: spec.0) else { return nil }
-            return Rule(regex: r, color: spec.1, priority: i)
+    private static func color(for token: JSSyntax.Token) -> NSColor {
+        switch token {
+        case .comment: return .secondaryLabelColor
+        case .string: return .string
+        case .builtin: return .controlAccentColor
+        case .keyword: return .keyword
+        case .number: return .number
         }
     }
 
     static func apply(to storage: NSTextStorage, text: String, font: NSFont) {
         storage.beginEditing()
-        let nsText = text as NSString
-        let full = NSRange(location: 0, length: nsText.length)
+        let full = NSRange(location: 0, length: (text as NSString).length)
         storage.setAttributes([
             .foregroundColor: NSColor.labelColor,
             .font: font,
         ], range: full)
-
-        var all: [(range: NSRange, color: NSColor, priority: Int)] = []
-        for rule in rules {
-            rule.regex.enumerateMatches(in: text, range: full) { m, _, _ in
-                if let m = m { all.append((m.range, rule.color, rule.priority)) }
-            }
-        }
-        all.sort { a, b in
-            if a.range.location != b.range.location { return a.range.location < b.range.location }
-            return a.priority < b.priority
-        }
-        var lastEnd = 0
-        for m in all where m.range.location >= lastEnd {
-            storage.addAttribute(.foregroundColor, value: m.color, range: m.range)
-            lastEnd = m.range.location + m.range.length
+        for run in JSSyntax.runs(in: text) {
+            storage.addAttribute(.foregroundColor, value: color(for: run.token), range: run.range)
         }
         storage.endEditing()
     }

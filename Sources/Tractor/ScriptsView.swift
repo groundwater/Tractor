@@ -156,51 +156,21 @@ private struct ScriptDetail: View {
 
 // MARK: - JS syntax highlighter
 
-/// Minimal JavaScript syntax highlighter. Emits an AttributedString that
-/// SwiftUI Text can render directly. Patterns are evaluated in declaration
-/// order; the first match wins for any given character range, which makes
-/// strings/comments correctly outrank keywords inside them.
+/// Renders the shared `JSSyntax` token runs as an AttributedString that
+/// SwiftUI Text can display directly.
 private enum JSHighlighter {
-    private struct Rule { let regex: NSRegularExpression; let color: Color; let priority: Int }
-
-    private static let rules: [Rule] = build([
-        // (pattern, color)  — order is priority (lower = higher)
-        (#"/\*[\s\S]*?\*/"#,                                                                Color.secondary),                              // /* block */
-        (#"//[^\n]*"#,                                                                       Color.secondary),                              // // line
-        (#"`(?:\\.|[^`\\])*`"#,                                                              Color(red: 0.78, green: 0.41, blue: 0.20)),    // `template`
-        (#""(?:\\.|[^"\\])*""#,                                                              Color(red: 0.78, green: 0.41, blue: 0.20)),    // "double"
-        (#"'(?:\\.|[^'\\])*'"#,                                                              Color(red: 0.78, green: 0.41, blue: 0.20)),    // 'single'
-        (#"\b(probe|emit|track|untrack|log)\b"#,                                             Color.accentColor),                            // DSL builtins
-        (#"\b(const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|typeof|instanceof|in|of|this|null|undefined|true|false|throw|try|catch|finally|class|extends|import|export|from|as|async|await|yield)\b"#,
-                                                                                              Color(red: 0.78, green: 0.31, blue: 0.55)),    // keywords
-        (#"\b\d+(?:\.\d+)?\b"#,                                                              Color(red: 0.40, green: 0.30, blue: 0.78)),    // numbers
-    ])
-
-    private static func build(_ specs: [(String, Color)]) -> [Rule] {
-        return specs.enumerated().compactMap { (i, spec) in
-            guard let r = try? NSRegularExpression(pattern: spec.0, options: []) else { return nil }
-            return Rule(regex: r, color: spec.1, priority: i)
+    private static func color(for token: JSSyntax.Token) -> Color {
+        switch token {
+        case .comment: return .secondary
+        case .string: return Color(red: 0.78, green: 0.41, blue: 0.20)
+        case .builtin: return .accentColor
+        case .keyword: return Color(red: 0.78, green: 0.31, blue: 0.55)
+        case .number: return Color(red: 0.40, green: 0.30, blue: 0.78)
         }
     }
 
     static func highlight(_ source: String) -> AttributedString {
-        let full = NSRange(source.startIndex..<source.endIndex, in: source)
-        var all: [(range: NSRange, color: Color, priority: Int)] = []
-        for rule in rules {
-            rule.regex.enumerateMatches(in: source, range: full) { m, _, _ in
-                if let m = m { all.append((m.range, rule.color, rule.priority)) }
-            }
-        }
-        all.sort { a, b in
-            if a.range.location != b.range.location { return a.range.location < b.range.location }
-            return a.priority < b.priority
-        }
-        var picked: [(NSRange, Color)] = []
-        var lastEnd = 0
-        for m in all where m.range.location >= lastEnd {
-            picked.append((m.range, m.color))
-            lastEnd = m.range.location + m.range.length
-        }
+        let picked = JSSyntax.runs(in: source).map { ($0.range, color(for: $0.token)) }
 
         var result = AttributedString()
         var cursor = 0
@@ -237,10 +207,6 @@ private struct EmitsTable: View {
     @ObservedObject var emits: EmitsModel
     @State private var autoScroll: Bool = true
 
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
-    }()
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
@@ -263,42 +229,8 @@ private struct EmitsTable: View {
 
             Divider()
 
-            ScrollViewReader { proxy in
-                Table(emits.records) {
-                    TableColumn("Time") { r in
-                        Text(Self.timeFormatter.string(from: r.time))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(min: 90, ideal: 100, max: 110)
-
-                    TableColumn("Program") { r in
-                        Text(r.program)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(min: 80, ideal: 110, max: 160)
-
-                    TableColumn("Channel") { r in
-                        Text(r.channel)
-                            .font(.system(.caption, design: .monospaced))
-                    }
-                    .width(min: 100, ideal: 140, max: 200)
-
-                    TableColumn("Payload") { r in
-                        Text(r.payloadJSON)
-                            .font(.system(.caption, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(r.payloadJSON)
-                            .textSelection(.enabled)
-                    }
-                }
-                .onChange(of: emits.records.count) { _, _ in
-                    guard autoScroll, let last = emits.records.last else { return }
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            }
+            EmitRecordsTable(records: emits.records, showProgram: true,
+                             autoScroll: autoScroll)
         }
     }
 }
@@ -307,34 +239,35 @@ private struct EmitsTable: View {
 final class EmitsModel: ObservableObject {
     @Published private(set) var records: [EmitRecord] = []
 
-    private var timer: Timer?
+    private var client: ESXPCClient?
     private let maxRows = 500
 
     func start() {
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        guard client == nil else { return }
+        // Long-lived connection: the sysext tracks a per-connection cursor, so
+        // each emit is delivered exactly once. (Short-lived poll connections
+        // would start a fresh cursor every time and never see anything.)
+        let c = ESXPCClient()
+        c.onEmitRecord = { [weak self] record in
+            Task { @MainActor in self?.append(record) }
         }
+        c.start()
+        client = c
     }
 
     func stop() {
-        timer?.invalidate(); timer = nil
+        client?.stopAsync()
+        client = nil
     }
 
     func clear() {
         records = []
     }
 
-    private func refresh() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let new = ESXPCClient.fetchEmits()
-            guard !new.isEmpty else { return }
-            Task { @MainActor in
-                self.records.append(contentsOf: new)
-                if self.records.count > self.maxRows {
-                    self.records.removeFirst(self.records.count - self.maxRows)
-                }
-            }
+    private func append(_ record: EmitRecord) {
+        records.append(record)
+        if records.count > maxRows {
+            records.removeFirst(records.count - maxRows)
         }
     }
 }

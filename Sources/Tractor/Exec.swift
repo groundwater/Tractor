@@ -60,20 +60,23 @@ struct Exec: ParsableCommand {
         tree.addRoots([pending.pid])
 
         let esClient = ESXPCClient()
-        esClient.onExec = { [weak tree] pid, ppid, process, argv, user in
-            guard let tree = tree else { return }
+        // Strong captures throughout: the process runs until Foundation.exit,
+        // so tree/sink outlive every callback.
+        esClient.onExec = { pid, ppid, process, argv, user in
             let isTracked = tree.contains(pid) || tree.trackIfChild(pid: pid, ppid: ppid)
             guard isTracked else { return }
             sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
         esClient.onFileOp = { type, pid, ppid, process, user, details in
-            guard tree.contains(pid) else { return }
+            // trackIfChild fallback: a child's first file ops can arrive in a
+            // poll batch ahead of the exec event that would add it to the tree.
+            guard tree.contains(pid) || tree.trackIfChild(pid: pid, ppid: ppid) else { return }
             sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
-        esClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
-            guard tree?.contains(pid) == true else { return }
+        esClient.onExit = { pid, ppid, process, user, exitStatus in
+            guard tree.contains(pid) else { return }
             sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
-            tree?.remove(pid)
+            tree.remove(pid)
         }
         esClient.start()
         esClient.addTrackedPidsSync([pending.pid])

@@ -71,8 +71,10 @@ func findProcessesByName(_ pattern: String) -> [pid_t] {
         var pathBuf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         let pathLen = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
         if pathLen > 0 {
-            let path = String(cString: pathBuf).lowercased()
-            matched = path.contains(lowerPattern)
+            // Match the executable basename only, consistent with
+            // TraceSession.matchesTrackerPattern and ESDaemon.addByPattern.
+            let path = String(cString: pathBuf)
+            matched = (path as NSString).lastPathComponent.lowercased().contains(lowerPattern)
         }
         if !matched {
             var nameBuf = [CChar](repeating: 0, count: 256)

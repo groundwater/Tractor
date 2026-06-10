@@ -306,10 +306,7 @@ struct PlaygroundView: View {
 private struct StreamView: View {
     let records: [EmitRecord]
     let onClear: () -> Void
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
-    }()
+    @State private var autoScroll: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -317,39 +314,16 @@ private struct StreamView: View {
                 Text("Emit stream").font(.caption).foregroundStyle(.secondary).textCase(.uppercase)
                 Text("\(records.count)").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
+                Toggle("Auto-scroll", isOn: $autoScroll)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
                 Button("Clear") { onClear() }.controlSize(.small)
             }
             .padding(.horizontal, 4).padding(.vertical, 4)
 
             Divider()
 
-            ScrollViewReader { proxy in
-                Table(records) {
-                    TableColumn("Time") { r in
-                        Text(Self.timeFormatter.string(from: r.time))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(min: 90, ideal: 100, max: 110)
-
-                    TableColumn("Channel") { r in
-                        Text(r.channel).font(.system(.caption, design: .monospaced))
-                    }
-                    .width(min: 100, ideal: 140, max: 200)
-
-                    TableColumn("Payload") { r in
-                        Text(r.payloadJSON)
-                            .font(.system(.caption, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(r.payloadJSON)
-                            .textSelection(.enabled)
-                    }
-                }
-                .onChange(of: records.count) { _, _ in
-                    if let last = records.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
-            }
+            EmitRecordsTable(records: records, autoScroll: autoScroll)
         }
     }
 }
@@ -440,8 +414,15 @@ final class PlaygroundModel: ObservableObject {
             appendSyntheticError("Endpoint Security extension isn't active. Run `sudo tractor activate endpoint-security` first.")
             return
         }
-        // Replace any currently-running playground program first.
-        stop()
+        // Replace any currently-running playground program first. Wait for the
+        // teardown to finish so its unload can't race the new load when the
+        // program name is reused.
+        teardownClient { [weak self] in
+            self?.beginRun(name: name, source: source, args: args, scriptID: scriptID)
+        }
+    }
+
+    private func beginRun(name: String, source: String, args: [String], scriptID: String) {
         emits.removeAll(keepingCapacity: true)
         panels.removeAll()
 
@@ -471,7 +452,7 @@ final class PlaygroundModel: ObservableObject {
 
         if let err = c.loadProgram(name: name, source: source, args: args) {
             appendSyntheticError("Load failed: \(err)")
-            c.stop()
+            c.stopAsync()
             client = nil
             return
         }
@@ -481,14 +462,28 @@ final class PlaygroundModel: ObservableObject {
     }
 
     func stop() {
-        if let name = loadedProgramName {
-            client?.unloadProgram(name: name)
+        teardownClient {}
+    }
+
+    /// Unloads the running program and tears down the client without blocking
+    /// the main thread — unload and the final event drain each wait on the
+    /// sysext for up to a couple of seconds.
+    private func teardownClient(completion: @escaping () -> Void) {
+        guard let c = client else {
+            completion()
+            return
         }
-        client?.stop()
+        let name = loadedProgramName
         client = nil
         loadedProgramName = nil
         runningID = nil
         runningName = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let name = name { c.unloadProgram(name: name) }
+            DispatchQueue.main.async {
+                c.stopAsync(completion: completion)
+            }
+        }
     }
 
     func clearEmits() {
@@ -503,9 +498,11 @@ final class PlaygroundModel: ObservableObject {
     }
 
     private func appendSyntheticError(_ msg: String) {
+        let json = (try? JSONSerialization.data(withJSONObject: ["line": msg]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         emits.append(EmitRecord(time: Date(), program: runningName ?? "-",
                                 channel: "tractor:error",
-                                payloadJSON: "{\"line\":\"\(msg)\"}"))
+                                payloadJSON: json))
     }
 
     private func refreshOtherCount() {

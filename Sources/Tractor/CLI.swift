@@ -155,7 +155,6 @@ struct ActivateEndpointSecurity: ParsableCommand {
     )
 
     func run() throws {
-        ActivationCleanup.removeEmptyTeamIDSystemExtension(bundleID: ProxyManager.esBundleID)
         let pm = ProxyManager()
         pm.activateES { error in
             if let error = error {
@@ -165,7 +164,10 @@ struct ActivateEndpointSecurity: ParsableCommand {
             fputs("Endpoint Security extension activated.\n", stderr)
             Foundation.exit(0)
         }
-        RunLoop.main.run()
+        // dispatchMain, not RunLoop.main.run(): the main run loop has no sources here,
+        // so run() returns immediately and the process exits before the activation
+        // callback (delivered on a private queue) ever fires.
+        dispatchMain()
     }
 }
 
@@ -176,7 +178,6 @@ struct ActivateNetworkExtension: ParsableCommand {
     )
 
     func run() throws {
-        ActivationCleanup.removeEmptyTeamIDSystemExtension(bundleID: ProxyManager.neBundleID)
         let pm = ProxyManager()
         pm.activateNetwork { error in
             if let error = error {
@@ -188,36 +189,8 @@ struct ActivateNetworkExtension: ParsableCommand {
                 Foundation.exit(0)
             }
         }
-        RunLoop.main.run()
-    }
-}
-
-enum ActivationCleanup {
-    static func removeEmptyTeamIDSystemExtension(bundleID: String, timeout: TimeInterval = 5.0) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/systemextensionsctl")
-        proc.arguments = ["uninstall", "-", bundleID]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-        } catch {
-            return
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while proc.isRunning && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
-        if proc.isRunning {
-            proc.terminate()
-            fputs("Tractor: old empty-team system extension removal did not finish promptly; continuing\n", stderr)
-            return
-        }
-        if proc.terminationStatus == 0 {
-            fputs("Tractor: requested removal of old empty-team system extension \(bundleID)\n", stderr)
-        }
+        // dispatchMain, not RunLoop.main.run(): see ActivateEndpointSecurity.
+        dispatchMain()
     }
 }
 

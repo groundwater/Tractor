@@ -129,8 +129,11 @@ final class ESDaemon {
         let names = namePatterns
         let paths = pathPatterns
         lock.unlock()
-        let pathLower = path.lowercased()
-        let matches = names.contains(where: { pathLower.contains($0) }) ||
+        // Name patterns match the executable basename only; full paths are
+        // matched exactly via `paths`. Keep in sync with
+        // TraceSession.matchesTrackerPattern and findProcessesByName.
+        let nameLower = (path as NSString).lastPathComponent.lowercased()
+        let matches = names.contains(where: { nameLower.contains($0) }) ||
                       paths.contains(where: { path == $0 })
         guard matches else { return false }
         lock.lock()

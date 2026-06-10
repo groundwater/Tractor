@@ -101,7 +101,7 @@ final class SQLiteLog: EventSink {
             throw SQLiteLogError.schema(msg)
         }
 
-        let startedAt = Self.nowString()
+        let startedAt = TraceTimestamp.now()
         var runStmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, "INSERT INTO runs (started_at, command) VALUES (?, ?)", -1, &runStmt, nil) == SQLITE_OK,
               let runInsert = runStmt else {
@@ -183,18 +183,8 @@ final class SQLiteLog: EventSink {
         close()
     }
 
-    private static let dateFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     private func now() -> String {
-        Self.nowString()
-    }
-
-    private static func nowString() -> String {
-        dateFormatter.string(from: Date())
+        TraceTimestamp.now()
     }
 
     private func insert(timestamp: String, type: String, pid: Int32, ppid: Int32, process: String, user: uid_t, details: [String: String]) {

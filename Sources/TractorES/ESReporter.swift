@@ -123,9 +123,17 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
         connection.exportedInterface = NSXPCInterface(with: TractorESXPC.self)
         connection.exportedObject = self
         let connectionID = ObjectIdentifier(connection)
+        // Seed every cursor to "now" so a new (or reconnecting) client only
+        // sees records produced after it connected, not the ring backlog.
         bufferLock.lock()
         eventCursors[connectionID] = eventNextID - 1
         bufferLock.unlock()
+        emitsLock.lock()
+        emitsCursors[connectionID] = emitsNextID - 1
+        emitsLock.unlock()
+        panelsLock.lock()
+        panelsCursors[connectionID] = panelsNextID - 1
+        panelsLock.unlock()
         connection.invalidationHandler = { [weak self] in
             guard let self = self else { return }
             self.clientLock.lock()
@@ -320,7 +328,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
         let id = panelsNextID
         panelsNextID += 1
         panelsRing.append((id, entry))
-        if panelsRing.count > panelsRingMax {
+        if panelsRing.count > panelsRingMax + panelsRingMax / 4 {
             panelsRing.removeFirst(panelsRing.count - panelsRingMax)
         }
         panelsLock.unlock()
@@ -334,7 +342,9 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
         let id = eventNextID
         eventNextID += 1
         eventRing.append((id, event))
-        if eventRing.count > eventRingMax {
+        // Trim in batches — removeFirst shifts the whole array, so doing it
+        // on every append once at capacity makes the hot path O(n) per event.
+        if eventRing.count > eventRingMax + eventRingMax / 4 {
             eventRing.removeFirst(eventRing.count - eventRingMax)
         }
         bufferLock.unlock()
@@ -390,7 +400,7 @@ final class ESReporter: NSObject, NSXPCListenerDelegate, TractorESXPC {
         let id = emitsNextID
         emitsNextID += 1
         emitsRing.append((id, ringEntry))
-        if emitsRing.count > emitsRingMax {
+        if emitsRing.count > emitsRingMax + emitsRingMax / 4 {
             emitsRing.removeFirst(emitsRing.count - emitsRingMax)
         }
         emitsLock.unlock()

@@ -39,6 +39,27 @@ struct EmitRecord: Identifiable {
     let payloadJSON: String
 }
 
+extension EmitRecord {
+    /// Decodes one emits-ring entry (the dictionary shape produced by
+    /// ESReporter.reportEmit).
+    init(ringEntry entry: [String: Any]) {
+        let ts = entry["ts"] as? Double ?? Date().timeIntervalSince1970
+        var payload = entry
+        for k in ["kind", "channel", "ts", "_program"] { payload.removeValue(forKey: k) }
+        let json: String
+        if let d = try? JSONSerialization.data(withJSONObject: payload),
+           let s = String(data: d, encoding: .utf8) {
+            json = s
+        } else {
+            json = "{}"
+        }
+        self.init(time: Date(timeIntervalSince1970: ts),
+                  program: entry["_program"] as? String ?? "?",
+                  channel: entry["channel"] as? String ?? "?",
+                  payloadJSON: json)
+    }
+}
+
 /// One `render(panel, text)` update. CLI repaints by (program, panel) key.
 struct PanelUpdate {
     let program: String
@@ -151,13 +172,35 @@ final class ESXPCClient {
 
     func stop() {
         drainEventsSync()
+        cancelTimers()
+        connection?.invalidate()
+        connection = nil
+        proxy = nil
+    }
+
+    /// Async variant of `stop()` for UI callers: the final drain blocks for up
+    /// to a second waiting on the sysext, so it runs off the main thread.
+    /// Event handlers for drained events still fire on main before `completion`.
+    func stopAsync(completion: (() -> Void)? = nil) {
+        cancelTimers()
+        let conn = connection
+        connection = nil
+        proxy = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let payload = Self.drainEvents(over: conn, timeout: 1.0)
+            DispatchQueue.main.async {
+                if !payload.isEmpty { self?.handleEvents(payload) }
+                conn?.invalidate()
+                completion?()
+            }
+        }
+    }
+
+    private func cancelTimers() {
         eventTimer?.cancel(); eventTimer = nil
         pidsTimer?.cancel(); pidsTimer = nil
         panelsTimer?.cancel(); panelsTimer = nil
         emitsTimer?.cancel(); emitsTimer = nil
-        connection?.invalidate()
-        connection = nil
-        proxy = nil
     }
 
     func addTrackedPids(_ pids: Set<pid_t>) {
@@ -179,21 +222,27 @@ final class ESXPCClient {
 
     /// Drain any queued ES events before teardown. This closes the race where
     /// very short `tractor exec` children can exit before the first timer poll.
+    /// Blocks the calling thread for up to `timeout`.
     func drainEventsSync(timeout: TimeInterval = 1.0) {
+        let payload = Self.drainEvents(over: connection, timeout: timeout)
+        if !payload.isEmpty {
+            handleEvents(payload)
+        }
+    }
+
+    private static func drainEvents(over connection: NSXPCConnection?, timeout: TimeInterval) -> Data {
         let sem = DispatchSemaphore(value: 0)
         var payload = Data()
         let syncProxy = connection?.synchronousRemoteObjectProxyWithErrorHandler { _ in
             sem.signal()
         } as? TractorESXPC
-        guard let syncProxy = syncProxy else { return }
+        guard let syncProxy = syncProxy else { return payload }
         syncProxy.pollEvents { data in
             payload = data
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + timeout)
-        if !payload.isEmpty {
-            handleEvents(payload)
-        }
+        return payload
     }
 
     func setTrackerPatterns(names: [String], paths: [String]) {
@@ -202,45 +251,6 @@ final class ESXPCClient {
 
     func setTerminalSize(cols: Int, rows: Int) {
         proxy?.setTerminalSize(cols: cols, rows: rows)
-    }
-
-    /// One-shot drain of buffered JS emit records. Returns the records
-    /// since the last call, oldest first. Used by the GUI Scripts tab.
-    static func fetchEmits(timeout: TimeInterval = 1.0) -> [EmitRecord] {
-        let sem = DispatchSemaphore(value: 0)
-        var result: [EmitRecord] = []
-
-        let conn = NSXPCConnection(machServiceName: esXPCServiceName, options: .privileged)
-        conn.remoteObjectInterface = NSXPCInterface(with: TractorESXPC.self)
-        conn.resume()
-        let proxy = conn.remoteObjectProxyWithErrorHandler { _ in
-            sem.signal()
-        } as? TractorESXPC
-        proxy?.pollEmits { data in
-            defer { sem.signal() }
-            guard !data.isEmpty,
-                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-            else { return }
-            for entry in arr {
-                let ts = entry["ts"] as? Double ?? Date().timeIntervalSince1970
-                let channel = entry["channel"] as? String ?? "?"
-                let program = entry["_program"] as? String ?? "?"
-                var payload = entry
-                for k in ["kind", "channel", "ts", "_program"] { payload.removeValue(forKey: k) }
-                let json: String = {
-                    guard let d = try? JSONSerialization.data(withJSONObject: payload),
-                          let s = String(data: d, encoding: .utf8) else { return "{}" }
-                    return s
-                }()
-                result.append(EmitRecord(time: Date(timeIntervalSince1970: ts),
-                                         program: program,
-                                         channel: channel,
-                                         payloadJSON: json))
-            }
-        }
-        _ = sem.wait(timeout: .now() + timeout)
-        conn.invalidate()
-        return result
     }
 
     /// One-shot fetch of all currently-loaded programs. Used by the GUI
@@ -342,22 +352,7 @@ final class ESXPCClient {
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return }
         for entry in arr {
-            let ts = entry["ts"] as? Double ?? Date().timeIntervalSince1970
-            let channel = entry["channel"] as? String ?? "?"
-            let program = entry["_program"] as? String ?? "?"
-            var payload = entry
-            for k in ["kind", "channel", "ts", "_program"] {
-                payload.removeValue(forKey: k)
-            }
-            let json: String = {
-                guard let d = try? JSONSerialization.data(withJSONObject: payload),
-                      let s = String(data: d, encoding: .utf8) else { return "{}" }
-                return s
-            }()
-            onEmitRecord?(EmitRecord(time: Date(timeIntervalSince1970: ts),
-                                     program: program,
-                                     channel: channel,
-                                     payloadJSON: json))
+            onEmitRecord?(EmitRecord(ringEntry: entry))
         }
     }
 

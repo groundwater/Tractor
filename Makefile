@@ -38,7 +38,10 @@ debug: ensure-local-config
 		ENABLE_DEBUG_DYLIB=NO ENABLE_PREVIEWS=NO \
 		CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-" build
 
-# Auto-increment sysext build number so macOS recognizes replacement
+# Auto-increment sysext build number so macOS recognizes replacement.
+# project.yml is the source of truth (xcodegen injects its info.properties at
+# build time); the Info.plists are bumped too only so the checked-in values
+# can't silently drift from what actually ships.
 bump-sysext-version:
 	@OLD=$$(awk '/TractorNE:/,/TractorES:/ { if ($$1 == "CFBundleVersion:") { gsub(/"/,"",$$2); print $$2; exit } }' project.yml); \
 	NEW=$$((OLD + 1)); \
@@ -47,6 +50,8 @@ bump-sysext-version:
 		/TractorES:/,/TractorApp:/ { if (/CFBundleVersion:/) sub(/"[0-9]+"/, "\"" n "\"") } \
 		{ print }' project.yml > project.yml.tmp && \
 	mv project.yml.tmp project.yml; \
+	plutil -replace CFBundleVersion -string "$$NEW" Sources/TractorES/Info.plist; \
+	plutil -replace CFBundleVersion -string "$$NEW" Sources/TractorNE/Info.plist; \
 	echo "Tractor: sysext build number → $$NEW"
 
 preflight-release: ensure-local-config
