@@ -33,9 +33,12 @@ struct ScriptsView: View {
                 if let id = selection, let p = model.programs.first(where: { $0.id == id }) {
                     ScriptDetail(program: p)
                 } else {
-                    Text("Select a script to view its source.")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ContentUnavailableView {
+                        Label("Select a script", systemImage: "doc.text")
+                    } description: {
+                        Text("Choose a loaded script on the left to view its source and probes.")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(minWidth: 420, idealWidth: 600, maxWidth: .infinity,
@@ -52,16 +55,10 @@ struct ScriptsView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 36))
-                .foregroundStyle(.secondary)
-            Text("No scripts loaded")
-                .font(.headline)
-            Text(verbatim: "Submit one with:\n  sudo tractor program <file.js>")
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        ContentUnavailableView {
+            Label("No scripts loaded", systemImage: "doc.text.magnifyingglass")
+        } description: {
+            Text(verbatim: "Run a script from the Playground tab, or load one from a terminal:\nsudo tractor program <file.js>")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()

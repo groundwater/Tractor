@@ -50,6 +50,15 @@ struct EmitRecordsTable: View {
                 guard autoScroll, let last = records.last else { return }
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
+            .overlay {
+                if records.isEmpty {
+                    ContentUnavailableView {
+                        Label("No emits yet", systemImage: "dot.radiowaves.left.and.right")
+                    } description: {
+                        Text("emit(channel, payload) records from running scripts stream here.")
+                    }
+                }
+            }
         }
     }
 }

@@ -148,6 +148,14 @@ struct PlaygroundView: View {
                 Text("(no script selected)").foregroundStyle(.secondary)
             }
 
+            if model.runningID != nil {
+                HStack(spacing: 5) {
+                    Circle().fill(Color.green).frame(width: 7, height: 7)
+                    Text("running").font(.caption).foregroundStyle(.secondary)
+                }
+                .help("Program is loaded in the Endpoint Security extension")
+            }
+
             Spacer()
 
             TextField("args (whitespace-separated; quote strings)",
@@ -336,14 +344,10 @@ private struct PanelsView: View {
     var body: some View {
         let names = panels.keys.sorted()
         if names.isEmpty {
-            VStack {
-                Spacer()
-                Text("No render() output yet.")
-                    .foregroundStyle(.secondary)
-                Text("Scripts use render(panelName, text) to update a fixed panel.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+            ContentUnavailableView {
+                Label("No render() output yet", systemImage: "rectangle.dashed")
+            } description: {
+                Text("Scripts call render(panel, text) to draw a live panel here.")
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

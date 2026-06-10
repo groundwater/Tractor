@@ -398,8 +398,12 @@ struct DetailPane: View {
         if let pid = selectedPid, let node = model.processes[pid] {
             processDetailView(pid: pid, node: node)
         } else {
-            ContentUnavailableView("Select a process", systemImage: "scope")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ContentUnavailableView {
+                Label("Select a process", systemImage: "scope")
+            } description: {
+                Text("Choose a process on the left to inspect its file, network, and child activity.")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
