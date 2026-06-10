@@ -64,18 +64,43 @@ class TransparentProxy: NETransparentProxyProvider {
     }
 
     override func handleNewFlow(_ flow: NEAppProxyFlow) -> Bool {
+        let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
+        if !reporter.isWatched(pid) {
+            return false
+        }
+
+        // UDP flows take a separate path — different bridge, different
+        // API. Datagram-oriented instead of stream-oriented.
+        if let udp = flow as? NEAppProxyUDPFlow {
+            return handleUDPFlow(udp, pid: pid)
+        }
         guard let tcp = flow as? NEAppProxyTCPFlow else { return false }
 
         let remote = tcp.remoteEndpoint as? NWHostEndpoint
-        let pid = flow.metaData.sourceAppAuditToken.map { auditTokenPID($0) } ?? -1
-        if !reporter.isWatched(pid) {
-            os_log("handleNewFlow: pid %d NOT watched, passing through", log: log, type: .default, pid)
-            return false
-        }
 
         let host = remote?.hostname ?? "?"
         let port = remote?.port ?? "0"
         guard let portNum = UInt16(port), portNum > 0 else { return false }
+
+        // Ask the JS engine — relayed via the CLI process — whether to deny
+        // this flow. Sandbox prevents direct NE→ES XPC; the CLI exports an
+        // `evaluateFlow` endpoint that forwards to ES. Fails open on
+        // timeout/missing CLI.
+        let processPath = procPath(forPid: pid) ?? ""
+        if reporter.evaluateFlow(pid: pid, process: processPath,
+                                  host: host, port: portNum,
+                                  direction: "outbound", proto: "tcp") {
+            os_log("flow denied by JS: pid=%d %{public}@:%{public}@",
+                   log: log, type: .default, pid, host, port)
+            // Take the flow and immediately close it with EPERM so the app
+            // sees a clean connection failure instead of a hang.
+            tcp.open(withLocalFlowEndpoint: nil) { _ in
+                let err = NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+                tcp.closeReadWithError(err)
+                tcp.closeWriteWithError(err)
+            }
+            return true
+        }
 
         // Skip IPv6 flows when the host lacks global IPv6 connectivity.
         // createTCPConnection can't reach global IPv6 addresses without a
@@ -106,7 +131,7 @@ class TransparentProxy: NETransparentProxyProvider {
         let box = BridgeBox()
 
         let bridge = TCPBridge(flow: tcp, connection: conn) { [weak self] bytesOut, bytesIn in
-            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, proto: "tcp", bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
             if let self = self, let b = box.bridge {
                 self.bridgeLock.lock()
                 self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
@@ -116,7 +141,7 @@ class TransparentProxy: NETransparentProxyProvider {
         box.bridge = bridge
 
         bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
-            self?.reporter.reportBytes(pid: pid, host: host, port: port, bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
+            self?.reporter.reportBytes(pid: pid, host: host, port: port, proto: "tcp", bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
         }
 
         bridgeLock.lock()
@@ -192,7 +217,7 @@ class TransparentProxy: NETransparentProxyProvider {
                 let box = MITMBox()
 
                 let bridge = MITMBridge(flow: tcp, connection: conn, identity: identity) { [weak self] bytesOut, bytesIn in
-                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
+                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, proto: "tcp", bytesOut: bytesOut, bytesIn: bytesIn, closed: true, flowID: fid)
                     if let self = self, let b = box.bridge {
                         self.bridgeLock.lock()
                         self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
@@ -202,7 +227,7 @@ class TransparentProxy: NETransparentProxyProvider {
                 box.bridge = bridge
 
                 bridge.onRawBytesUpdated = { [weak self] bytesOut, bytesIn in
-                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
+                    self?.reporter.reportBytes(pid: pid, host: sniHost, port: port, proto: "tcp", bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
                 }
                 bridge.onPlaintext = { [weak self] direction, data in
                     self?.reporter.reportTraffic(pid: pid, host: sniHost, port: port, direction: direction, data: data, flowID: fid)
@@ -219,6 +244,62 @@ class TransparentProxy: NETransparentProxyProvider {
         return true
     }
 
+    /// Handle a UDP flow: ask JS for verdict, then proxy datagrams via
+    /// UDPBridge. UDP is connectionless — the flow itself has no
+    /// remote endpoint pinned at open time (the app could `sendto()`
+    /// any number of destinations on one socket). So the new-flow event
+    /// to JS has empty host/port; per-destination visibility would need
+    /// a per-datagram probe we haven't built yet.
+    private func handleUDPFlow(_ udp: NEAppProxyUDPFlow, pid: Int32) -> Bool {
+        let evalHost = ""
+        let evalPort: UInt16 = 0
+        let processPath = procPath(forPid: pid) ?? ""
+
+        if reporter.evaluateFlow(pid: pid, process: processPath,
+                                 host: evalHost, port: evalPort,
+                                 direction: "outbound", proto: "udp") {
+            os_log("UDP flow denied by JS: pid=%d %{public}@:%d",
+                   log: log, type: .default, pid, evalHost, evalPort)
+            udp.open(withLocalEndpoint: nil) { _ in
+                let err = NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+                udp.closeReadWithError(err)
+                udp.closeWriteWithError(err)
+            }
+            return true
+        }
+
+        let fid = allocFlowID()
+        reporter.reportFlow(pid: pid, host: evalHost, port: String(evalPort),
+                            proto: "udp", flowID: fid)
+
+        class UDPBox { var bridge: UDPBridge? }
+        let box = UDPBox()
+        let bridge = UDPBridge(flow: udp, provider: self) { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: evalHost, port: String(evalPort),
+                                       proto: "udp",
+                                       bytesOut: bytesOut, bytesIn: bytesIn,
+                                       closed: true, flowID: fid)
+            if let self = self, let b = box.bridge {
+                self.bridgeLock.lock()
+                self.activeBridges.removeValue(forKey: ObjectIdentifier(b))
+                self.bridgeLock.unlock()
+            }
+        }
+        box.bridge = bridge
+        bridge.onBytesUpdated = { [weak self] bytesOut, bytesIn in
+            self?.reporter.reportBytes(pid: pid, host: evalHost, port: String(evalPort),
+                                       proto: "udp",
+                                       bytesOut: bytesOut, bytesIn: bytesIn, flowID: fid)
+        }
+
+        bridgeLock.lock()
+        activeBridges[ObjectIdentifier(bridge)] = bridge
+        bridgeLock.unlock()
+
+        bridge.start()
+        return true
+    }
+
     private func isTLSPort(_ port: UInt16) -> Bool {
         // Common TLS ports — MITM these; pass through others as plaintext
         switch port {
@@ -231,7 +312,8 @@ class TransparentProxy: NETransparentProxyProvider {
         let settings = NETransparentProxyNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         if hasWatchedPids {
             let tcpRule = NENetworkRule(remoteNetwork: nil, remotePrefix: 0, localNetwork: nil, localPrefix: 0, protocol: .TCP, direction: .outbound)
-            settings.includedNetworkRules = [tcpRule]
+            let udpRule = NENetworkRule(remoteNetwork: nil, remotePrefix: 0, localNetwork: nil, localPrefix: 0, protocol: .UDP, direction: .outbound)
+            settings.includedNetworkRules = [tcpRule, udpRule]
         } else {
             settings.includedNetworkRules = []
         }
@@ -323,4 +405,13 @@ private func auditTokenPID(_ token: Data) -> pid_t {
     return token.withUnsafeBytes { buf in
         buf.load(fromByteOffset: 20, as: Int32.self)
     }
+}
+
+/// Resolve a pid to its executable path via libproc. Returns nil if the
+/// process is gone or unreadable.
+private func procPath(forPid pid: pid_t) -> String? {
+    var buf = [CChar](repeating: 0, count: 4096)
+    let n = proc_pidpath(pid, &buf, UInt32(buf.count))
+    guard n > 0 else { return nil }
+    return String(cString: buf)
 }

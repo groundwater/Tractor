@@ -308,6 +308,8 @@ final class TraceRunner: ObservableObject {
     /// Number of events written to the trace DB during the current recording.
     /// Polled by the GUI footer via a TimelineView tick.
     var recordedEventCount: Int { session?.sqliteRecordedCount ?? 0 }
+    var recordingDBPath: String? { session?.sqliteLog?.path }
+    var recordingRunID: Int64? { session?.sqliteLog?.runID }
     @Published private(set) var lastMessage: String?
     let live = LiveModel()
 
@@ -356,6 +358,9 @@ final class TraceRunner: ObservableObject {
             }
         }
         session.onMessage = { [weak self] msg in
+            // The "logging to <path>" info renders structurally in the footer
+            // (recording status row); only surface other messages here.
+            guard !msg.hasPrefix("Tractor: logging to") else { return }
             Task { @MainActor in self?.lastMessage = msg }
         }
         session.onBytesUpdate = { [weak self] pid, host, port, bytesOut, bytesIn, flowID in
@@ -401,7 +406,7 @@ final class TraceRunner: ObservableObject {
     }
 
     func stop() {
-        session?.stop()
+        session?.stopAsync()
         session = nil
         sink = nil
         appliedPids.removeAll()
@@ -759,23 +764,94 @@ final class PickerModel: ObservableObject {
 
 // MARK: - Root
 
+private enum MainTab: String, CaseIterable, Identifiable {
+    case trace = "Trace"
+    case scripts = "Scripts"
+    case playground = "Playground"
+    var id: String { rawValue }
+}
+
 private struct MainView: View {
     @State private var filter: String = ""
+    @State private var tab: MainTab = .trace
     @ObservedObject private var prefs = AppPrefs.shared
 
     var body: some View {
-        RootView(filter: $filter)
-            .frame(minWidth: 720, minHeight: 580)
-            .toolbar {
+        Group {
+            switch tab {
+            case .trace:
+                RootView(filter: $filter)
+            case .scripts:
+                ScriptsView()
+            case .playground:
+                PlaygroundView()
+            }
+        }
+        .frame(minWidth: 720, minHeight: 580)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                MainTabBar(selection: $tab)
+            }
+            if tab == .trace {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        prefs.inspectorShown.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
+                    FilterField(text: $filter, placeholder: "Filter processes")
+                        .frame(width: 210)
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    prefs.inspectorShown.toggle()
+                } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .help(prefs.inspectorShown ? "Hide inspector" : "Show inspector")
+                .disabled(tab != .trace)
+            }
+        }
+    }
+}
+
+/// Custom titlebar tab control. Avoids the macOS 15 segmented Picker style
+/// that wraps the selected pill in an oversized capsule.
+private struct MainTabBar: View {
+    @Binding var selection: MainTab
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(MainTab.allCases) { t in
+                tabButton(t)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.10))
+        )
+    }
+
+    @ViewBuilder
+    private func tabButton(_ t: MainTab) -> some View {
+        let isSelected = (selection == t)
+        Button {
+            selection = t
+        } label: {
+            Text(t.rawValue)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isSelected ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(isSelected ? Color.secondary.opacity(0.25) : Color.clear, lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1093,13 +1169,31 @@ private struct RootView: View {
     private var footer: some View {
         VStack(spacing: 4) {
             HStack(spacing: 10) {
-                TimelineMock(sampler: runner.sampler, isRecording: runner.isRecording)
+                ActivityTimeline(sampler: runner.sampler, isRecording: runner.isRecording)
                     .frame(maxWidth: .infinity)
                 Button("Options…") { optionsSheetShown = true }
                 RecordButton(isRecording: runner.isRecording) {
                     runner.isRecording.toggle()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
+            }
+            if runner.isRecording, let path = runner.recordingDBPath {
+                HStack(spacing: 6) {
+                    Circle().fill(Color.red).frame(width: 6, height: 6)
+                    // recordedEventCount isn't @Published — tick once a second.
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text("Recording to \((path as NSString).lastPathComponent)"
+                             + (runner.recordingRunID.map { " · run \($0)" } ?? "")
+                             + " · \(runner.recordedEventCount) events")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(path)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
             }
             if let msg = runner.lastMessage {
                 HStack(spacing: 6) {
@@ -1124,15 +1218,13 @@ private struct RootView: View {
     }
 }
 
-/// Visual-only mock of the playback timeline. No wiring to LiveModel /
-/// SQLite yet — it's just a scrubbable bar so we can iterate on the
-/// interaction shape before committing to the underlying replay engine.
-private struct TimelineMock: View {
+/// Live activity strip for the footer: disk ops above the center line,
+/// network below, sampled per-second by ActivitySampler. Bins captured while
+/// recording draw red. The marker at the right edge is "now"; the empty
+/// headroom right of it fills as new samples arrive.
+private struct ActivityTimeline: View {
     @ObservedObject var sampler: ActivitySampler
     let isRecording: Bool
-    @State private var isPlaying: Bool = false
-    @State private var atLive: Bool = true
-    @State private var playhead: CGFloat = 1.0  // 0…1 along the bar
 
     private let barHeight: CGFloat = 33
     /// "Now" sits at 90% of the bar's width. The rightmost 10% is empty
@@ -1140,94 +1232,62 @@ private struct TimelineMock: View {
     private let liveX: CGFloat = 0.90
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                isPlaying.toggle()
-                if isPlaying { atLive = false }
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.primary)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    // Track background.
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color(NSColor.tertiaryLabelColor).opacity(0.25))
-                    // Center line.
-                    Rectangle()
-                        .fill(Color(NSColor.separatorColor).opacity(0.55))
-                        .frame(height: 1)
-                        .offset(y: geo.size.height / 2 - 0.5)
-                    // Waveform — newest sample at the 90% mark, older to the left.
-                    Canvas { context, size in
-                        let bins = sampler.bins
-                        guard !bins.isEmpty else { return }
-                        // Map bin index → x. The most-recent bin (last) sits at
-                        // liveX * size.width; older bins step leftward.
-                        let dataWidth = size.width * liveX
-                        let binW = dataWidth / CGFloat(bins.count)
-                        let midY = size.height / 2
-                        let maxDisk = max(bins.map(\.disk).max() ?? 1, 1)
-                        let maxNet = max(bins.map(\.network).max() ?? 1, 1)
-                        let maxHalfH = midY - 2
-                        for (i, bin) in bins.enumerated() {
-                            let x = CGFloat(i) * binW
-                            let baseColor: Color = bin.recorded
-                                ? Color.red.opacity(0.7)
-                                : Color.accentColor.opacity(0.65)
-                            let dH = CGFloat(bin.disk / maxDisk) * maxHalfH
-                            if dH > 0 {
-                                context.fill(
-                                    Path(CGRect(x: x, y: midY - dH,
-                                                width: max(binW - 0.5, 0.5), height: dH)),
-                                    with: .color(baseColor)
-                                )
-                            }
-                            let nH = CGFloat(bin.network / maxNet) * maxHalfH
-                            if nH > 0 {
-                                context.fill(
-                                    Path(CGRect(x: x, y: midY,
-                                                width: max(binW - 0.5, 0.5), height: nH)),
-                                    with: .color(baseColor)
-                                )
-                            }
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Track background.
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color(NSColor.tertiaryLabelColor).opacity(0.25))
+                // Center line.
+                Rectangle()
+                    .fill(Color(NSColor.separatorColor).opacity(0.55))
+                    .frame(height: 1)
+                    .offset(y: geo.size.height / 2 - 0.5)
+                // Waveform — newest sample at the 90% mark, older to the left.
+                Canvas { context, size in
+                    let bins = sampler.bins
+                    guard !bins.isEmpty else { return }
+                    // Map bin index → x. The most-recent bin (last) sits at
+                    // liveX * size.width; older bins step leftward.
+                    let dataWidth = size.width * liveX
+                    let binW = dataWidth / CGFloat(bins.count)
+                    let midY = size.height / 2
+                    let maxDisk = max(bins.map(\.disk).max() ?? 1, 1)
+                    let maxNet = max(bins.map(\.network).max() ?? 1, 1)
+                    let maxHalfH = midY - 2
+                    for (i, bin) in bins.enumerated() {
+                        let x = CGFloat(i) * binW
+                        let baseColor: Color = bin.recorded
+                            ? Color.red.opacity(0.7)
+                            : Color.accentColor.opacity(0.65)
+                        let dH = CGFloat(bin.disk / maxDisk) * maxHalfH
+                        if dH > 0 {
+                            context.fill(
+                                Path(CGRect(x: x, y: midY - dH,
+                                            width: max(binW - 0.5, 0.5), height: dH)),
+                                with: .color(baseColor)
+                            )
+                        }
+                        let nH = CGFloat(bin.network / maxNet) * maxHalfH
+                        if nH > 0 {
+                            context.fill(
+                                Path(CGRect(x: x, y: midY,
+                                            width: max(binW - 0.5, 0.5), height: nH)),
+                                with: .color(baseColor)
+                            )
                         }
                     }
-                    // Playhead (fixed @ liveX).
-                    let headX = liveX * geo.size.width
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(isRecording ? Color.red : Color.primary)
-                        .frame(width: 2, height: geo.size.height + 4)
-                        .offset(x: headX - 1, y: -2)
                 }
-                .contentShape(Rectangle())
+                // "Now" marker (fixed @ liveX).
+                let headX = liveX * geo.size.width
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(isRecording ? Color.red : Color.primary)
+                    .frame(width: 2, height: geo.size.height + 4)
+                    .offset(x: headX - 1, y: -2)
             }
-            .frame(height: barHeight)
-
-            Button {
-                atLive = true
-                isPlaying = false
-                playhead = 1.0
-            } label: {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(atLive ? Color.red : Color.secondary.opacity(0.4))
-                        .frame(width: 7, height: 7)
-                    Text(verbatim: "Live")
-                        .font(.caption.weight(.semibold))
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(atLive ? Color.secondary.opacity(0.15) : Color.clear,
-                            in: Capsule())
-            }
-            .buttonStyle(.plain)
+            .contentShape(Rectangle())
         }
+        .frame(height: barHeight)
+        .help("Live activity: disk ops above the line, network below. Red samples were captured while recording.")
     }
 }
 

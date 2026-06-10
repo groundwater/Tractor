@@ -80,6 +80,8 @@ final class TraceSession {
     private var sink: EventSink
     private var esClient: ESXPCClient?
     private var flowClient: FlowXPCClient?
+    private var trackerNamePatterns: [String] = []
+    private var trackerPathPatterns: [String] = []
 
     init(primarySink: EventSink, tree: ProcessTree = ProcessTree()) {
         self.primarySink = primarySink
@@ -102,7 +104,7 @@ final class TraceSession {
             let log = try SQLiteLog(path: dbPath)
             self.sqliteLog = log
             self.sink = MultiSink([primarySink, log])
-            onMessage?("Tractor: logging to \(log.path)")
+            onMessage?("Tractor: logging to \(log.path) (run \(log.runID))")
         }
 
         // Resolve initial roots and seed the tree in BFS order (parents before
@@ -120,6 +122,8 @@ final class TraceSession {
             initialOrdered = bfsExpand(roots: initialRoots, excluding: [])
             tree.addRoots(initialOrdered)
         }
+        trackerNamePatterns = roots.names.map { $0.lowercased() }
+        trackerPathPatterns = roots.paths
 
         // Set up ES client.
         let esClient = ESXPCClient()
@@ -132,18 +136,25 @@ final class TraceSession {
         // where e.g. TUI tracker-group bookkeeping completes before render.
         esClient.onExec = { [weak self] pid, ppid, process, argv, user in
             guard let self = self else { return }
-            self.tree.trackIfChild(pid: pid, ppid: ppid)
+            let isTracked = self.tree.contains(pid)
+                || self.tree.trackIfChild(pid: pid, ppid: ppid)
+                || self.matchesTrackerPattern(process: process)
+            guard isTracked else { return }
             self.tree.addRoots([pid])
             self.onExec?(pid, ppid, process, argv, user)
             self.sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
         esClient.onFileOp = { [weak self] type, pid, ppid, process, user, details in
             guard let self = self else { return }
+            // trackIfChild fallback: a child's first file ops can arrive in a
+            // poll batch ahead of the exec event that would add it to the tree.
+            guard self.tree.contains(pid) || self.tree.trackIfChild(pid: pid, ppid: ppid) else { return }
             self.onFileOp?(type, pid, ppid, process, user, details)
             self.sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
         esClient.onExit = { [weak self] pid, ppid, process, user, exitStatus in
             guard let self = self else { return }
+            guard self.tree.contains(pid) else { return }
             self.onExit?(pid, ppid, process, user, exitStatus)
             self.sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
             self.tree.remove(pid)
@@ -172,6 +183,31 @@ final class TraceSession {
         isRunning = false
     }
 
+    /// Async variant of `stop()` for UI callers — the final ES event drain
+    /// blocks for up to a second, so it must not run on the main thread. The
+    /// SQLite log closes only after the drain has delivered its last events.
+    func stopAsync(completion: (() -> Void)? = nil) {
+        guard isRunning else { completion?(); return }
+        isRunning = false
+        let es = esClient
+        esClient = nil
+        flowClient?.stop()
+        flowClient = nil
+        let sql = sqliteLog
+        sqliteLog = nil
+        guard let es = es else {
+            sql?.close()
+            completion?()
+            return
+        }
+        es.stopAsync {
+            DispatchQueue.global(qos: .userInitiated).async {
+                sql?.close()
+                DispatchQueue.main.async { completion?() }
+            }
+        }
+    }
+
     /// Try to (re)start the network FlowXPCClient against the running session.
     /// Used when the user activates the NE *after* the trace session is up:
     /// the original `startFlowClient` call already returned no-op'd because
@@ -193,6 +229,8 @@ final class TraceSession {
     // MARK: - Live mutation
 
     func setTrackerPatterns(names: [String], paths: [String]) {
+        trackerNamePatterns = names.map { $0.lowercased() }
+        trackerPathPatterns = paths
         esClient?.setTrackerPatterns(names: names, paths: paths)
     }
 
@@ -207,6 +245,15 @@ final class TraceSession {
     func registerExecRoot(pid: pid_t) {
         tree.addRoots([pid])
         esClient?.addTrackedPidsSync([pid])
+    }
+
+    private func matchesTrackerPattern(process: String) -> Bool {
+        // Name patterns match the executable basename only — matching the whole
+        // path would let "test" match "/usr/local/latestversion/bin/foo".
+        // Full-path matching is what trackerPathPatterns is for.
+        let name = (process as NSString).lastPathComponent.lowercased()
+        return trackerNamePatterns.contains(where: { name.contains($0) })
+            || trackerPathPatterns.contains(process)
     }
 
     /// Attach to an already-running process tree: discover existing descendants

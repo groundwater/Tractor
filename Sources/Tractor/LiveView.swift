@@ -72,15 +72,7 @@ struct LiveView: View {
         // after AppPrefs.hideExitedAfter even when no events are arriving.
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
             VStack(spacing: 0) {
-                HStack {
-                    FilterField(text: $filter, placeholder: "Find")
-                        .frame(maxWidth: 320)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.bar)
-                Divider()
+                // Filter lives in the window toolbar (FilterField in GUI.swift).
                 ProcessTableView(model: model, now: context.date, hideExited: prefs.hideExited, filter: filter, selection: $selection)
                 Divider()
                 HStack {
@@ -122,6 +114,10 @@ struct ProcessTableRow: Identifiable, Hashable {
     let pidLabel: String          // "1234" for processes, "" for groups
     let fileOpCount: Int
     let connectionCount: Int
+    /// Own count plus all (visible) descendants' — shown for group rows and
+    /// collapsed parents so collapsing doesn't hide subtree activity.
+    let subtreeFileOpCount: Int
+    let subtreeConnectionCount: Int
     let exited: Bool
     let exitStatus: Int32?
     let isGroup: Bool
@@ -155,13 +151,17 @@ struct ProcessTableRow: Identifiable, Hashable {
             } ?? false
             if !selfMatches && kids.isEmpty { return nil }
         }
+        let ownFile = node?.fileOpCount ?? 0
+        let ownConn = node?.connectionCount ?? 0
         return ProcessTableRow(
             id: id,
             kind: .process(pid),
             name: node?.name ?? "pid \(pid)",
             pidLabel: "\(pid)",
-            fileOpCount: node?.fileOpCount ?? 0,
-            connectionCount: node?.connectionCount ?? 0,
+            fileOpCount: ownFile,
+            connectionCount: ownConn,
+            subtreeFileOpCount: ownFile + kids.reduce(0) { $0 + $1.subtreeFileOpCount },
+            subtreeConnectionCount: ownConn + kids.reduce(0) { $0 + $1.subtreeConnectionCount },
             exited: node?.exitStatus != nil,
             exitStatus: node?.exitStatus,
             isGroup: false,
@@ -177,6 +177,7 @@ struct ProcessTableRow: Identifiable, Hashable {
             name: "(waiting for matches…)",
             pidLabel: "",
             fileOpCount: 0, connectionCount: 0,
+            subtreeFileOpCount: 0, subtreeConnectionCount: 0,
             exited: false, exitStatus: nil,
             isGroup: false, placeholder: true,
             children: nil
@@ -199,6 +200,8 @@ struct ProcessTableRow: Identifiable, Hashable {
             name: group.label,
             pidLabel: kidRows.isEmpty ? "" : "\(kidRows.count)",
             fileOpCount: 0, connectionCount: 0,
+            subtreeFileOpCount: kidRows.reduce(0) { $0 + $1.subtreeFileOpCount },
+            subtreeConnectionCount: kidRows.reduce(0) { $0 + $1.subtreeConnectionCount },
             exited: false, exitStatus: nil,
             isGroup: true, placeholder: false,
             children: kids
@@ -297,32 +300,63 @@ private struct ProcessTableView: View {
             }
             .width(min: 160)
             TableColumn("PID") { entry in
-                Text(verbatim: entry.row.pidLabel).foregroundStyle(.secondary)
+                Text(verbatim: entry.row.pidLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Disk") { entry in
-                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
-                    .foregroundStyle(.secondary)
+                countCell(displayCount(entry, own: \.fileOpCount, subtree: \.subtreeFileOpCount))
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Network") { entry in
-                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
-                    .foregroundStyle(.secondary)
+                countCell(displayCount(entry, own: \.connectionCount, subtree: \.subtreeConnectionCount))
             }
             .width(min: 60, ideal: 80, max: 110)
             TableColumn("Status") { entry in
-                if entry.row.isGroup || entry.row.placeholder {
-                    Text("").foregroundStyle(.secondary)
-                } else if let code = entry.row.exitStatus {
-                    Text("exited \(code)").foregroundStyle(.secondary)
-                } else {
-                    Text("running").foregroundStyle(.secondary)
-                }
+                statusCell(entry.row)
             }
             .width(min: 70, ideal: 80, max: 110)
         }
         .onKeyPress(.leftArrow) { handleLeftArrow(flat: flat) }
         .onKeyPress(.rightArrow) { handleRightArrow(flat: flat) }
+    }
+
+    /// nil for placeholders; subtree roll-up for group rows and collapsed
+    /// parents (so collapsing doesn't hide descendant activity); own count
+    /// otherwise.
+    private func displayCount(_ entry: FlatProcessRow,
+                              own: KeyPath<ProcessTableRow, Int>,
+                              subtree: KeyPath<ProcessTableRow, Int>) -> Int? {
+        if entry.row.placeholder { return nil }
+        let rolled = entry.row.isGroup || (entry.hasChildren && collapsed.contains(entry.id))
+        return entry.row[keyPath: rolled ? subtree : own]
+    }
+
+    /// Counts render as dim dashes when zero so active rows stand out.
+    @ViewBuilder
+    private func countCell(_ count: Int?) -> some View {
+        if let count = count, count > 0 {
+            Text(verbatim: "\(count)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        } else if count != nil {
+            Text(verbatim: "–").foregroundStyle(.tertiary)
+        } else {
+            Text(verbatim: "")
+        }
+    }
+
+    @ViewBuilder
+    private func statusCell(_ row: ProcessTableRow) -> some View {
+        if row.isGroup || row.placeholder {
+            Text(verbatim: "")
+        } else if let code = row.exitStatus {
+            Text(code == 0 ? "exited" : "exited (\(code))")
+                .foregroundStyle(code == 0 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.orange))
+        } else {
+            Text("running").foregroundStyle(.secondary)
+        }
     }
 
     /// Left arrow: collapse an expanded parent. If row is a leaf or already
@@ -398,8 +432,12 @@ struct DetailPane: View {
         if let pid = selectedPid, let node = model.processes[pid] {
             processDetailView(pid: pid, node: node)
         } else {
-            ContentUnavailableView("Select a process", systemImage: "scope")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ContentUnavailableView {
+                Label("Select a process", systemImage: "scope")
+            } description: {
+                Text("Choose a process on the left to inspect its file, network, and child activity.")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

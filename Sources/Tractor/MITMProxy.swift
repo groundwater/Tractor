@@ -107,6 +107,16 @@ final class MITMProxy: NSObject, TractorCLIXPC {
         }
     }
 
+    /// MITMProxy doesn't own the JS engine — only `tractor program` does.
+    /// Default to allow so existing trace/MITM flows aren't affected.
+    func evaluateFlow(_ context: Data, reply: @escaping (Bool) -> Void) {
+        reply(false)
+    }
+
+    /// Same — MITMProxy isn't the JS engine bridge. Ignore.
+    func notifyFlowClose(_ context: Data) { /* no-op */ }
+    func notifyFlowBytes(_ context: Data) { /* no-op */ }
+
     private func createP12ForHostname(_ hostname: String) throws -> Data {
         p12CacheLock.lock()
         if let cached = p12Cache[hostname] {

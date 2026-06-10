@@ -6,7 +6,7 @@ struct Tractor: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tractor",
         abstract: "Monitor AI coding agent activity via Endpoint Security",
-        subcommands: [Trace.self, Exec.self, Activate.self, Log.self]
+        subcommands: [Trace.self, Exec.self, Activate.self, Log.self, Program.self, Programs.self]
     )
 
     static func main(_ arguments: [String]? = nil) {
@@ -164,6 +164,9 @@ struct ActivateEndpointSecurity: ParsableCommand {
             fputs("Endpoint Security extension activated.\n", stderr)
             Foundation.exit(0)
         }
+        // dispatchMain, not RunLoop.main.run(): the main run loop has no sources here,
+        // so run() returns immediately and the process exits before the activation
+        // callback (delivered on a private queue) ever fires.
         dispatchMain()
     }
 }
@@ -186,6 +189,7 @@ struct ActivateNetworkExtension: ParsableCommand {
                 Foundation.exit(0)
             }
         }
+        // dispatchMain, not RunLoop.main.run(): see ActivateEndpointSecurity.
         dispatchMain()
     }
 }

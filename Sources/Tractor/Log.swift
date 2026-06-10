@@ -23,6 +23,12 @@ struct LogOverview: ParsableCommand {
     @Option(name: .long, help: "Render width in columns")
     var width: Int = 100
 
+    @Option(name: .long, help: "Summarize a specific SQLite run id")
+    var runID: Int64?
+
+    @Flag(name: .long, help: "Summarize every run in the database")
+    var allRuns: Bool = false
+
     func run() throws {
         let dbPath = try resolvePath()
         var dbHandle: OpaquePointer?
@@ -34,7 +40,8 @@ struct LogOverview: ParsableCommand {
         }
         defer { sqlite3_close(db) }
 
-        let summary = Summary.collect(db: db)
+        let selectedRun = allRuns ? nil : (runID ?? latestRunID(db))
+        let summary = Summary.collect(db: db, runID: selectedRun)
         Renderer(width: max(60, width)).render(summary, dbPath: dbPath)
     }
 
@@ -56,6 +63,7 @@ struct LogOverview: ParsableCommand {
 // MARK: - Data model
 
 private struct Summary {
+    var runID: Int64?
     var firstTimestamp: String = ""
     var lastTimestamp: String = ""
     var totalEvents: Int = 0
@@ -86,11 +94,14 @@ private struct Summary {
         let message: String
     }
 
-    static func collect(db: OpaquePointer) -> Summary {
+    static func collect(db: OpaquePointer, runID: Int64?) -> Summary {
         var s = Summary()
+        s.runID = runID
+        let runWhere = runID.map { " WHERE run_id = \($0)" } ?? ""
+        let runAnd = runID.map { " AND run_id = \($0)" } ?? ""
 
         // span + totals
-        forEachRow(db, "SELECT MIN(timestamp), MAX(timestamp), COUNT(*), COUNT(DISTINCT pid) FROM events") { stmt in
+        forEachRow(db, "SELECT MIN(timestamp), MAX(timestamp), COUNT(*), COUNT(DISTINCT pid) FROM events\(runWhere)") { stmt in
             s.firstTimestamp = textColumn(stmt, 0) ?? ""
             s.lastTimestamp = textColumn(stmt, 1) ?? ""
             s.totalEvents = Int(sqlite3_column_int64(stmt, 2))
@@ -98,14 +109,14 @@ private struct Summary {
         }
 
         // type histogram
-        forEachRow(db, "SELECT type, COUNT(*) FROM events GROUP BY type") { stmt in
+        forEachRow(db, "SELECT type, COUNT(*) FROM events\(runWhere) GROUP BY type") { stmt in
             let t = textColumn(stmt, 0) ?? "?"
             s.typeCounts[t] = Int(sqlite3_column_int64(stmt, 1))
         }
 
         // top execs by basename of `process`
         var execCounts: [String: Int] = [:]
-        forEachRow(db, "SELECT process FROM events WHERE type = 'exec'") { stmt in
+        forEachRow(db, "SELECT process FROM events WHERE type = 'exec'\(runAnd)") { stmt in
             if let p = textColumn(stmt, 0) {
                 let name = (p as NSString).lastPathComponent
                 execCounts[name, default: 0] += 1
@@ -118,7 +129,7 @@ private struct Summary {
         var connectCounts: [String: Int] = [:]
         var nonStandardPort = 0
         var plaintextHttp = 0
-        forEachRow(db, "SELECT details FROM events WHERE type = 'connect'") { stmt in
+        forEachRow(db, "SELECT details FROM events WHERE type = 'connect'\(runAnd)") { stmt in
             guard let details = textColumn(stmt, 0),
                   let parsed = parseDetails(details) else { return }
             let addr = parsed["addr"] ?? "?"
@@ -132,7 +143,7 @@ private struct Summary {
         // http_traffic — by host
         var httpByHost: [String: (req: Int, bytes: Int)] = [:]
         if tableExists(db, "http_traffic") {
-            forEachRow(db, "SELECT host, direction, content FROM http_traffic") { stmt in
+            forEachRow(db, "SELECT host, direction, content FROM http_traffic\(runWhere)") { stmt in
                 let host = textColumn(stmt, 0) ?? "?"
                 let dir = textColumn(stmt, 1) ?? ""
                 let content = textColumn(stmt, 2) ?? ""
@@ -167,7 +178,7 @@ private struct Summary {
         var writesByPrefix: [String: Int] = [:]
         var unlinksByPrefix: [String: Int] = [:]
         var sensitiveWrites: [String] = []
-        forEachRow(db, "SELECT type, details FROM events WHERE type IN ('write','unlink','rename')") { stmt in
+        forEachRow(db, "SELECT type, details FROM events WHERE type IN ('write','unlink','rename')\(runAnd)") { stmt in
             let type = textColumn(stmt, 0) ?? ""
             guard let d = textColumn(stmt, 1), let parsed = parseDetails(d) else { return }
             let path: String = {
@@ -202,7 +213,7 @@ private struct Summary {
         // privileged execs
         let privBins: Set<String> = ["sudo", "security", "osascript", "launchctl", "dscl", "defaults"]
         var privSeen: [String: Int] = [:]
-        forEachRow(db, "SELECT process FROM events WHERE type = 'exec'") { stmt in
+        forEachRow(db, "SELECT process FROM events WHERE type = 'exec'\(runAnd)") { stmt in
             if let p = textColumn(stmt, 0) {
                 let name = (p as NSString).lastPathComponent
                 if privBins.contains(name) { privSeen[name, default: 0] += 1 }
@@ -214,7 +225,7 @@ private struct Summary {
 
         // curl|sh style
         var pipeToShell = 0
-        forEachRow(db, "SELECT details FROM events WHERE type = 'exec'") { stmt in
+        forEachRow(db, "SELECT details FROM events WHERE type = 'exec'\(runAnd)") { stmt in
             guard let d = textColumn(stmt, 0), let parsed = parseDetails(d),
                   let argv = parsed["argv"] else { return }
             if argv.contains("| sh") || argv.contains("|sh") || argv.contains("| bash") || argv.contains("|bash") {
@@ -242,7 +253,7 @@ private struct Summary {
         // http error clusters
         if tableExists(db, "http_traffic") {
             var errsByHost: [String: Int] = [:]
-            forEachRow(db, "SELECT host, content FROM http_traffic WHERE direction = 'response' OR direction = 'resp'") { stmt in
+            forEachRow(db, "SELECT host, content FROM http_traffic WHERE (direction = 'response' OR direction = 'resp')\(runAnd)") { stmt in
                 let host = textColumn(stmt, 0) ?? ""
                 let content = textColumn(stmt, 1) ?? ""
                 let firstLine = content.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
@@ -278,7 +289,7 @@ private struct Renderer {
         let file = (dbPath as NSString).lastPathComponent
         let span = formatSpan(from: s.firstTimestamp, to: s.lastTimestamp)
         let totals = "\(s.totalEvents) events · \(s.distinctPids) pids"
-        let header = "Tractor — \(file)"
+        let header = s.runID.map { "Tractor — \(file) run \($0)" } ?? "Tractor — \(file)"
         let right = "\(span) · \(totals)"
         print(padPair(header, right, total: width))
         print(String(repeating: "─", count: width))
@@ -343,6 +354,27 @@ private func tableExists(_ db: OpaquePointer, _ name: String) -> Bool {
     var found = false
     forEachRow(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='\(name)'") { _ in
         found = true
+    }
+    return found
+}
+
+private func latestRunID(_ db: OpaquePointer) -> Int64? {
+    guard tableExists(db, "runs"), columnExists(db, table: "events", column: "run_id") else {
+        return nil
+    }
+    var result: Int64?
+    forEachRow(db, "SELECT id FROM runs ORDER BY id DESC LIMIT 1") { stmt in
+        result = sqlite3_column_int64(stmt, 0)
+    }
+    return result
+}
+
+private func columnExists(_ db: OpaquePointer, table: String, column: String) -> Bool {
+    var found = false
+    forEachRow(db, "PRAGMA table_info(\(table))") { stmt in
+        if let name = textColumn(stmt, 1), name == column {
+            found = true
+        }
     }
     return found
 }
@@ -450,8 +482,7 @@ private func prefixIsSensitive(_ prefix: String) -> Bool {
 }
 
 private func formatSpan(from a: String, to b: String) -> String {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let f = TraceTimestamp.formatter
     guard let s = f.date(from: a), let e = f.date(from: b) else { return "?" }
     let secs = e.timeIntervalSince(s)
     if secs < 60 { return String(format: "%.1fs", secs) }

@@ -10,6 +10,16 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
     func pollEvents(reply: @escaping (Data) -> Void)
     func setMITMEnabled(_ enabled: Bool)
     func getCACertPEM(reply: @escaping (String) -> Void)
+    /// When set, NE intercepts every outbound TCP flow regardless of pid
+    /// watch list. Used by `tractor program` so the loaded JS sees all
+    /// flows via `ne:flow:new` and the user opts in per-flow.
+    func setInterceptAll(_ enabled: Bool)
+    /// Called by `tractor program` after it sets up its exported
+    /// FlowEvalBridge. Tells NE "route evaluateFlow callbacks to me."
+    /// Without this, NE would use the generic cliProxy (last-wins across
+    /// clients), which may point to a GUI connection that has no
+    /// exported evaluator object.
+    func claimEvaluator()
     // Flow streaming: CLI sends data back to a flow
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
@@ -22,6 +32,15 @@ private let xpcServiceName = "group.com.jacobgroundwater.Tractor"
     func openFlow(id: UInt64, host: NSString, port: UInt16, pid: Int32)
     func flowData(id: UInt64, data: Data)
     func closeFlow(id: UInt64)
+    /// JS flow evaluation. NE can't reach the ES sysext directly (sandbox),
+    /// so the CLI relays: NE → CLI → ES → reply. Sync from NE's view.
+    func evaluateFlow(_ context: Data, reply: @escaping (Bool) -> Void)
+    /// Fire-and-forget end-of-flow notification with byte totals. CLI
+    /// relays to ES which fires the `ne:flow:close` probe.
+    func notifyFlowClose(_ context: Data)
+    /// Fire-and-forget periodic byte update during a flow. CLI relays to
+    /// ES → `ne:flow:bytes` probe. Cumulative counters; JS derives deltas.
+    func notifyFlowBytes(_ context: Data)
 }
 
 /// Hosts an XPC listener in the sysext (system domain).
@@ -34,6 +53,13 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
     private var eventBuffer: [[String: Any]] = []
     private var hasClient = false
     private(set) var mitmEnabled = false
+    /// See setInterceptAll. Read on the NE flow-handling path.
+    private(set) var interceptAll = false
+    /// Connection claimed by `tractor program` for JS flow evaluation
+    /// callbacks. Distinct from cliProxy so multiple CLI clients can be
+    /// connected without one stomping the evaluator.
+    private var evaluatorProxy: TractorCLIXPC?
+    private let evaluatorLock = NSLock()
     private(set) var cliProxy: TractorCLIXPC?
 
     /// Active flow relays, keyed by flow ID
@@ -47,6 +73,7 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         defer { pidLock.unlock() }
         guard hasClient else { return false }
         if excludedPids.contains(pid) { return false }
+        if interceptAll { return true }
         return watchedPids.contains(pid)
     }
 
@@ -82,6 +109,10 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         connection.exportedObject = self
         // Bidirectional: also set up reverse interface so we can call the CLI
         connection.remoteObjectInterface = NSXPCInterface(with: TractorCLIXPC.self)
+        // We may use this proxy as the evaluator if the client claims it.
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            os_log("CLI reverse proxy error: %{public}@", log: xpcLog, type: .error, error.localizedDescription)
+        } as? TractorCLIXPC
         connection.invalidationHandler = { [weak self] in
             guard let self = self else { return }
             os_log("CLI disconnected — clearing watch list", log: xpcLog, type: .default)
@@ -93,13 +124,17 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
             self.bufferLock.unlock()
             self.hasClient = false
             self.cliProxy = nil
+            // Drop the evaluator if it was this client.
+            self.evaluatorLock.lock()
+            if let claimed = self.evaluatorProxy as AnyObject?, let p = proxy as AnyObject?, claimed === p {
+                self.evaluatorProxy = nil
+            }
+            self.evaluatorLock.unlock()
             self.onWatchListChanged?(false)
         }
         connection.resume()
         hasClient = true
-        cliProxy = connection.remoteObjectProxyWithErrorHandler { error in
-            os_log("CLI reverse proxy error: %{public}@", log: xpcLog, type: .error, error.localizedDescription)
-        } as? TractorCLIXPC
+        cliProxy = proxy
         os_log("CLI connected via XPC", log: xpcLog, type: .default)
         return true
     }
@@ -152,12 +187,31 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         bufferLock.unlock()
     }
 
-    func reportBytes(pid: Int32, host: String, port: String, bytesOut: Int64, bytesIn: Int64, closed: Bool = false, flowID: UInt64) {
-        var event: [String: Any] = ["pid": pid, "host": host, "port": port, "bytesOut": bytesOut, "bytesIn": bytesIn, "flowID": flowID]
+    func reportBytes(pid: Int32, host: String, port: String, proto: String,
+                     bytesOut: Int64, bytesIn: Int64, closed: Bool = false, flowID: UInt64) {
+        var event: [String: Any] = ["pid": pid, "host": host, "port": port, "proto": proto, "bytesOut": bytesOut, "bytesIn": bytesIn, "flowID": flowID]
         if closed { event["closed"] = true }
         bufferLock.lock()
         eventBuffer.append(event)
         bufferLock.unlock()
+
+        // Notify the JS evaluator (best-effort). `ne:flow:bytes` for
+        // periodic in-flight updates; `ne:flow:close` for the final.
+        evaluatorLock.lock()
+        let cli = evaluatorProxy
+        evaluatorLock.unlock()
+        guard let cli = cli else { return }
+        let ctx: [String: Any] = [
+            "pid": pid, "host": host, "port": Int(port) ?? 0,
+            "protocol": proto,
+            "bytesOut": bytesOut, "bytesIn": bytesIn, "flowID": flowID,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: ctx) else { return }
+        if closed {
+            cli.notifyFlowClose(data)
+        } else {
+            cli.notifyFlowBytes(data)
+        }
     }
 
     func reportTraffic(pid: Int32, host: String, port: String, direction: String, data: Data, flowID: UInt64) {
@@ -187,8 +241,57 @@ final class FlowReporter: NSObject, NSXPCListenerDelegate, TractorNEXPC {
         mitmEnabled = enabled
     }
 
+    func claimEvaluator() {
+        guard let conn = NSXPCConnection.current() else { return }
+        let proxy = conn.remoteObjectProxyWithErrorHandler { error in
+            os_log("evaluator proxy error: %{public}@", log: xpcLog, type: .error, error.localizedDescription)
+        } as? TractorCLIXPC
+        evaluatorLock.lock()
+        evaluatorProxy = proxy
+        evaluatorLock.unlock()
+        os_log("evaluator claimed by client", log: xpcLog, type: .default)
+    }
+
+    func setInterceptAll(_ enabled: Bool) {
+        os_log("interceptAll %{public}@", log: xpcLog, type: .default, enabled ? "on" : "off")
+        interceptAll = enabled
+        // Force NE to recompute its network rules. With interceptAll on we
+        // need the wildcard TCP rule installed even if watchedPids is empty.
+        onWatchListChanged?(interceptAll || !watchedPids.isEmpty)
+    }
+
     func getCACertPEM(reply: @escaping (String) -> Void) {
         reply("")  // CA is now generated by the CLI, not the sysext
+    }
+
+    /// Ask the CLI (synchronously) whether the loaded JS program denies a
+    /// new flow. The CLI relays to the ES sysext where the JS engine runs.
+    /// Fails open: if no evaluator is claimed or the call errors/times out,
+    /// the flow is allowed.
+    func evaluateFlow(pid: Int32, process: String, host: String, port: UInt16,
+                      direction: String, proto: String,
+                      timeout: TimeInterval = 2.0) -> Bool {
+        evaluatorLock.lock()
+        let cli = evaluatorProxy
+        evaluatorLock.unlock()
+        guard let cli = cli else { return false }
+        let ctx: [String: Any] = [
+            "pid": pid, "process": process, "host": host,
+            "port": Int(port), "direction": direction,
+            "protocol": proto,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: ctx) else { return false }
+        let sem = DispatchSemaphore(value: 0)
+        var denied = false
+        cli.evaluateFlow(data) { d in
+            denied = d
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            os_log("evaluateFlow timed out — failing open", log: xpcLog, type: .error)
+            return false
+        }
+        return denied
     }
 
     /// Ask the CLI to generate a PKCS12 for a hostname (synchronous).

@@ -18,12 +18,6 @@ final class EventOutput: EventSink {
         return e
     }()
 
-    private let dateFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     private let lock = NSLock()
     private let output: FileHandle?     // nil = stdout
 
@@ -38,7 +32,7 @@ final class EventOutput: EventSink {
     }
 
     func now() -> String {
-        dateFormatter.string(from: Date())
+        TraceTimestamp.now()
     }
 
     private func emit(_ event: AgentEvent) {

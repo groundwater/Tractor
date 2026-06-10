@@ -24,6 +24,7 @@ final class SQLiteLog: EventSink {
     private(set) var recordedCount: Int = 0
 
     let path: String
+    let runID: Int64
 
     init(path: String) throws {
         self.path = path
@@ -66,10 +67,12 @@ final class SQLiteLog: EventSink {
             sqlite3_close(db)
             throw SQLiteLogError.schema(msg)
         }
+        try Self.ensureColumn(db: db!, table: "events", column: "run_id", type: "INTEGER")
 
         let createTraffic = """
             CREATE TABLE IF NOT EXISTS http_traffic (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
                 timestamp TEXT NOT NULL,
                 pid INTEGER NOT NULL,
                 host TEXT NOT NULL,
@@ -83,9 +86,43 @@ final class SQLiteLog: EventSink {
             sqlite3_close(db)
             throw SQLiteLogError.schema(msg)
         }
+        try Self.ensureColumn(db: db!, table: "http_traffic", column: "run_id", type: "INTEGER")
+
+        let createRuns = """
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                command TEXT
+            )
+            """
+        guard sqlite3_exec(db, createRuns, nil, nil, nil) == SQLITE_OK else {
+            let msg = String(cString: sqlite3_errmsg(db!))
+            sqlite3_close(db)
+            throw SQLiteLogError.schema(msg)
+        }
+
+        let startedAt = TraceTimestamp.now()
+        var runStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT INTO runs (started_at, command) VALUES (?, ?)", -1, &runStmt, nil) == SQLITE_OK,
+              let runInsert = runStmt else {
+            let msg = String(cString: sqlite3_errmsg(db!))
+            sqlite3_close(db)
+            throw SQLiteLogError.prepare(msg)
+        }
+        sqlite3_bind_text(runInsert, 1, (startedAt as NSString).utf8String, -1, nil)
+        let command = CommandLine.arguments.joined(separator: " ")
+        sqlite3_bind_text(runInsert, 2, (command as NSString).utf8String, -1, nil)
+        guard sqlite3_step(runInsert) == SQLITE_DONE else {
+            let msg = String(cString: sqlite3_errmsg(db!))
+            sqlite3_finalize(runInsert)
+            sqlite3_close(db)
+            throw SQLiteLogError.prepare(msg)
+        }
+        sqlite3_finalize(runInsert)
+        self.runID = sqlite3_last_insert_rowid(db)
 
         var stmt: OpaquePointer?
-        let insert = "INSERT INTO events (timestamp, type, pid, ppid, process, user, details) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        let insert = "INSERT INTO events (run_id, timestamp, type, pid, ppid, process, user, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         guard sqlite3_prepare_v2(db, insert, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(cString: sqlite3_errmsg(db!))
             sqlite3_close(db)
@@ -94,13 +131,31 @@ final class SQLiteLog: EventSink {
         self.insertStmt = stmt
 
         var tstmt: OpaquePointer?
-        let tinsert = "INSERT INTO http_traffic (timestamp, pid, host, port, direction, content) VALUES (?, ?, ?, ?, ?, ?)"
+        let tinsert = "INSERT INTO http_traffic (run_id, timestamp, pid, host, port, direction, content) VALUES (?, ?, ?, ?, ?, ?, ?)"
         guard sqlite3_prepare_v2(db, tinsert, -1, &tstmt, nil) == SQLITE_OK else {
             let msg = String(cString: sqlite3_errmsg(db!))
             sqlite3_close(db)
             throw SQLiteLogError.prepare(msg)
         }
         self.trafficStmt = tstmt
+    }
+
+    private static func ensureColumn(db: OpaquePointer, table: String, column: String, type: String) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK,
+              let info = stmt else {
+            throw SQLiteLogError.schema(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(info) }
+        while sqlite3_step(info) == SQLITE_ROW {
+            if let c = sqlite3_column_text(info, 1), String(cString: c) == column {
+                return
+            }
+        }
+        let sql = "ALTER TABLE \(table) ADD COLUMN \(column) \(type)"
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+            throw SQLiteLogError.schema(String(cString: sqlite3_errmsg(db)))
+        }
     }
 
     func close() {
@@ -128,14 +183,8 @@ final class SQLiteLog: EventSink {
         close()
     }
 
-    private let dateFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     private func now() -> String {
-        dateFormatter.string(from: Date())
+        TraceTimestamp.now()
     }
 
     private func insert(timestamp: String, type: String, pid: Int32, ppid: Int32, process: String, user: uid_t, details: [String: String]) {
@@ -144,18 +193,19 @@ final class SQLiteLog: EventSink {
         guard let stmt = insertStmt else { return }
 
         sqlite3_reset(stmt)
-        sqlite3_bind_text(stmt, 1, (timestamp as NSString).utf8String, -1, nil)
-        sqlite3_bind_text(stmt, 2, (type as NSString).utf8String, -1, nil)
-        sqlite3_bind_int(stmt, 3, pid)
-        sqlite3_bind_int(stmt, 4, ppid)
-        sqlite3_bind_text(stmt, 5, (process as NSString).utf8String, -1, nil)
-        sqlite3_bind_int(stmt, 6, Int32(bitPattern: user))
+        sqlite3_bind_int64(stmt, 1, runID)
+        sqlite3_bind_text(stmt, 2, (timestamp as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 3, (type as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 4, pid)
+        sqlite3_bind_int(stmt, 5, ppid)
+        sqlite3_bind_text(stmt, 6, (process as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 7, Int32(bitPattern: user))
 
         if let data = try? encoder.encode(details),
            let json = String(data: data, encoding: .utf8) {
-            sqlite3_bind_text(stmt, 7, (json as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 8, (json as NSString).utf8String, -1, nil)
         } else {
-            sqlite3_bind_null(stmt, 7)
+            sqlite3_bind_null(stmt, 8)
         }
 
         sqlite3_step(stmt)
@@ -170,12 +220,13 @@ final class SQLiteLog: EventSink {
         guard let stmt = trafficStmt else { return }
 
         sqlite3_reset(stmt)
-        sqlite3_bind_text(stmt, 1, (now() as NSString).utf8String, -1, nil)
-        sqlite3_bind_int(stmt, 2, pid)
-        sqlite3_bind_text(stmt, 3, (host as NSString).utf8String, -1, nil)
-        sqlite3_bind_int(stmt, 4, Int32(port))
-        sqlite3_bind_text(stmt, 5, (direction as NSString).utf8String, -1, nil)
-        sqlite3_bind_text(stmt, 6, (content as NSString).utf8String, -1, nil)
+        sqlite3_bind_int64(stmt, 1, runID)
+        sqlite3_bind_text(stmt, 2, (now() as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 3, pid)
+        sqlite3_bind_text(stmt, 4, (host as NSString).utf8String, -1, nil)
+        sqlite3_bind_int(stmt, 5, Int32(port))
+        sqlite3_bind_text(stmt, 6, (direction as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 7, (content as NSString).utf8String, -1, nil)
 
         sqlite3_step(stmt)
     }

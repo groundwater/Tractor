@@ -37,7 +37,7 @@ struct Exec: ParsableCommand {
         let s = try SQLiteLog(path: dbPath)
         sqliteLog = s
         sinks.append(s)
-        fputs("Tractor: logging to \(s.path)\n", stderr)
+        fputs("Tractor: logging to \(s.path) (run \(s.runID))\n", stderr)
         var jsonOutput: EventOutput?
         if let jsonPath = jsonFile {
             // Open file for append/create
@@ -60,17 +60,23 @@ struct Exec: ParsableCommand {
         tree.addRoots([pending.pid])
 
         let esClient = ESXPCClient()
-        esClient.onExec = { [weak tree] pid, ppid, process, argv, user in
-            tree?.trackIfChild(pid: pid, ppid: ppid)
-            tree?.addRoots([pid])
+        // Strong captures throughout: the process runs until Foundation.exit,
+        // so tree/sink outlive every callback.
+        esClient.onExec = { pid, ppid, process, argv, user in
+            let isTracked = tree.contains(pid) || tree.trackIfChild(pid: pid, ppid: ppid)
+            guard isTracked else { return }
             sink.onExec(pid: pid, ppid: ppid, process: process, argv: argv, user: user)
         }
         esClient.onFileOp = { type, pid, ppid, process, user, details in
+            // trackIfChild fallback: a child's first file ops can arrive in a
+            // poll batch ahead of the exec event that would add it to the tree.
+            guard tree.contains(pid) || tree.trackIfChild(pid: pid, ppid: ppid) else { return }
             sink.onFileOp(type: type, pid: pid, ppid: ppid, process: process, user: user, details: details)
         }
-        esClient.onExit = { [weak tree] pid, ppid, process, user, exitStatus in
+        esClient.onExit = { pid, ppid, process, user, exitStatus in
+            guard tree.contains(pid) else { return }
             sink.onExit(pid: pid, ppid: ppid, process: process, user: user, exitStatus: exitStatus)
-            tree?.remove(pid)
+            tree.remove(pid)
         }
         esClient.start()
         esClient.addTrackedPidsSync([pending.pid])
@@ -99,8 +105,8 @@ struct Exec: ParsableCommand {
             }
             exitCodeBox.set(code)
 
-            // Give ES a moment to drain final events, then shut down.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Give ES time to publish final events from very short processes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 esClient.stop()
                 sqliteLog?.close()
                 jsonOutput?.close()
