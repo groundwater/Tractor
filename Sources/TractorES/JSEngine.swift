@@ -92,6 +92,11 @@ private final class LoadedProgram {
     /// Probe currently executing on this program's queue (for error
     /// attribution by the JSContext.exceptionHandler).
     var activeProbeName: String?
+    /// Last exception message seen by the exceptionHandler on this program's
+    /// queue. Read (and reset) by loadProgram to detect compile failures —
+    /// more reliable than JSContext.exception, which a custom handler
+    /// suppresses. Only touched on `queue`, so no extra locking needed.
+    var lastException: String?
     /// Per-probe stats. Mutations guarded by JSEngine.statsLock.
     var probeStats: [String: ProbeStats] = [:]
 
@@ -202,12 +207,14 @@ final class JSEngine {
         var loadError: String?
         program.queue.sync {
             installGlobals(in: program)
+            program.lastException = nil
             runUnderWatchdog(probeName: "\(name):top-level") {
                 program.context.evaluateScript(source)
             }
-            if let exc = program.context.exception {
-                loadError = exc.toString() ?? "<unknown exception>"
-            }
+            // The exceptionHandler records into lastException; fall back to
+            // context.exception in case evaluation set it directly.
+            loadError = program.lastException
+                ?? program.context.exception.flatMap { $0.toString() }
         }
 
         if let err = loadError {
@@ -531,15 +538,14 @@ final class JSEngine {
         let ctx = program.context
         let weakProg = WeakBox(program)
 
-        ctx.exceptionHandler = { [weak self] context, exc in
-            // Re-raise: a custom handler replaces JSContext's default (which
-            // assigns context.exception), so without this line loadProgram's
-            // compile check never sees syntax errors and broken programs
-            // "load" with zero probes.
-            context?.exception = exc
+        ctx.exceptionHandler = { [weak self] _, exc in
             guard let self = self, let exc = exc,
                   let prog = weakProg.value else { return }
             let message = exc.toString() ?? "<?>"
+            // Record for loadProgram's compile check: a custom handler
+            // suppresses JSContext.exception, so without this a syntax error
+            // would let a broken program "load" with zero probes.
+            prog.lastException = message
             let stack = exc.objectForKeyedSubscript("stack")?.toString() ?? ""
             let lineNum = exc.objectForKeyedSubscript("line")?.toNumber() ?? 0
             let probe = prog.activeProbeName ?? "(top-level)"
