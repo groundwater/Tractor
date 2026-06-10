@@ -308,6 +308,8 @@ final class TraceRunner: ObservableObject {
     /// Number of events written to the trace DB during the current recording.
     /// Polled by the GUI footer via a TimelineView tick.
     var recordedEventCount: Int { session?.sqliteRecordedCount ?? 0 }
+    var recordingDBPath: String? { session?.sqliteLog?.path }
+    var recordingRunID: Int64? { session?.sqliteLog?.runID }
     @Published private(set) var lastMessage: String?
     let live = LiveModel()
 
@@ -356,6 +358,9 @@ final class TraceRunner: ObservableObject {
             }
         }
         session.onMessage = { [weak self] msg in
+            // The "logging to <path>" info renders structurally in the footer
+            // (recording status row); only surface other messages here.
+            guard !msg.hasPrefix("Tractor: logging to") else { return }
             Task { @MainActor in self?.lastMessage = msg }
         }
         session.onBytesUpdate = { [weak self] pid, host, port, bytesOut, bytesIn, flowID in
@@ -1165,6 +1170,20 @@ private struct RootView: View {
                     runner.isRecording.toggle()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
+            }
+            if runner.isRecording, let path = runner.recordingDBPath {
+                HStack(spacing: 6) {
+                    Circle().fill(Color.red).frame(width: 6, height: 6)
+                    Text("Recording to \((path as NSString).lastPathComponent)"
+                         + (runner.recordingRunID.map { " · run \($0)" } ?? ""))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(path)
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
             }
             if let msg = runner.lastMessage {
                 HStack(spacing: 6) {

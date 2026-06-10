@@ -297,32 +297,52 @@ private struct ProcessTableView: View {
             }
             .width(min: 160)
             TableColumn("PID") { entry in
-                Text(verbatim: entry.row.pidLabel).foregroundStyle(.secondary)
+                Text(verbatim: entry.row.pidLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Disk") { entry in
-                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.fileOpCount)")
-                    .foregroundStyle(.secondary)
+                countCell(entry.row.isGroup || entry.row.placeholder ? nil : entry.row.fileOpCount)
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Network") { entry in
-                Text(verbatim: entry.row.isGroup || entry.row.placeholder ? "" : "\(entry.row.connectionCount)")
-                    .foregroundStyle(.secondary)
+                countCell(entry.row.isGroup || entry.row.placeholder ? nil : entry.row.connectionCount)
             }
             .width(min: 60, ideal: 80, max: 110)
             TableColumn("Status") { entry in
-                if entry.row.isGroup || entry.row.placeholder {
-                    Text("").foregroundStyle(.secondary)
-                } else if let code = entry.row.exitStatus {
-                    Text("exited \(code)").foregroundStyle(.secondary)
-                } else {
-                    Text("running").foregroundStyle(.secondary)
-                }
+                statusCell(entry.row)
             }
             .width(min: 70, ideal: 80, max: 110)
         }
         .onKeyPress(.leftArrow) { handleLeftArrow(flat: flat) }
         .onKeyPress(.rightArrow) { handleRightArrow(flat: flat) }
+    }
+
+    /// Counts render as dim dashes when zero so active rows stand out.
+    @ViewBuilder
+    private func countCell(_ count: Int?) -> some View {
+        if let count = count, count > 0 {
+            Text(verbatim: "\(count)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        } else if count != nil {
+            Text(verbatim: "–").foregroundStyle(.tertiary)
+        } else {
+            Text(verbatim: "")
+        }
+    }
+
+    @ViewBuilder
+    private func statusCell(_ row: ProcessTableRow) -> some View {
+        if row.isGroup || row.placeholder {
+            Text(verbatim: "")
+        } else if let code = row.exitStatus {
+            Text(code == 0 ? "exited" : "exited (\(code))")
+                .foregroundStyle(code == 0 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.orange))
+        } else {
+            Text("running").foregroundStyle(.secondary)
+        }
     }
 
     /// Left arrow: collapse an expanded parent. If row is a leaf or already

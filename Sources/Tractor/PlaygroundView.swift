@@ -15,6 +15,7 @@ struct PlaygroundView: View {
     @State private var showSaveAs: Bool = false
     @State private var pendingAction: PendingAction? = nil
     @State private var pendingError: String? = nil
+    @State private var streamAutoScroll: Bool = true
 
     enum PendingAction { case run, switchTo(ScriptLibrary.Script) }
     enum OutputTab: Hashable { case output, logs }
@@ -67,7 +68,7 @@ struct PlaygroundView: View {
                     }
                 } else {
                     Section("My Scripts") {
-                        Text("Save a built-in as a copy to start collecting your own.")
+                        Text("Create one with + below, or save a built-in as a copy.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -78,6 +79,10 @@ struct PlaygroundView: View {
             Divider()
 
             HStack {
+                Button { newScript() } label: { Image(systemName: "plus") }
+                .buttonStyle(.borderless)
+                .help("New script in My Scripts")
+
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([ScriptLibrary.customDir])
                 } label: {
@@ -195,20 +200,18 @@ struct PlaygroundView: View {
     // MARK: - Output pane
 
     private var outputPane: some View {
-        let unseen = max(0, model.emits.count - model.lastSeenLogsCount)
-        return TabView(selection: $model.outputTab) {
-            PanelsView(panels: model.panels)
-                .tabItem { Label("Output", systemImage: "rectangle.split.2x1") }
-                .tag(OutputTab.output)
-
-            StreamView(records: model.emits, onClear: { model.clearEmits() })
-                .tabItem { Label("Logs", systemImage: "list.bullet") }
-                .badge(unseen)
-                .tag(OutputTab.logs)
+        VStack(spacing: 0) {
+            outputHeader
+            Divider()
+            switch model.outputTab {
+            case .output:
+                PanelsView(panels: model.panels)
+            case .logs:
+                EmitRecordsTable(records: model.emits, autoScroll: streamAutoScroll)
+            }
         }
-        .padding(8)
         .onChange(of: model.outputTab) { _, new in
-            // Mark logs as read when the user lands on the Logs tab.
+            // Mark the stream as read when the user lands on it.
             if new == .logs { model.lastSeenLogsCount = model.emits.count }
         }
         .onChange(of: model.runningID) { _, _ in
@@ -216,6 +219,43 @@ struct PlaygroundView: View {
             // the badge isn't immediately "0 of 0".
             model.lastSeenLogsCount = 0
         }
+    }
+
+    private var outputHeader: some View {
+        let unseen = max(0, model.emits.count - model.lastSeenLogsCount)
+        return HStack(spacing: 10) {
+            Picker("", selection: $model.outputTab) {
+                Text("Panels").tag(OutputTab.output)
+                Text(unseen > 0 && model.outputTab != .logs ? "Stream (\(unseen))" : "Stream")
+                    .tag(OutputTab.logs)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
+
+            Spacer()
+
+            switch model.outputTab {
+            case .output:
+                if !model.panels.isEmpty {
+                    Text("\(model.panels.count) panel\(model.panels.count == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            case .logs:
+                Text("\(model.emits.count) record\(model.emits.count == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Toggle("Auto-scroll", isOn: $streamAutoScroll)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                Button("Clear") { model.clearEmits() }
+                    .controlSize(.small)
+                    .disabled(model.emits.isEmpty)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Actions
@@ -253,6 +293,32 @@ struct PlaygroundView: View {
         }
         let args = ShellArgs.parse(model.argsText)
         model.run(name: s.name, source: model.editorText, args: args, scriptID: s.id)
+    }
+
+    private func newScript() {
+        let template = """
+        // New Tractor probe script.
+        // probe(name, fn) subscribes to engine events; emit(channel, obj)
+        // streams records to the Stream pane; render(panel, text) draws a
+        // live panel. See the built-in scripts for working examples.
+
+        probe("es:notify:exec", (ev) => {
+          emit("exec", { process: ev.process, pid: ev.pid });
+        });
+        """
+        // Pick the first free "untitled[-N]" name.
+        var name = "untitled"
+        var n = 2
+        while library.custom.contains(where: { $0.name == name }) {
+            name = "untitled-\(n)"
+            n += 1
+        }
+        do {
+            let saved = try library.saveUserScript(name: name, source: template)
+            model.selectedID = saved.id
+        } catch {
+            pendingError = error.localizedDescription
+        }
     }
 
     private func onSave() {
@@ -306,33 +372,6 @@ struct PlaygroundView: View {
         }
         .padding(20)
         .frame(width: 360)
-    }
-}
-
-// MARK: - Stream view (emits + log)
-
-private struct StreamView: View {
-    let records: [EmitRecord]
-    let onClear: () -> Void
-    @State private var autoScroll: Bool = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Emit stream").font(.caption).foregroundStyle(.secondary).textCase(.uppercase)
-                Text("\(records.count)").font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                Toggle("Auto-scroll", isOn: $autoScroll)
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                Button("Clear") { onClear() }.controlSize(.small)
-            }
-            .padding(.horizontal, 4).padding(.vertical, 4)
-
-            Divider()
-
-            EmitRecordsTable(records: records, autoScroll: autoScroll)
-        }
     }
 }
 

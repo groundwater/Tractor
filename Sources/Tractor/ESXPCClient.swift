@@ -46,8 +46,11 @@ extension EmitRecord {
         let ts = entry["ts"] as? Double ?? Date().timeIntervalSince1970
         var payload = entry
         for k in ["kind", "channel", "ts", "_program"] { payload.removeValue(forKey: k) }
+        // sortedKeys keeps the column stable across records; without it the
+        // dictionary order jitters row to row.
         let json: String
-        if let d = try? JSONSerialization.data(withJSONObject: payload),
+        if let d = try? JSONSerialization.data(withJSONObject: payload,
+                                               options: [.sortedKeys, .withoutEscapingSlashes]),
            let s = String(data: d, encoding: .utf8) {
             json = s
         } else {
