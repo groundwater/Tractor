@@ -9,13 +9,14 @@ DEV_ID_APP    := $(shell security find-identity -v -p codesigning 2>/dev/null | 
 ARCHIVE_PATH   = $(BUILD_DIR)/Tractor.xcarchive
 EXPORT_DIR     = $(BUILD_DIR)/Release
 APP_BUILT      = $(EXPORT_DIR)/Tractor.app
+DEBUG_APP      = $(BUILD_DIR)/Debug/Tractor.app
 DMG_OUT        = $(DIST_DIR)/Tractor-$(VERSION).dmg
 
 # Makefile-only release config (signing identity, notarytool profile).
 # See Local.mk.example. Optional for `make debug` / `make release`.
 -include Local.mk
 
-.PHONY: debug release dmg dmg-from-release notarize-dmg notarize-app dist clean \
+.PHONY: debug sign-debug release dmg dmg-from-release notarize-dmg notarize-app dist clean \
         preflight-release preflight-dmg bump-sysext-version ensure-local-config
 
 # Auto-create Local.xcconfig from the example if it's missing so xcodegen
@@ -37,6 +38,47 @@ debug: ensure-local-config
 		SYMROOT=$(BUILD_DIR) OBJROOT=$(BUILD_DIR) \
 		ENABLE_DEBUG_DYLIB=NO ENABLE_PREVIEWS=NO \
 		CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-" build
+	@$(MAKE) sign-debug
+
+# Re-sign the debug build with the real Developer ID identity (team 3FGZQE8AW3)
+# so the ES/NE sysexts register their XPC mach service under the team-prefixed
+# name the app dials (3FGZQE8AW3.com.jacobgroundwater.Tractor.ES.xpc). An ad-hoc
+# signature has an empty team id, so endpointsecurityd registers the service
+# under a different name and the app silently can't reach its own extension.
+# Local dev only: developer mode + disabled SIP let the ES client entitlement
+# load without provisioning profiles, so we skip the notarization-only
+# --options runtime / --timestamp flags. Sign inside-out (sysexts, then app).
+sign-debug:
+	@test -n "$(DEV_ID_APP)" || { echo "ERROR: no 'Developer ID Application' identity for team $(DEV_TEAM) — falling back to ad-hoc means the app can't reach its own ES extension."; exit 1; }
+	@# Embed the Developer ID ("Direct") provisioning profiles — taskgated
+	@# SIGKILLs a binary that carries the restricted ES/NE entitlements without
+	@# a matching profile (the same step release does).
+	@PROFILES_DIR="$$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; \
+	APP_PROFILE=""; NE_PROFILE=""; ES_PROFILE=""; \
+	for p in "$$PROFILES_DIR"/*.provisionprofile; do \
+		name=$$(security cms -D -i "$$p" 2>/dev/null | plutil -extract Name raw -o - -); \
+		case "$$name" in \
+			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor") APP_PROFILE="$$p" ;; \
+			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor.NE") NE_PROFILE="$$p" ;; \
+			"Mac Team Direct Provisioning Profile: com.jacobgroundwater.Tractor.ES") ES_PROFILE="$$p" ;; \
+		esac; \
+	done; \
+	test -n "$$APP_PROFILE" && test -n "$$NE_PROFILE" && test -n "$$ES_PROFILE" \
+		|| { echo "ERROR: missing Developer ID profile for Tractor / .NE / .ES in $$PROFILES_DIR"; exit 1; }; \
+	cp "$$APP_PROFILE" "$(DEBUG_APP)/Contents/embedded.provisionprofile"; \
+	cp "$$NE_PROFILE" "$(DEBUG_APP)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension/Contents/embedded.provisionprofile"; \
+	cp "$$ES_PROFILE" "$(DEBUG_APP)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension/Contents/embedded.provisionprofile"
+	codesign --force --sign "$(DEV_ID_APP)" \
+		--entitlements pkg/TractorNE.dist.entitlements \
+		"$(DEBUG_APP)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.NE.systemextension"
+	codesign --force --sign "$(DEV_ID_APP)" \
+		--entitlements Sources/TractorES/TractorES.entitlements \
+		"$(DEBUG_APP)/Contents/Library/SystemExtensions/com.jacobgroundwater.Tractor.ES.systemextension"
+	codesign --force --sign "$(DEV_ID_APP)" \
+		--entitlements pkg/TractorApp.dist.entitlements \
+		"$(DEBUG_APP)"
+	@echo "Debug build signed:"
+	@codesign -dv --verbose=2 "$(DEBUG_APP)" 2>&1 | grep -E "TeamIdentifier|Authority=Developer" | head -2 || true
 
 # Auto-increment sysext build number so macOS recognizes replacement.
 # project.yml is the source of truth (xcodegen injects its info.properties at
