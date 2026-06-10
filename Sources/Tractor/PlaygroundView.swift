@@ -410,10 +410,6 @@ final class PlaygroundModel: ObservableObject {
     }
 
     func run(name: String, source: String, args: [String], scriptID: String) {
-        guard ESXPCClient.isAvailable() else {
-            appendSyntheticError("Endpoint Security extension isn't active. Run `sudo tractor activate endpoint-security` first.")
-            return
-        }
         // Replace any currently-running playground program first. Wait for the
         // teardown to finish so its unload can't race the new load when the
         // program name is reused.
@@ -447,18 +443,36 @@ final class PlaygroundModel: ObservableObject {
                 self?.loadedProgramName = nil
             }
         }
-        c.start()
         client = c
-
-        if let err = c.loadProgram(name: name, source: source, args: args) {
-            appendSyntheticError("Load failed: \(err)")
-            c.stopAsync()
-            client = nil
-            return
-        }
-        loadedProgramName = name
         runningID = scriptID
         runningName = name
+
+        // The availability probe and program compile both block on the sysext
+        // (1s / 5s timeouts), so the connection is brought up off the main
+        // thread. `client === c` guards against the user stopping mid-load;
+        // connection invalidation then unloads anything this client loaded.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let error: String?
+            if ESXPCClient.isAvailable() {
+                c.start()
+                error = c.loadProgram(name: name, source: source, args: args)
+                    .map { "Load failed: \($0)" }
+            } else {
+                error = "Endpoint Security extension isn't active. Run `sudo tractor activate endpoint-security` first."
+            }
+            Task { @MainActor in
+                guard let self = self, self.client === c else { return }
+                if let error = error {
+                    self.appendSyntheticError(error)
+                    c.stopAsync()
+                    self.client = nil
+                    self.runningID = nil
+                    self.runningName = nil
+                    return
+                }
+                self.loadedProgramName = name
+            }
+        }
     }
 
     func stop() {

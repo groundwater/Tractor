@@ -183,6 +183,31 @@ final class TraceSession {
         isRunning = false
     }
 
+    /// Async variant of `stop()` for UI callers — the final ES event drain
+    /// blocks for up to a second, so it must not run on the main thread. The
+    /// SQLite log closes only after the drain has delivered its last events.
+    func stopAsync(completion: (() -> Void)? = nil) {
+        guard isRunning else { completion?(); return }
+        isRunning = false
+        let es = esClient
+        esClient = nil
+        flowClient?.stop()
+        flowClient = nil
+        let sql = sqliteLog
+        sqliteLog = nil
+        guard let es = es else {
+            sql?.close()
+            completion?()
+            return
+        }
+        es.stopAsync {
+            DispatchQueue.global(qos: .userInitiated).async {
+                sql?.close()
+                DispatchQueue.main.async { completion?() }
+            }
+        }
+    }
+
     /// Try to (re)start the network FlowXPCClient against the running session.
     /// Used when the user activates the NE *after* the trace session is up:
     /// the original `startFlowClient` call already returned no-op'd because

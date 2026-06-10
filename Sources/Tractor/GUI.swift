@@ -401,7 +401,7 @@ final class TraceRunner: ObservableObject {
     }
 
     func stop() {
-        session?.stop()
+        session?.stopAsync()
         session = nil
         sink = nil
         appliedPids.removeAll()
