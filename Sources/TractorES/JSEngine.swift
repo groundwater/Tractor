@@ -531,7 +531,12 @@ final class JSEngine {
         let ctx = program.context
         let weakProg = WeakBox(program)
 
-        ctx.exceptionHandler = { [weak self] _, exc in
+        ctx.exceptionHandler = { [weak self] context, exc in
+            // Re-raise: a custom handler replaces JSContext's default (which
+            // assigns context.exception), so without this line loadProgram's
+            // compile check never sees syntax errors and broken programs
+            // "load" with zero probes.
+            context?.exception = exc
             guard let self = self, let exc = exc,
                   let prog = weakProg.value else { return }
             let message = exc.toString() ?? "<?>"

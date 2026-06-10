@@ -128,11 +128,38 @@ struct PlaygroundView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
+            if let err = model.lastError {
+                errorBanner(err)
+                Divider()
+            }
             CodeEditorView(text: $model.editorText, isEditable: true)
                 .onChange(of: model.editorText) { _, new in
                     model.dirty = (currentScript.map { library.source(of: $0) } ?? "") != new
                 }
         }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.callout)
+                .textSelection(.enabled)
+                .lineLimit(4)
+            Spacer()
+            Button {
+                model.lastError = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.red.opacity(0.08))
     }
 
     private var toolbar: some View {
@@ -433,6 +460,9 @@ final class PlaygroundModel: ObservableObject {
     @Published private(set) var panels: [String: String] = [:]
     @Published private(set) var runningID: String? = nil
     @Published private(set) var runningName: String? = nil
+    /// Most recent run/load failure, shown as a banner in the editor pane.
+    /// Cleared on the next run attempt or when dismissed.
+    @Published var lastError: String? = nil
     @Published private(set) var otherProgramCount: Int = 0
 
     private var client: ESXPCClient?
@@ -464,6 +494,7 @@ final class PlaygroundModel: ObservableObject {
     private func beginRun(name: String, source: String, args: [String], scriptID: String) {
         emits.removeAll(keepingCapacity: true)
         panels.removeAll()
+        lastError = nil
 
         let c = ESXPCClient()
         c.onEmitRecord = { [weak self] record in
@@ -481,6 +512,7 @@ final class PlaygroundModel: ObservableObject {
         c.onConnectionError = { [weak self] err in
             Task { @MainActor in
                 self?.appendSyntheticError("XPC error: \(err.localizedDescription)")
+                self?.lastError = "Lost the Endpoint Security connection: \(err.localizedDescription)"
                 self?.runningID = nil
                 self?.runningName = nil
                 self?.loadedProgramName = nil
@@ -507,6 +539,7 @@ final class PlaygroundModel: ObservableObject {
                 guard let self = self, self.client === c else { return }
                 if let error = error {
                     self.appendSyntheticError(error)
+                    self.lastError = error
                     c.stopAsync()
                     self.client = nil
                     self.runningID = nil
