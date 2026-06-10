@@ -122,6 +122,10 @@ struct ProcessTableRow: Identifiable, Hashable {
     let pidLabel: String          // "1234" for processes, "" for groups
     let fileOpCount: Int
     let connectionCount: Int
+    /// Own count plus all (visible) descendants' — shown for group rows and
+    /// collapsed parents so collapsing doesn't hide subtree activity.
+    let subtreeFileOpCount: Int
+    let subtreeConnectionCount: Int
     let exited: Bool
     let exitStatus: Int32?
     let isGroup: Bool
@@ -155,13 +159,17 @@ struct ProcessTableRow: Identifiable, Hashable {
             } ?? false
             if !selfMatches && kids.isEmpty { return nil }
         }
+        let ownFile = node?.fileOpCount ?? 0
+        let ownConn = node?.connectionCount ?? 0
         return ProcessTableRow(
             id: id,
             kind: .process(pid),
             name: node?.name ?? "pid \(pid)",
             pidLabel: "\(pid)",
-            fileOpCount: node?.fileOpCount ?? 0,
-            connectionCount: node?.connectionCount ?? 0,
+            fileOpCount: ownFile,
+            connectionCount: ownConn,
+            subtreeFileOpCount: ownFile + kids.reduce(0) { $0 + $1.subtreeFileOpCount },
+            subtreeConnectionCount: ownConn + kids.reduce(0) { $0 + $1.subtreeConnectionCount },
             exited: node?.exitStatus != nil,
             exitStatus: node?.exitStatus,
             isGroup: false,
@@ -177,6 +185,7 @@ struct ProcessTableRow: Identifiable, Hashable {
             name: "(waiting for matches…)",
             pidLabel: "",
             fileOpCount: 0, connectionCount: 0,
+            subtreeFileOpCount: 0, subtreeConnectionCount: 0,
             exited: false, exitStatus: nil,
             isGroup: false, placeholder: true,
             children: nil
@@ -199,6 +208,8 @@ struct ProcessTableRow: Identifiable, Hashable {
             name: group.label,
             pidLabel: kidRows.isEmpty ? "" : "\(kidRows.count)",
             fileOpCount: 0, connectionCount: 0,
+            subtreeFileOpCount: kidRows.reduce(0) { $0 + $1.subtreeFileOpCount },
+            subtreeConnectionCount: kidRows.reduce(0) { $0 + $1.subtreeConnectionCount },
             exited: false, exitStatus: nil,
             isGroup: true, placeholder: false,
             children: kids
@@ -303,11 +314,11 @@ private struct ProcessTableView: View {
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Disk") { entry in
-                countCell(entry.row.isGroup || entry.row.placeholder ? nil : entry.row.fileOpCount)
+                countCell(displayCount(entry, own: \.fileOpCount, subtree: \.subtreeFileOpCount))
             }
             .width(min: 50, ideal: 60, max: 80)
             TableColumn("Network") { entry in
-                countCell(entry.row.isGroup || entry.row.placeholder ? nil : entry.row.connectionCount)
+                countCell(displayCount(entry, own: \.connectionCount, subtree: \.subtreeConnectionCount))
             }
             .width(min: 60, ideal: 80, max: 110)
             TableColumn("Status") { entry in
@@ -317,6 +328,17 @@ private struct ProcessTableView: View {
         }
         .onKeyPress(.leftArrow) { handleLeftArrow(flat: flat) }
         .onKeyPress(.rightArrow) { handleRightArrow(flat: flat) }
+    }
+
+    /// nil for placeholders; subtree roll-up for group rows and collapsed
+    /// parents (so collapsing doesn't hide descendant activity); own count
+    /// otherwise.
+    private func displayCount(_ entry: FlatProcessRow,
+                              own: KeyPath<ProcessTableRow, Int>,
+                              subtree: KeyPath<ProcessTableRow, Int>) -> Int? {
+        if entry.row.placeholder { return nil }
+        let rolled = entry.row.isGroup || (entry.hasChildren && collapsed.contains(entry.id))
+        return entry.row[keyPath: rolled ? subtree : own]
     }
 
     /// Counts render as dim dashes when zero so active rows stand out.
